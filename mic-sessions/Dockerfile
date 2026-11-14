@@ -61,7 +61,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 # Standalone Claude Code CLI driven by the Claude CLI adapter (AGENT_CLAUDE_CLI); the SDK adapter keeps the
 # copy its pinned SDK bundles. Pinned so both adapters can move independently; never auto-updated.
-ARG CLAUDE_CODE_VERSION=2.1.310
+ARG CLAUDE_CODE_VERSION=2.1.325
 RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version \
     && rm -rf /root/.npm
