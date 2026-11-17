@@ -10,6 +10,8 @@ interface AuthorizationCodePairingProps {
   provider: string;
   name: string;
   copy: AgentProviderCopy['signIn'];
+  /** Signs this existing account in again instead of adding one. */
+  connectionId?: string;
   onConnected: () => void;
 }
 
@@ -18,7 +20,7 @@ interface AuthorizationCodePairingProps {
  * Claude Code sign-in (Anthropic's page), since that client only redirects there. The code is redeemed by the API with the state it signed, so this
  * component never handles a token.
  */
-export const AuthorizationCodePairing = ({ provider, name, copy, onConnected }: AuthorizationCodePairingProps) => {
+export const AuthorizationCodePairing = ({ provider, name, copy, connectionId, onConnected }: AuthorizationCodePairingProps) => {
   const [attempt, setAttempt] = useState<AgentAuthorizationResponse | null>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -36,7 +38,7 @@ export const AuthorizationCodePairing = ({ provider, name, copy, onConnected }: 
     if (!attempt || !code.trim()) return;
     setBusy(true);
     setError(null);
-    completeAgentAuthorization(provider, code.trim(), attempt.state, name)
+    completeAgentAuthorization(provider, code.trim(), attempt.state, name, connectionId)
       .then((connection) => {
         useAgentsStore.getState().upsertConnection(connection);
         onConnected();
@@ -64,7 +66,8 @@ export const AuthorizationCodePairing = ({ provider, name, copy, onConnected }: 
         <KeyRound className="size-4 shrink-0 text-ink-subtle" />
         <input value={code} onChange={(event) => setCode(event.target.value)} disabled={busy}
           onKeyDown={(event) => { if (event.key === 'Enter') connect(); }}
-          placeholder="Paste the code" autoComplete="off" spellCheck={false}
+          placeholder="Paste the code" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+          enterKeyHint="done"
           className="h-full min-w-0 flex-1 bg-transparent text-sm text-ink outline-none" />
       </span>
     </label>

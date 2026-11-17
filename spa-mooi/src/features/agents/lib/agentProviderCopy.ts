@@ -11,7 +11,7 @@ const COPY: Record<string, AgentProviderCopy> = {
     signIn: {
       action: 'Continue with Claude',
       instructions: 'Sign in with your Claude account and authorize Claude Code. Then copy the code Anthropic shows and paste it here.',
-      codeHint: 'The code works once and expires after a few minutes.',
+      codeHint: 'The code works once and expires after a few minutes. If the app reloads while you sign in, reopen this step and paste it all the same.',
     },
     pasted: { label: 'Claude setup token', placeholder: 'sk-ant-oat01-…', hint: 'Create it with', command: 'claude setup-token', hintEnd: ' on your machine.' },
   },

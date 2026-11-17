@@ -84,7 +84,10 @@ from it. Where they differ, this context wins over the current implementation (s
   performed by `agy` itself, the code Google shows pasted back; no API key). The platform alone renews
   Claude's sign-in tokens, so concurrent sessions of one account never race, and live sessions pick up a
   renewed token on their next message; the exception is Antigravity: `agy` renews its own sign-in inside a
-  session and the platform stores the renewed bundle for the next one.
+  session and the platform stores the renewed bundle for the next one. The platform renews every Claude
+  sign-in in the background as Claude Code does, so an account stays signed in as long as the provider
+  keeps the grant; an outage never signs it out, and an account the provider did sign out is flagged on the
+  account page and signed in again in place.
 - **Agentic merge**: merging an outdated branch with conflicts makes the agent resolve them, preserving
   both sides' features.
 
