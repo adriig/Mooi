@@ -1,0 +1,15 @@
+databaseChangeLog:
+  - changeSet:
+      id: 040-opencode-provider
+      author: mooi
+      comment: OpenCode joins the agent providers through its official CLI and an encrypted API key
+      changes:
+        - sql:
+            sql: INSERT INTO agent_engine_defaults (provider, session_adapter) VALUES ('opencode', 'acp') ON CONFLICT DO NOTHING
+      rollback:
+        - sql:
+            sql: |
+              DELETE FROM agent_account_preferences
+              WHERE connection_id IN (SELECT id FROM agent_connections WHERE provider = 'opencode');
+              DELETE FROM agent_connections WHERE provider = 'opencode';
+              DELETE FROM agent_engine_defaults WHERE provider = 'opencode';

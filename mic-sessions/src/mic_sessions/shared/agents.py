@@ -80,7 +80,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from mic_sessions.shared import antigravity, claude_cli
+from mic_sessions.shared import antigravity, claude_cli, opencode
 from mic_sessions.shared.agent_conduct import conduct_instructions
 from mic_sessions.shared.browser import playwright_server
 from mic_sessions.shared.env import get_settings
@@ -3770,6 +3770,360 @@ async def _antigravity_write_back(home: Path, credential: Credential) -> None:
         LOG.warning("The renewed Antigravity sign-in could not be saved", exc_info=True)
 
 
+OPENCODE_CAPABILITIES = AgentCapabilities(
+    streaming=True,
+    thinking=True,
+    interrupt=True,
+    images=True,
+)
+
+
+class _OpenCodeStream:
+    """Coalesces ACP text deltas into Mooi's streaming and final message events."""
+
+    def __init__(self, publish: Callable[[AgentEvent], Awaitable[None]]) -> None:
+        self._publish = publish
+        self._kind: str | None = None
+        self._identity: str | None = None
+        self._parts: list[str] = []
+
+    async def chunk(self, kind: str, text: str) -> None:
+        if not text:
+            return
+        if kind != self._kind:
+            await self.close()
+            self._kind, self._identity = kind, uuid4().hex
+        self._parts.append(text)
+        await self._publish(assistant_delta(self._identity or "", text) if kind == "assistant"
+                            else thinking_delta(self._identity or "", text))
+
+    async def close(self) -> None:
+        if self._kind and self._parts:
+            text = "".join(self._parts)
+            await self._publish(assistant_message(self._identity or uuid4().hex, text)
+                                if self._kind == "assistant"
+                                else thinking_message(self._identity or uuid4().hex, text))
+        self._kind, self._identity, self._parts = None, None, []
+
+
+def _opencode_failure(error: BaseException) -> str:
+    detail = error.detail.lower() if isinstance(error, opencode.OpenCodeError) else ""
+    if ("api key" in detail or "401" in detail or "403" in detail or "credential" in detail
+            or "authentication required" in detail or "provider authentication" in detail):
+        return "OpenCode rejected the API key. Replace it in your agent accounts."
+    if "limit" in detail or "quota" in detail or "429" in detail:
+        return "OpenCode reports that this account reached its usage limit. Try again later or switch model."
+    return "OpenCode could not complete the turn. Check the account and try again."
+
+
+def _opencode_tool(update: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    raw = update.get("rawInput") or update.get("input")
+    input_data = dict(raw) if isinstance(raw, Mapping) else {}
+    kind = str(update.get("kind") or "").strip()
+    title = str(update.get("title") or "").strip()
+    name = str(update.get("toolName") or update.get("name") or kind or title or "Tool")
+    locations = update.get("locations")
+    if isinstance(locations, list) and locations and isinstance(locations[0], Mapping):
+        path = locations[0].get("path")
+        if path and not any(key in input_data for key in ("file_path", "path")):
+            input_data["file_path"] = path
+    return name, title or _tool_title(name, input_data), input_data
+
+
+class OpenCodeAcpAgentRuntime:
+    """Official OpenCode CLI through ACP, isolated per Mooi session and API-key account."""
+
+    capabilities: ClassVar[AgentCapabilities] = OPENCODE_CAPABILITIES
+    _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar("opencode_catalog", default=None)
+    _catalogs: ClassVar[dict[str, tuple[float, dict[str, Any]]]] = {}
+
+    @classmethod
+    async def load_configuration(cls, credential: Credential, refresh: bool = False) -> None:
+        key = credential.connection_id or ""
+        cached = cls._catalogs.get(key)
+        if not refresh and cached and cached[0] > time.monotonic():
+            cls._catalog.set(cached[1])
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="mooi-opencode-models-") as directory:
+                models, selected = await opencode.models(credential, get_settings().agent_opencode_cli,
+                                                         Path(directory), refresh=refresh)
+        except opencode.OpenCodeError as error:
+            LOG.warning("Could not load OpenCode models: %s", error)
+            raise ApiException(502, _opencode_failure(error)) from None
+        default = selected or models[0]["id"]
+        catalog = {"id": "opencode", "label": "OpenCode", "models": models,
+                   "defaultModel": default, "defaultEffort": None}
+        if key:
+            cls._catalogs[key] = (time.monotonic() + 300, catalog)
+        cls._catalog.set(catalog)
+
+    @classmethod
+    def configuration(cls) -> dict[str, Any]:
+        return cls._catalog.get() or {"id": "opencode", "label": "OpenCode", "models": [],
+                                      "defaultModel": "", "defaultEffort": None,
+                                      "unavailable": "OpenCode models have not loaded yet."}
+
+    @classmethod
+    def configure(cls, model: str | None, effort: str | None) -> AgentConfig:
+        catalog = cls.configuration()
+        selected = model or catalog.get("defaultModel")
+        if not selected or not any(entry["id"] == selected for entry in catalog.get("models", [])):
+            raise ApiException.bad_request("Unknown OpenCode model")
+        return AgentConfig(selected, None)
+
+    def __init__(self, credential: Credential, workspace: Path, branch: str, emit: Emit, ask: Ask,
+                 config: AgentConfig, *, instructions: str = "",
+                 environment: Mapping[str, str] | None = None) -> None:
+        self._credential = credential
+        self._workspace = workspace.resolve()
+        self._branch = branch
+        self._emit = emit
+        self._ask = ask
+        self._config = config
+        self._instructions = instructions.strip()
+        self._environment = dict(environment or {})
+        self._home: Path | None = None
+        self._acp: opencode.Acp | None = None
+        self._session_id: str | None = None
+        self._loading = False
+        self._task: asyncio.Task[None] | None = None
+        self._stream = _OpenCodeStream(self._publish)
+        self._open_tools: set[str] = set()
+        self._closing = False
+        self._interrupted = False
+        self._sent_instructions = False
+        self._recovery_lock = asyncio.Lock()
+
+    async def _publish(self, event: AgentEvent) -> None:
+        await self._emit(event["type"], event["data"])
+
+    def _binary(self) -> str:
+        return opencode.executable(get_settings().agent_opencode_cli)
+
+    def _process_env(self) -> dict[str, str]:
+        if self._home is None:
+            raise ApiException.conflict("OpenCode session is closed")
+        return opencode.environment(self._home, self._credential, self._environment)
+
+    async def start(self) -> None:
+        await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+        self._home = Path(tempfile.mkdtemp(prefix="opencode-", dir=self._workspace.parent))
+        await asyncio.to_thread(opencode.prepare_home, self._home)
+        await self._connect()
+        await self._emit("session.usage", {"context": None})
+
+    async def _connect(self) -> None:
+        if self._home is None:
+            raise ApiException.conflict("OpenCode session is closed")
+        acp = opencode.Acp([self._binary(), "acp"], cwd=self._workspace, env=self._process_env(),
+                           trace=opencode.trace_path(self._home), updates=self._on_update,
+                           requests=self._on_request)
+        try:
+            await acp.start()
+            params = {"cwd": str(self._workspace), "mcpServers": []}
+            if self._session_id is None:
+                session = await acp.request("session/new", params)
+                self._session_id = str(session["sessionId"])
+            else:
+                self._loading = True
+                try:
+                    session = await acp.request("session/load", {**params, "sessionId": self._session_id}, timeout=120)
+                finally:
+                    self._loading = False
+            option = opencode.model_option(session or {})
+            current = option.get("currentValue") if option else None
+            if current != self._config.model:
+                await acp.request("session/set_config_option", {
+                    "sessionId": self._session_id, "configId": "model", "value": self._config.model,
+                })
+        except BaseException:
+            await acp.close()
+            raise
+        previous, self._acp = self._acp, acp
+        if previous is not None:
+            await previous.close()
+
+    def _require_acp(self) -> opencode.Acp:
+        if self._closing or self._acp is None:
+            raise ApiException.conflict("OpenCode session is closed")
+        return self._acp
+
+    async def send(self, text: str, images: Sequence[Image] = ()) -> None:
+        if self._task and not self._task.done():
+            raise ApiException.conflict("An OpenCode turn is already running")
+        await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+        prompt: list[dict[str, Any]] = [
+            {"type": "image", "mimeType": image.media_type, "data": image.base64()} for image in images
+        ]
+        content = text
+        if not self._sent_instructions and self._instructions:
+            content = f"<mooi_instructions>\n{self._instructions}\n</mooi_instructions>\n\n{content}"
+            self._sent_instructions = True
+        if content:
+            prompt.append({"type": "text", "text": content})
+        self._interrupted = False
+        self._task = asyncio.create_task(self._run(self._require_acp(), prompt))
+        await asyncio.sleep(0)
+
+    async def _run(self, acp: opencode.Acp, prompt: list[dict[str, Any]]) -> None:
+        terminal, subtype, usage = "error", None, None
+        recovering = False
+        started = time.monotonic()
+        try:
+            result = await acp.request("session/prompt", {"sessionId": self._session_id, "prompt": prompt}, timeout=None)
+            reason = (result or {}).get("stopReason")
+            terminal = "interrupted" if reason == "cancelled" or self._interrupted else "completed"
+            subtype = reason if reason not in (None, "end_turn", "cancelled") else None
+            tokens = (result or {}).get("usage") or {}
+            if tokens:
+                usage = {"input_tokens": tokens.get("inputTokens"), "output_tokens": tokens.get("outputTokens"),
+                         "cache_read_input_tokens": tokens.get("cachedReadTokens")}
+        except asyncio.CancelledError:
+            terminal = "interrupted"
+            raise
+        except opencode.OpenCodeError as error:
+            if self._interrupted:
+                terminal = "interrupted"
+            elif not acp.alive and not self._closing:
+                recovering = True
+            else:
+                await self._publish(agent_error(_opencode_failure(error)))
+        except Exception:
+            LOG.exception("The OpenCode turn failed")
+            await self._publish(agent_error("OpenCode could not complete the turn. Check the account and try again."))
+        finally:
+            await self._stream.close()
+            for identity in list(self._open_tools):
+                await self._publish(tool_result(identity, True, "The step did not finish"))
+            self._open_tools.clear()
+            if not self._closing and not recovering:
+                await self._publish(turn_result(terminal, subtype=subtype,
+                                                duration_ms=int((time.monotonic() - started) * 1000), usage=usage))
+        if recovering:
+            await self._recover_stream(acp.failure or RuntimeError("the OpenCode agent process exited"))
+
+    async def _on_update(self, params: dict[str, Any]) -> None:
+        if self._loading or params.get("sessionId") != self._session_id:
+            return
+        update = params.get("update") if isinstance(params.get("update"), dict) else {}
+        kind = update.get("sessionUpdate")
+        content = update.get("content") if isinstance(update.get("content"), dict) else {}
+        if kind == "agent_message_chunk":
+            await self._stream.chunk("assistant", str(content.get("text") or ""))
+        elif kind == "agent_thought_chunk":
+            await self._stream.chunk("thinking", str(content.get("text") or ""))
+        elif kind == "tool_call":
+            await self._stream.close()
+            identity = str(update.get("toolCallId") or uuid4().hex)
+            name, title, input_data = _opencode_tool(update)
+            self._open_tools.add(identity)
+            await self._publish(tool_use(identity, name, title, input_data))
+        elif kind == "tool_call_update" and update.get("status") in ("completed", "failed"):
+            identity = str(update.get("toolCallId") or "")
+            if identity not in self._open_tools:
+                name, title, input_data = _opencode_tool(update)
+                await self._publish(tool_use(identity, name, title, input_data))
+            self._open_tools.discard(identity)
+            await self._publish(tool_result(identity, update.get("status") == "failed",
+                                            _result_summary(update.get("content"))))
+        elif kind == "usage_update":
+            used, size = update.get("used"), update.get("size")
+            if isinstance(used, int) and isinstance(size, int) and size > 0:
+                await self._emit("session.usage", {"context": {"used": used, "size": size}})
+
+    async def _on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "session/request_permission":
+            raise RuntimeError(f"Unsupported OpenCode request {method}")
+        options = params.get("options") or []
+        if self._interrupted or self._closing:
+            return {"outcome": {"outcome": "cancelled"}}
+        selected = next((item for item in options if item.get("kind") == "allow_once"), None) or next(
+            (item for item in options if str(item.get("kind", "")).startswith("allow")), None)
+        return ({"outcome": {"outcome": "selected", "optionId": selected["optionId"]}}
+                if selected else {"outcome": {"outcome": "cancelled"}})
+
+    async def resolve(self, request_id: str, payload: dict[str, Any]) -> None:
+        raise ApiException.not_found("Unknown or already answered request")
+
+    async def refresh_usage(self) -> None:
+        return None
+
+    async def set_configuration(self, config: AgentConfig) -> AgentConfig:
+        if config.model != self._config.model and self._session_id is not None:
+            await self._require_acp().request("session/set_config_option", {
+                "sessionId": self._session_id, "configId": "model", "value": config.model,
+            })
+        self._config = config
+        return config
+
+    async def interrupt(self) -> None:
+        self._interrupted = True
+        if self._session_id is not None and self._task and not self._task.done():
+            try:
+                await self._require_acp().notify("session/cancel", {"sessionId": self._session_id})
+            except Exception:
+                self._task.cancel()
+
+    async def compact(self, instructions: str | None = None) -> None:
+        if self._session_id is None:
+            raise ApiException.conflict("There is no conversation to compact yet")
+        params: dict[str, Any] = {"sessionId": self._session_id}
+        if instructions:
+            params["instructions"] = instructions
+        try:
+            await self._require_acp().request("session/compact", params, timeout=None)
+        except opencode.OpenCodeError:
+            # OpenCode versions that do not advertise manual compaction still accept its native command.
+            await self._require_acp().request("session/prompt", {
+                "sessionId": self._session_id,
+                "prompt": [{"type": "text", "text": "/compact" + (f" {instructions}" if instructions else "")}],
+            }, timeout=None)
+        await self._emit("session.usage", {"context": None})
+
+    async def recover(self) -> None:
+        if self._closing:
+            raise ApiException.conflict("OpenCode session is closed")
+        async with self._recovery_lock:
+            await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
+            await self._connect()
+            self._interrupted = False
+
+    async def _recover_stream(self, error: BaseException) -> None:
+        LOG.error("The OpenCode ACP process failed", exc_info=error)
+        await self._publish(agent_error(
+            f"{_INTERRUPTED_MESSAGE}. Restoring the OpenCode conversation; workspace changes are kept."))
+        for attempt in range(get_settings().agent_recovery_attempts):
+            if attempt:
+                await asyncio.sleep(2 ** attempt)
+            try:
+                await self.recover()
+                await self._publish(turn_result("error", subtype="stream_interrupted"))
+                return
+            except Exception:
+                LOG.warning("OpenCode relaunch attempt %s failed", attempt + 1, exc_info=True)
+        await self._publish(session_status(STATUS_FAILED, RECOVERABLE_DETAIL))
+
+    async def close(self) -> None:
+        self._closing = True
+        if self._task and not self._task.done():
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        if self._acp is not None:
+            await self._acp.close()
+            self._acp = None
+        if self._home is not None:
+            await asyncio.to_thread(shutil.rmtree, self._home, True)
+            self._home = None
+
+    def trace_sources(self) -> Sequence[TraceSource]:
+        return [TraceSource("opencode", opencode.trace_path(self._home))] if self._home is not None else []
+
+    async def aside(self, question: str) -> AsyncIterator[str]:
+        raise ApiException.conflict("Side questions are not available for OpenCode sessions")
+        yield ""
+
+
 @dataclass(frozen=True)
 class AdapterDescriptor:
     """One implementation of a provider: the integration technology behind the same contract."""
@@ -3850,6 +4204,9 @@ PROVIDERS: dict[str, ProviderDescriptor] = {
     # Google ships no agent SDK: the one adapter drives the pinned Antigravity CLI (`agy`) natively.
     "antigravity": ProviderDescriptor("antigravity", "Antigravity", (
         AdapterDescriptor("cli", "Antigravity CLI", AntigravityCliAgentRuntime),
+    )),
+    "opencode": ProviderDescriptor("opencode", "OpenCode", (
+        AdapterDescriptor("acp", "OpenCode CLI", OpenCodeAcpAgentRuntime),
     )),
 }
 

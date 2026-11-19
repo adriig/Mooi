@@ -66,6 +66,13 @@ RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE
     && claude --version \
     && rm -rf /root/.npm
 
+# Official OpenCode CLI driven through its Agent Client Protocol adapter. Pin the exact release: its
+# ACP config-option and streaming shapes are part of the adapter contract.
+ARG OPENCODE_VERSION=2.3.2
+RUN npm install -g --no-audit --no-fund "@opencode/cli@${OPENCODE_VERSION}" \
+    && opencode --version \
+    && rm -rf /root/.npm
+
 # Antigravity CLI (`agy`) driven by the Antigravity CLI adapter (AGENT_ANTIGRAVITY_CLI) through its headless
 # stream-json mode. Pinned per architecture (version, build id and SHA512 come from Google's updater manifest
 # https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_<amd64|arm64>.json; to

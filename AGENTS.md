@@ -49,7 +49,7 @@ from it. Where they differ, this context wins over the current implementation (s
 
 - Many sessions per project, technically independent: each has its own branch and its own repository copy
   (worktree/clone), so features progress in parallel without interfering.
-- Chat UX like Claude Code / Codex. Supported providers: **Claude**, **Codex** and **Antigravity**.
+- Chat UX like Claude Code / Codex. Supported providers: **Claude**, **Codex**, **Antigravity** and **OpenCode**.
 - Live view of what the agent does and of changed files on the session branch.
 - **Message queue**: messages sent while the agent is busy (a turn, a compaction, a deployment start) wait
   in the chat's queue, kept by the platform and shown live on every device. Each turn's end delivers the
@@ -59,7 +59,8 @@ from it. Where they differ, this context wins over the current implementation (s
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK; Antigravity, which ships no agent SDK: one adapter, **Antigravity CLI**, which
-  drives the `agy` CLI natively through its headless stream-json mode). Each adapter supports every session
+  drives the `agy` CLI natively through its headless stream-json mode; OpenCode: **OpenCode CLI**, driven
+  through ACP with an OpenCode Console API key). Each adapter supports every session
   feature (streaming, questions, interrupt, compaction, model/effort, context and limit KPIs) in its own
   way; a session picks one with its model and effort and keeps it.
 - A **Files** tab, always visible in a development session: a project view of the session's working tree
@@ -77,7 +78,8 @@ from it. Where they differ, this context wins over the current implementation (s
   agent-loop iteration each: an LLM call with tokens, cache and context size, then the tools it requested),
   nested sub-agents, skills, hooks, injected context, compactions and errors, as a live timeline with an
   inspector and usage insights. **Download log** saves the raw agent session logs the trace was built from
-  (Claude transcripts and sub-agent files, Codex rollouts, Antigravity stream and brain transcripts), kept
+  (Claude transcripts and sub-agent files, Codex rollouts, Antigravity stream and brain transcripts,
+  OpenCode ACP logs), kept
   for cleared conversations too. Available in development sessions (including the first dev deployment
   setup), production and backup chats, for every adapter.
 - Multiple provider accounts, including several of the same provider; sessions of one project may use the
@@ -85,7 +87,8 @@ from it. Where they differ, this context wins over the current implementation (s
 - Provider accounts link by each provider's own sign-in: Claude like the Claude Code app (OAuth2 + PKCE,
   the code Anthropic shows pasted back; a `claude setup-token` token only when operators turn sign-in
   off, and for existing links), Codex by device code, Antigravity like the Antigravity CLI signs in (Google OAuth2
-  performed by `agy` itself, the code Google shows pasted back; no API key). The platform alone renews
+  performed by `agy` itself, the code Google shows pasted back; no API key), and OpenCode with an encrypted
+  OpenCode Console API key. The platform alone renews
   Claude's sign-in tokens, so concurrent sessions of one account never race, and live sessions pick up a
   renewed token on their next message; the exception is Antigravity: `agy` renews its own sign-in inside a
   session and the platform stores the renewed bundle for the next one. The platform renews every Claude

@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     # sets none: agy's own default, Gemini 4 Argon at medium effort.
     agent_antigravity_model: str = "gemini-4-argon"
     agent_antigravity_effort: str = "medium"
+    # Official OpenCode CLI used by the ACP adapter (the image pins it).
+    agent_opencode_cli: str = "opencode"
     # Reconnections tried, with backoff, when a provider stream breaks before the session fails.
     agent_recovery_attempts: int = Field(default=3, ge=0, le=10)
 

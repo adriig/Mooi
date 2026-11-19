@@ -104,7 +104,8 @@ public class Agents {
         OAUTH("oauth"),
         SETUP_TOKEN("setup_token"),
         DEVICE_OAUTH("device_oauth"),
-        AGENT_OAUTH("agent_oauth");
+        AGENT_OAUTH("agent_oauth"),
+        API_KEY("api_key");
 
         private final String wire;
 
@@ -146,7 +147,7 @@ public class Agents {
 
         /** The mode a pasted credential is recorded with, if this provider accepts one. */
         public Optional<Mode> pastedMode() {
-            return modes.stream().filter(mode -> mode == Mode.SETUP_TOKEN).findFirst();
+            return modes.stream().filter(mode -> mode == Mode.SETUP_TOKEN || mode == Mode.API_KEY).findFirst();
         }
 
         /** The mode of a credential the provider's own binary signs in and renews, if it has one. */
@@ -341,7 +342,10 @@ public class Agents {
                     null, null, null);
             Provider antigravity = new Provider("antigravity", "Antigravity", List.of(Mode.AGENT_OAUTH), false, null,
                     null, null, null, null, null);
-            this.providers = Map.of(claude.id(), claude, codex.id(), codex, antigravity.id(), antigravity);
+            Provider opencode = new Provider("opencode", "OpenCode", List.of(Mode.API_KEY), false, null, null, null,
+                    null, null, null);
+            this.providers = Map.of(claude.id(), claude, codex.id(), codex, antigravity.id(), antigravity,
+                    opencode.id(), opencode);
         }
 
         public Optional<Provider> find(String id) {

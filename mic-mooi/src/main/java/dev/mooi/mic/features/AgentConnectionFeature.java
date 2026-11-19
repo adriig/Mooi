@@ -94,7 +94,7 @@ public class AgentConnectionFeature {
                 request.name(), request.connectionId());
     }
 
-    /** Always recorded as {@code setup_token}: this door never produces an OAuth-mode row. */
+    /** Records the provider's pasted credential mode: a setup token or an API key. */
     @PutMapping("/me/agents/{provider}/connection")
     @Auth.Authenticated
     public AgentConnectionPayload connectToken(@PathVariable String provider,
@@ -336,22 +336,27 @@ public class AgentConnectionFeature {
         }
 
         /**
-         * Records a pasted credential: a {@code claude setup-token} token, as the provider's {@link
-         * Agents.Provider#pastedMode()}. Not validated beyond its shape: token formats
-         * are the provider's to change, and a wrong credential already fails loudly, and safely, the first
-         * time a session tries to use it.
+         * Records a pasted credential: a {@code claude setup-token} token or an OpenCode API key, as the provider's {@link
+         * Agents.Provider#pastedMode()}. Token formats are the provider's to change, but values that are
+         * unmistakably URLs are rejected before encryption: they are commonly copied from the browser beside
+         * the key and can never authenticate a provider.
          */
         @Transactional
         public AgentConnectionPayload connectToken(UUID playerId, String provider, String token, String name) {
             Agents.Provider agentProvider = settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
             Agents.Mode mode = agentProvider.pastedMode().orElseThrow(Agents.AgentsException::invalidToken);
             String cleaned = token == null ? "" : token.strip();
-            if (cleaned.isEmpty()) {
+            if (cleaned.isEmpty() || agentProvider.id().equals("opencode") && looksLikeUrl(cleaned)) {
                 throw Agents.AgentsException.invalidToken();
             }
             AgentConnection saved = create(playerId, agentProvider, mode, new Grant(cleaned, null, null, null, null), name);
             Agents.LOG.info("Player {} linked agent provider {} ({})", playerId, agentProvider.id(), mode.wire());
             return toPayload(saved);
+        }
+
+        private static boolean looksLikeUrl(String value) {
+            return value.regionMatches(true, 0, "https://", 0, 8)
+                    || value.regionMatches(true, 0, "http://", 0, 7);
         }
 
         /**

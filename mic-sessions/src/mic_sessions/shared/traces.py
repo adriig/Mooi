@@ -39,7 +39,7 @@ from mic_sessions.shared import antigravity
 from mic_sessions.shared.env import get_settings
 
 # `antigravity`: Mooi's frame record of an Antigravity CLI session (`<home>/.mooi/stream.jsonl`).
-TraceFormat = Literal["claude", "codex", "antigravity"]
+TraceFormat = Literal["claude", "codex", "antigravity", "opencode"]
 
 KIND_PROMPT = "prompt"
 KIND_TURN = "turn"
@@ -240,6 +240,117 @@ class _Parser:
         tools = call.metadata.get("tools") or []
         turn.title = _line(", ".join(tools), _TITLE_CHARS) if tools else call.preview
         turn.preview = turn.title
+
+
+class _OpenCodeParser(_Parser):
+    """Mooi's lossless JSON-RPC record of one ``opencode acp`` conversation."""
+
+    def __init__(self, reader: TraceReader, path: Path, key: str) -> None:
+        super().__init__(reader, path, key)
+        self.requests: dict[Any, str] = {}
+        self.prompt: Span | None = None
+        self.turn: Span | None = None
+        self.call: Span | None = None
+        self.tools: dict[str, Span] = {}
+        self.text: list[str] = []
+        self.reasoning: list[str] = []
+
+    def feed(self, entry: dict[str, Any]) -> None:
+        at = _timestamp(entry.get("mooiAt"))
+        frame = entry.get("frame")
+        if at is None or not isinstance(frame, dict):
+            return
+        direction = entry.get("direction")
+        method = frame.get("method")
+        if direction == "client" and isinstance(method, str) and "id" in frame:
+            self.requests[frame["id"]] = method
+            if method == "session/prompt":
+                self._start_prompt(frame, at)
+            return
+        if direction != "agent":
+            return
+        if method == "session/update":
+            self._update(frame.get("params") or {}, at)
+            return
+        request = self.requests.pop(frame.get("id"), None)
+        if request == "session/prompt":
+            self._finish(at, STATUS_ERROR if isinstance(frame.get("error"), dict) else STATUS_OK)
+
+    def _start_prompt(self, frame: dict[str, Any], at: float) -> None:
+        self._finish(at, STATUS_INTERRUPTED)
+        params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+        blocks = params.get("prompt") if isinstance(params.get("prompt"), list) else []
+        text = "\n".join(str(block.get("text") or "") for block in blocks
+                         if isinstance(block, dict) and block.get("type") == "text")
+        self.loop = 0
+        self.prompt = self.reader.add(Span(id=f"{self.key}:prompt:{at}", kind=KIND_PROMPT, start=at,
+                                           name=f"Prompt {self.reader.next_prompt()}",
+                                           title=_line(text, _TITLE_CHARS), preview=_line(text),
+                                           input=self.reader.clip(text)))
+        self.reader.metadata["provider"] = "opencode"
+
+    def _ensure_call(self, at: float) -> tuple[Span, Span]:
+        if self.prompt is None:
+            self._start_prompt({"params": {"prompt": []}}, at)
+        if self.turn is None or self.call is None:
+            self.turn = self._open_turn(f"{self.key}:turn:{at}", at, self.prompt.id if self.prompt else None)
+            self.call = self.reader.add(Span(id=f"{self.key}:llm:{at}", kind=KIND_LLM,
+                                             name="OpenCode model call", start=at, parent=self.turn.id))
+        return self.turn, self.call
+
+    def _update(self, params: dict[str, Any], at: float) -> None:
+        update = params.get("update") if isinstance(params.get("update"), dict) else {}
+        kind = update.get("sessionUpdate")
+        content = update.get("content") if isinstance(update.get("content"), dict) else {}
+        if kind in ("agent_message_chunk", "agent_thought_chunk"):
+            _, call = self._ensure_call(at)
+            text = str(content.get("text") or "")
+            (self.text if kind == "agent_message_chunk" else self.reasoning).append(text)
+            if kind == "agent_thought_chunk":
+                call.metadata["reasoning"] = True
+            call.preview = _line("".join(self.text)) or call.preview
+            return
+        if kind not in ("tool_call", "tool_call_update"):
+            return
+        turn, call = self._ensure_call(at)
+        identity = str(update.get("toolCallId") or f"tool-{at}")
+        tool = self.tools.get(identity)
+        if tool is None:
+            name = str(update.get("toolName") or update.get("name") or update.get("kind") or "Tool")
+            raw = update.get("rawInput") or update.get("input")
+            title = str(update.get("title") or name)
+            tool = self.reader.add(Span(id=f"{self.key}:tool:{identity}", kind=KIND_TOOL, name=name,
+                                        title=title, start=at, parent=turn.id,
+                                        input=self.reader.clip(_render(raw)), preview=_line(title)))
+            tool.metadata = {"call": call.id, "callId": identity, "toolName": name}
+            self.tools[identity] = tool
+            if name not in call.metadata.setdefault("tools", []):
+                call.metadata["tools"].append(name)
+        if update.get("status") in ("completed", "failed"):
+            tool.output = self.reader.clip(_render(update.get("content")))
+            tool.close(at, STATUS_ERROR if update.get("status") == "failed" else STATUS_OK)
+            self.tools.pop(identity, None)
+
+    def _finish(self, at: float, status: str) -> None:
+        for tool in self.tools.values():
+            if tool.end is None:
+                tool.close(at, STATUS_INTERRUPTED)
+        self.tools.clear()
+        if self.call is not None:
+            output = "".join(self.text)
+            reasoning = "".join(self.reasoning)
+            self.call.output = self.reader.clip(
+                (f"[thinking]\n{reasoning}\n\n" if reasoning else "") + output)
+            self.call.preview = _line(output) or self.call.preview
+            self.call.close(at, status)
+            self._describe_turn(self.call)
+        if self.turn is not None:
+            self.turn.close(at, status)
+        if self.prompt is not None:
+            self.prompt.output = self.reader.clip("".join(self.text))
+            self.prompt.close(at, status)
+        self.prompt = self.turn = self.call = None
+        self.text, self.reasoning = [], []
 
 
 class _ClaudeParser(_Parser):
@@ -1445,6 +1556,9 @@ class TraceReader:
 
     def _discover(self, source: TraceSource) -> Iterable[tuple[Path, Path, Callable[[], _Parser]]]:
         """Each log file under `source` with the root its download name is relative to, and its parser."""
+        if source.format == "opencode":
+            yield source.path, source.path.parent, lambda: _OpenCodeParser(self, source.path, "opencode")
+            return
         if source.format == "antigravity":
             # `<home>/.mooi/stream.jsonl` is the trace; the rest of the agent's raw files (brain transcripts,
             # conversation databases, logs) sit under `<home>/.gemini/antigravity-cli` and are only offered for
