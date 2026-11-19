@@ -913,24 +913,18 @@ class SessionRegistry:
         self._sessions: dict[UUID, Session] = {}
         self._lock = asyncio.Lock()
 
-    def _check_limits(self, session: Session) -> None:
-        """The pod limit counts every live chat (each one holds a runtime). The per-player limit counts
-        only development sessions, the ones the player sees and closes in their session lists:
-        production and backup chats are already bounded to one per project and kind, and counting
-        them made the limit trip while the player's lists showed free room."""
+    def check_limits(self, player_id: UUID, max_sessions: int) -> None:
+        """Checks host capacity and the account's current limit while `add` holds the lock."""
         settings = get_settings()
         if len(self._sessions) >= settings.max_sessions:
             raise ApiException.conflict(
                 f"Mooi is running its maximum of {settings.max_sessions} chats right now. Try again shortly")
-        if session.kind != "session":
-            return
-        owned = sum(1 for existing in self._sessions.values()
-                    if existing.player_id == session.player_id and existing.kind == "session")
-        if owned >= settings.max_sessions_per_player:
-            raise ApiException.conflict(
-                f"You have {owned} open sessions, the maximum. Close one to start another")
+        owned = sum(1 for session in self._sessions.values() if session.player_id == player_id)
+        if owned >= max_sessions:
+            raise ApiException.conflict(f"You have reached your account's session limit ({max_sessions})")
 
-    async def add(self, session: Session) -> None:
+    async def add(self, session: Session, caller: Caller) -> None:
+        max_sessions = await mooi.fetch_session_limit(caller)
         async with self._lock:
             if session.kind in _PLATFORM_KINDS and any(
                 existing.player_id == session.player_id and existing.project_id == session.project_id
@@ -938,7 +932,7 @@ class SessionRegistry:
                 for existing in self._sessions.values()
             ):
                 raise ApiException.conflict(f"A {session.kind} chat already exists for this project")
-            self._check_limits(session)
+            self.check_limits(session.player_id, max_sessions)
             self._sessions[session.id] = session
         _announce(session)
 
@@ -1362,7 +1356,7 @@ async def _open_session(body: CreateSessionRequest, caller: Caller) -> Session:
         session.branch = project.default_branch
         session.platform_baseline = (await _production_documents(caller, body.projectId)).active \
             if session.kind == "production" else (await _backup_documents(caller, body.projectId)).active
-    await registry.add(session)
+    await registry.add(session, caller)
     _record_status(session, STATUS_PROVISIONING, "Preparing the workspace")
     _spawn(session, _provision(session, caller, project, body.initialMessage))
     return session
