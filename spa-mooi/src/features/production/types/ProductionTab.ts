@@ -1,1 +1,1 @@
-export type ProductionTab = 'overview' | 'chat' | 'console' | 'files' | 'changes' | 'trace';
+export type ProductionTab = 'overview' | 'environment' | 'chat' | 'console' | 'files' | 'changes' | 'trace';
