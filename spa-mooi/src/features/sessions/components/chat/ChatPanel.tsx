@@ -123,6 +123,7 @@ export const ChatPanel = ({
 
     <ChatComposer
       key={`composer-${session.id}`}
+      draftKey={session.id}
       usage={session.usage}
       status={session.status}
       deploying={deploying}
