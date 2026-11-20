@@ -56,6 +56,10 @@ from it. Where they differ, this context wins over the current implementation (s
   next one, in order, until the queue is empty, even with no device connected. Queued messages can be
   edited or removed until they go out; stopping a turn keeps the queue, and a failed session holds it until
   it reconnects. Same in development, production and backup chats.
+- **Issue planning at session creation**: a new session can receive a work description and ask its agent
+  to inspect the project, document an ordered series of actionable issues, and add them to the project's
+  shared To-dos list through the platform API. Planning does not implement the issues; existing list
+  content and concurrent edits are preserved, and unsupported To-dos content is left unchanged.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK; Antigravity, which ships no agent SDK: one adapter, **Antigravity CLI**, which
