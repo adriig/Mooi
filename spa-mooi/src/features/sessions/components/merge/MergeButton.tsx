@@ -18,7 +18,7 @@ const LISTED_CONFLICTS = 8;
  * the session's agent in a fresh conversation. Once merged, and until the workspace changes again,
  * the control stays as a quiet "Merged" state instead of disappearing.
  */
-export const MergeButton = ({ session, disabled = false }: { session: Session; disabled?: boolean }) => {
+export const MergeButton = ({ session, disabled = false, onCloseSession, closeBusy = false }: { session: Session; disabled?: boolean; onCloseSession: () => void; closeBusy?: boolean }) => {
   const changes = useSessionsStore((state) => state.byId[session.id]?.changes);
   const lastMerge = useSessionsStore((state) => state.byId[session.id]?.lastMerge ?? null);
   const { phase, result, error, check, commit, resolve, cancel } = useMerge(session.id);
@@ -28,7 +28,7 @@ export const MergeButton = ({ session, disabled = false }: { session: Session; d
 
   if (!hasChanges && !merged && phase === 'idle' && !error) return null;
 
-  if (merged && !error) {
+  if (merged && !error && phase !== 'merged') {
     const commit = result?.commit ?? lastMerge?.commit ?? null;
     const hint = phase === 'up_to_date' ? `${target} already has these changes`
       : `Merged into ${target}${commit ? ` · ${shortCommit(commit)}` : ''}`;
@@ -48,9 +48,9 @@ export const MergeButton = ({ session, disabled = false }: { session: Session; d
   const conflicts = result?.conflicts ?? [];
   const blocked = disabled || loading || session.status !== 'ready' || Boolean(session.pending)
     || session.deployment.state === 'starting' || !session.workspacePath;
-  const label = phase === 'checking' ? 'Checking…' : phase === 'resolving' ? 'Starting…'
+  const label = phase === 'merged' ? 'Merged' : phase === 'checking' ? 'Checking…' : phase === 'resolving' ? 'Starting…'
     : phase === 'merging' ? 'Merging…' : conflicted ? 'Resolve conflicts' : 'Merge';
-  const dialogOpen = phase === 'ready' || phase === 'merging';
+  const dialogOpen = phase === 'ready' || phase === 'merging' || phase === 'merged';
   const hint = dialogOpen ? null : error ?? (conflicted
     ? [`Conflicts with ${target} in ${conflicts.length} ${conflicts.length === 1 ? 'file' : 'files'}`,
       ...conflicts.slice(0, LISTED_CONFLICTS),
@@ -60,7 +60,7 @@ export const MergeButton = ({ session, disabled = false }: { session: Session; d
   return (
     <>
       <HeaderActionHint hint={hint}>
-        <Button variant={conflicted ? 'danger' : 'secondary'} size="sm" disabled={blocked} className={HEADER_ACTION_CLASS}
+        <Button variant={conflicted ? 'danger' : 'secondary'} size="sm" disabled={blocked || phase === 'merged'} className={HEADER_ACTION_CLASS}
           ariaLabel={conflicted ? `Resolve conflicts with ${target}` : `Merge into ${target}`}
           onClick={() => void (conflicted ? resolve() : check())}>
           {loading ? <LoaderCircle className="size-4 animate-spin" />
@@ -71,7 +71,9 @@ export const MergeButton = ({ session, disabled = false }: { session: Session; d
       </HeaderActionHint>
       {dialogOpen ? (
         <MergeDialog targetBranch={target} branch={session.branch} changes={changes}
-          merging={phase === 'merging'} error={error} onCancel={cancel} onCommit={(title) => void commit(title)} />
+          merging={phase === 'merging'} merged={phase === 'merged'} closeBusy={closeBusy} onCloseSession={onCloseSession}
+          branchDeleteWarning={result?.branchDeleteWarning ?? null}
+          error={error} onCancel={cancel} onCommit={(title) => void commit(title)} />
       ) : null}
     </>
   );

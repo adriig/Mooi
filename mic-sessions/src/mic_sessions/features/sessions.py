@@ -692,6 +692,7 @@ class MergePayload(BaseModel):
     targetBranch: str
     conflicts: list[str]
     commit: str | None = None
+    branchDeleteWarning: str | None = None
 
 
 # --- in-memory session record ------------------------------------------------------------------
@@ -2368,10 +2369,12 @@ def _require_mergeable(session: Session) -> None:
         raise ApiException.conflict("Wait for the agent to finish before merging")
 
 
-def _merge_payload(preview: workspaces.MergePreview, commit: str | None = None) -> MergePayload:
+def _merge_payload(preview: workspaces.MergePreview, commit: str | None = None,
+                   branch_delete_warning: str | None = None) -> MergePayload:
     state: MergeState = ("merged" if commit else "conflicts" if preview.conflicts
                          else "up_to_date" if preview.up_to_date else "clean")
-    return MergePayload(state=state, targetBranch=preview.target, conflicts=preview.conflicts, commit=commit)
+    return MergePayload(state=state, targetBranch=preview.target, conflicts=preview.conflicts, commit=commit,
+                        branchDeleteWarning=branch_delete_warning)
 
 
 def _conflict_prompt(session: Session, preview: workspaces.MergePreview) -> str:
@@ -2449,12 +2452,21 @@ async def merge_session(
         _touch(session)
         async with session.changes_lock:
             preview, commit = await workspaces.merge(session.workspace, session.base_branch, message, identity, token)
+        branch_delete_warning = None
         if commit is not None:
+            try:
+                if await mooi.delete_merged_branch_by_default(caller):
+                    await workspaces.delete_remote_branch(session.workspace, session.branch, token)
+            except Exception as failure:
+                LOG.warning("Merge succeeded but post-merge branch cleanup failed for session %s", session.id,
+                            exc_info=True)
+                branch_delete_warning = str(failure) or "The session branch could not be deleted."
             session.base_commit = commit
-            record(session, EVENT_MERGE_COMPLETED, {"targetBranch": preview.target, "commit": commit, "message": message})
+            record(session, EVENT_MERGE_COMPLETED, {"targetBranch": preview.target, "commit": commit,
+                                                    "message": message, "branchDeleteWarning": branch_delete_warning})
             _record_status(session, STATUS_READY)
             _schedule_changes_refresh(session, debounce=False)
-        return _merge_payload(preview, commit)
+        return _merge_payload(preview, commit, branch_delete_warning)
 
 
 @router.post("/sessions/{session_id}/merge/resolve", status_code=status.HTTP_202_ACCEPTED)

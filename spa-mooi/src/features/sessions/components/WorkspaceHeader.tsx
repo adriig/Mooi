@@ -56,7 +56,7 @@ export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose
 
       <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
         <span className="hidden max-w-36 border-r border-line pr-3 sm:block"><SessionAccountIdentity session={session} /></span>
-        <MergeButton key={`merge-${session.id}`} session={session} disabled={closeBusy} />
+        <MergeButton key={`merge-${session.id}`} session={session} disabled={closeBusy} onCloseSession={onClose} closeBusy={closeBusy} />
         {deploy ? <DeployButton control={deploy} /> : null}
         <SessionActionsMenu session={session} deploy={deploy} onClose={onClose} closeBusy={closeBusy} />
       </div>

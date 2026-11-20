@@ -12,6 +12,7 @@ import type { PreparedImage } from '@/features/sessions/types/PreparedImage';
 import type { Session } from '@/features/sessions/types/Session';
 import type { SessionPendingRequest } from '@/features/sessions/types/SessionPendingRequest';
 import type { TranscriptEntry } from '@/features/sessions/types/TranscriptEntry';
+import { Button } from '@/shared/components/Button';
 
 interface ChatPanelProps {
   session: Session;
@@ -34,6 +35,9 @@ interface ChatPanelProps {
   onAllowPermission: (requestId: string, updatedInput?: Record<string, unknown>) => void;
   onDenyPermission: (requestId: string, message?: string) => void;
   onAnswerQuestion: (requestId: string, answers: Record<string, string | string[]>) => void;
+  merged: boolean;
+  closeBusy: boolean;
+  onCloseSession: () => void;
 }
 
 /**
@@ -62,6 +66,9 @@ export const ChatPanel = ({
   onAllowPermission,
   onDenyPermission,
   onAnswerQuestion,
+  merged,
+  closeBusy,
+  onCloseSession,
 }: ChatPanelProps) => {
   const [sending, setSending] = useState(false);
   const asides = useAsides(session.id);
@@ -120,6 +127,12 @@ export const ChatPanel = ({
     ) : null}
 
     <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
+
+    {merged ? <div className="shrink-0 border-t border-line px-4 py-2.5 lg:px-6">
+      <Button variant="secondary" size="sm" onClick={onCloseSession} disabled={closeBusy}>
+        {closeBusy ? 'Closing session…' : 'Close merged session'}
+      </Button>
+    </div> : null}
 
     <ChatComposer
       key={`composer-${session.id}`}

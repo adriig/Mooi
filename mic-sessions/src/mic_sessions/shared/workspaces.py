@@ -509,6 +509,14 @@ class Workspaces:
         LOG.info("Workspace %s squashed into %s at %s", workspace, target, commit[:7])
         return preview, commit
 
+    async def delete_remote_branch(self, workspace: Path, branch: str, token: str) -> None:
+        """Deletes a session branch after its changes have been published to the target."""
+        code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, "-C", str(workspace), "push", "--porcelain",
+                                          "origin", f":refs/heads/{branch}", auth=token)
+        if code != 0:
+            LOG.warning("Could not delete merged branch %s: %s", branch, detail or "no output")
+            raise ApiException.bad_gateway(detail or "The merge succeeded, but the session branch could not be deleted")
+
     # --- inspection ------------------------------------------------------------------------------
 
     async def inspect(self, workspace: Path) -> WorkspaceInspection:
@@ -818,6 +826,10 @@ async def merge(
     workspace: Path, target: str, message: str, identity: GitIdentity, token: str,
 ) -> tuple[MergePreview, str | None]:
     return await get_workspaces().merge(workspace, target, message, identity, token)
+
+
+async def delete_remote_branch(workspace: Path, branch: str, token: str) -> None:
+    await get_workspaces().delete_remote_branch(workspace, branch, token)
 
 
 async def set_identity(workspace: Path, identity: GitIdentity) -> None:

@@ -125,6 +125,12 @@ async def fetch_session_limit(caller: Caller) -> int:
     return int(body["maxSessions"])
 
 
+async def delete_merged_branch_by_default(caller: Caller) -> bool:
+    body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me",
+                      _bearer(caller), "Account not found")
+    return bool((body.get("player") or {}).get("deleteMergedBranch", False))
+
+
 async def fetch_github_token(caller: Caller) -> str:
     settings = get_settings()
     body = await _get(

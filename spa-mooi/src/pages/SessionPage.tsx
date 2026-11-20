@@ -81,6 +81,12 @@ export const SessionPage = () => {
   const pending = transcript?.pending ?? [];
   const streamState = transcript?.streamState ?? 'closed';
   const deployEnabled = deploymentAvailable(project, session.deployment);
+  const lastMergeEntry = transcript?.lastMerge
+    ? entries.findIndex((entry) => entry.id === `merge-${transcript.lastMerge?.seq}`)
+    : -1;
+  const hasActivityAfterLastMerge = lastMergeEntry < 0 || lastMergeEntry < entries.length - 1;
+  const canCloseMergedSession = Boolean(transcript?.lastMerge) && !hasActivityAfterLastMerge
+    && !transcript?.changes?.files.length && session.status === 'ready';
 
   const handleClose = () => {
     void close(session.id).then((closed) => {
@@ -140,6 +146,9 @@ export const SessionPage = () => {
               onAllowPermission={(requestId, updatedInput) => void allowPermission(requestId, updatedInput)}
               onDenyPermission={(requestId, message) => void denyPermission(requestId, message)}
               onAnswerQuestion={(requestId, answers) => void answer(requestId, answers)}
+              merged={canCloseMergedSession}
+              closeBusy={closing}
+              onCloseSession={handleClose}
             />
           </div>
         </div>

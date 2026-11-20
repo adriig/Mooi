@@ -23,7 +23,7 @@ export const useMerge = (sessionId: string) => {
   const busy = useRef(false);
 
   useEffect(() => {
-    if ((phase === 'conflicts' || phase === 'merged') && changesSeq > outcomeSeq.current) {
+    if (phase === 'conflicts' && changesSeq > outcomeSeq.current) {
       setPhase('idle');
       setResult(null);
     }

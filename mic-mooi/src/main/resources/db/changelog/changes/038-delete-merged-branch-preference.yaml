@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 038-delete-merged-branch-preference
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: players
+            columns:
+              - column:
+                  name: delete_merged_branch
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+      rollback:
+        - dropColumn:
+            tableName: players
+            columnName: delete_merged_branch
