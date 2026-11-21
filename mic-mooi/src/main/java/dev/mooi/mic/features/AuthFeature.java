@@ -128,7 +128,7 @@ public class AuthFeature {
     @PutMapping("/me/preferences/delete-merged-branch")
     @Auth.Authenticated
     public CurrentPlayerPayload setDeleteMergedBranch(@RequestBody DeleteMergedBranchRequest request, Auth.Principal principal) {
-        return new CurrentPlayerPayload(authService.setDeleteMergedBranch(principal.player().getId(), request.enabled()));
+        return new CurrentPlayerPayload(authService.setDeleteMergedBranch(principal.player().id(), request.enabled()));
     }
 
     /**
