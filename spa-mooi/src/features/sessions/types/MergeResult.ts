@@ -6,4 +6,5 @@ export interface MergeResult {
   conflicts: string[];
   commit: string | null;
   branchDeleteWarning?: string | null;
+  suggestedMessage: string | null;
 }

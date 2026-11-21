@@ -75,3 +75,9 @@ databaseChangeLog:
       file: db/changelog/changes/037-player-session-limits.yaml
   - include:
       file: db/changelog/changes/038-delete-merged-branch-preference.yaml
+  - include:
+      file: db/changelog/changes/039-production-deployment-targets.yaml
+  - include:
+      file: db/changelog/changes/040-opencode-provider.yaml
+  - include:
+      file: db/changelog/changes/041-suggested-commit-preferences.yaml

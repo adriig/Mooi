@@ -131,6 +131,16 @@ async def delete_merged_branch_by_default(caller: Caller) -> bool:
     return bool((body.get("player") or {}).get("deleteMergedBranch", False))
 
 
+async def fetch_suggested_commit_preferences(caller: Caller) -> dict:
+    payload = await _get(
+        get_http_client(),
+        f"{get_settings().mooi_api_base_url}/me/preferences/suggested-commit",
+        _bearer(caller),
+        "Account not found",
+    )
+    return {"enabled": bool(payload.get("enabled", True)), "language": str(payload.get("language") or "en")}
+
+
 async def fetch_github_token(caller: Caller) -> str:
     settings = get_settings()
     body = await _get(
@@ -229,7 +239,8 @@ async def start_production_deployment(caller: Caller, project_id: UUID, operatio
             f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/production/deployments",
             headers=_service_headers(caller),
             json={"operationId": str(operation_id), "sessionId": str(session_id) if session_id else None,
-                  "releaseTag": release_tag, "files": files})
+                  "releaseTag": release_tag, "targets": files.get("targets", []),
+                  "files": {name: files[name] for name in ("manifest", "script", "statusScript")}})
     except httpx.HTTPError:
         raise ApiException.bad_gateway() from None
     _raise_for_status(response, "Project not found")

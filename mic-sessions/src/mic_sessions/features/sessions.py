@@ -265,6 +265,13 @@ class ProductionStatusResult(BaseModel):
     checkedAt: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ProductionTarget(BaseModel):
+    """One user-facing endpoint reached by a successful production deployment."""
+
+    label: str = Field(min_length=1, max_length=100)
+    url: str = Field(min_length=8, max_length=2048, pattern=r"^https?://\S+$")
+
+
 class ProductionStoredFiles(BaseModel):
     """DEPLOYMENT.md, deploy.sh and status.sh as stored: virtual documents living only in the platform.
     A draft may still miss documents while the agent writes them one by one."""
@@ -272,6 +279,7 @@ class ProductionStoredFiles(BaseModel):
     manifest: str
     script: str
     statusScript: str = ""
+    targets: list[ProductionTarget] = Field(default_factory=list, max_length=20)
 
     @property
     def complete(self) -> bool:
@@ -292,6 +300,7 @@ class ProductionFilesPatch(BaseModel):
     manifest: str | None = Field(default=None, min_length=1, max_length=65536, pattern=r"\S")
     script: str | None = Field(default=None, min_length=1, max_length=65536, pattern=r"\S")
     statusScript: str | None = Field(default=None, min_length=1, max_length=65536, pattern=r"\S")
+    targets: list[ProductionTarget] | None = Field(default=None, max_length=20)
 
     @model_validator(mode="after")
     def validate_documents(self) -> ProductionFilesPatch:
@@ -321,6 +330,7 @@ class ProductionOverview(BaseModel):
     deployed: bool
     hasDraft: bool
     revision: int
+    targets: list[ProductionTarget] = Field(default_factory=list)
     environment: list[ProductionEnvironmentVariable]
     snapshot: ProductionSnapshot
     chatSessionId: UUID | None
@@ -693,6 +703,17 @@ class MergePayload(BaseModel):
     conflicts: list[str]
     commit: str | None = None
     branchDeleteWarning: str | None = None
+    suggestedMessage: str | None = None
+
+
+class SuggestedCommitPreferencesPayload(BaseModel):
+    enabled: bool
+    language: Literal["en", "es"]
+
+
+class SuggestedCommitUpdate(BaseModel):
+    message: str = Field(min_length=1, max_length=200, pattern=r"^[^\r\n]+$")
+    language: Literal["en", "es"]
 
 
 # --- in-memory session record ------------------------------------------------------------------
@@ -719,6 +740,13 @@ class QueuedMessage:
     def payload(self) -> QueuedMessagePayload:
         return QueuedMessagePayload(id=self.id, text=self.text, createdAt=self.created_at,
                                     images=[image.payload() for image in self.images])
+
+
+@dataclass(frozen=True)
+class SuggestedCommit:
+    message: str
+    language: Literal["en", "es"]
+    workspace_revision: str
 
 
 @dataclass
@@ -797,6 +825,8 @@ class Session:
     usage_refresh_at: float = 0.0
     # The usage the player's lists last received (see `_usage_signature`), so finer changes stay in the transcript.
     usage_signature: tuple[Any, ...] | None = None
+    # Latest agent-written title, valid only while the complete working tree still matches.
+    suggested_commit: SuggestedCommit | None = None
 
     def to_payload(self) -> SessionPayload:
         descriptor = describe(self.provider)
@@ -2370,11 +2400,29 @@ def _require_mergeable(session: Session) -> None:
 
 
 def _merge_payload(preview: workspaces.MergePreview, commit: str | None = None,
-                   branch_delete_warning: str | None = None) -> MergePayload:
+                   branch_delete_warning: str | None = None,
+                   suggested_message: str | None = None) -> MergePayload:
     state: MergeState = ("merged" if commit else "conflicts" if preview.conflicts
                          else "up_to_date" if preview.up_to_date else "clean")
     return MergePayload(state=state, targetBranch=preview.target, conflicts=preview.conflicts, commit=commit,
-                        branchDeleteWarning=branch_delete_warning)
+                        branchDeleteWarning=branch_delete_warning, suggestedMessage=suggested_message)
+
+
+async def _current_suggested_commit(session: Session, preferences: dict) -> str | None:
+    suggestion = session.suggested_commit
+    if (not preferences.get("enabled") or suggestion is None
+            or suggestion.language != preferences.get("language")):
+        return None
+    try:
+        async with session.changes_lock:
+            revision = await workspaces.revision(session.workspace)
+    except Exception:
+        LOG.warning("Session %s could not validate its suggested commit", session.id, exc_info=True)
+        return None
+    if suggestion.workspace_revision != revision:
+        session.suggested_commit = None
+        return None
+    return suggestion.message
 
 
 def _conflict_prompt(session: Session, preview: workspaces.MergePreview) -> str:
@@ -2430,10 +2478,17 @@ async def check_merge(session_id: UUID, caller: Annotated[Caller, Depends(curren
     """Dry-runs the merge against the freshly fetched default branch without touching the checkout."""
     session = get_registry().get_for(caller, session_id)
     token = await mooi.fetch_github_token(caller)
+    try:
+        preferences = await mooi.fetch_suggested_commit_preferences(caller)
+    except ApiException:
+        LOG.warning("Session %s could not load suggested commit preferences", session.id, exc_info=True)
+        preferences = {"enabled": False, "language": "en"}
     async with session.operation_lock:
         _require_mergeable(session)
         _touch(session)
-        return _merge_payload(await workspaces.preview_merge(session.workspace, session.base_branch, token))
+        preview = await workspaces.preview_merge(session.workspace, session.base_branch, token)
+        suggestion = await _current_suggested_commit(session, preferences) if not preview.conflicts else None
+        return _merge_payload(preview, suggested_message=suggestion)
 
 
 @router.post("/sessions/{session_id}/merge")
@@ -2590,6 +2645,13 @@ The project's to-do list is `docs/TODOS.md` on the default branch, shown in the 
 - Keep the order the Mooi views keep: a new item goes on top; done items stay at the bottom, so completing one moves it just above the other done items, and reopening or starting a done one moves it just below the items still to do.
 - When `state` is `unsupported`, do not save: tell the user Mooi cannot render the file and ask whether to clean it up (save the `salvage` items) or keep it and edit it by hand.
 
+## Suggested commit message
+At the end of every turn in which you changed repository files, after all edits and verification are complete, update the session's suggested commit message. This is an internal action: do not mention it in the user-facing answer.
+- Read `GET {root}/suggested-commit/agent` immediately before writing. If `enabled` is false, do nothing.
+- Write `PUT {root}/suggested-commit/agent` with JSON `{{"message": "<title>", "language": "<language returned by GET>"}}`.
+- Base the title on both the user's request and the work actually present in the session. Describe the session's complete unmerged change, not merely the last command. Use one concise line (maximum 200 characters), follow the repository's commit style when one is evident, and write in English for `en` or Spanish for `es`.
+- Keep this operation in the current turn. If no repository file changed in the turn, keep the existing suggestion.
+
 ## Shared Docker host
 Docker here is the host's shared engine: other projects' live containers, volumes and networks (production ones included) run on it, and the same names may appear in this repository.
 - Compose commands are scoped to this session's project through `COMPOSE_PROJECT_NAME={_compose_project(session)}`; keep it, never pass `--project-name`/`-p` or override it.
@@ -2713,6 +2775,36 @@ async def agent_save_development_environment(session_id: UUID, request: Request,
                                              body: ProductionEnvironmentUpdate) -> DevelopmentEnvironment:
     session, caller = await _agent_access(session_id, request, "session")
     return await _save_development_environment(caller, session.project_id, body)
+
+
+@router.get("/sessions/{session_id}/suggested-commit/agent")
+async def agent_suggested_commit_preferences(
+    session_id: UUID, request: Request
+) -> SuggestedCommitPreferencesPayload:
+    _, caller = await _agent_access(session_id, request, "session")
+    return SuggestedCommitPreferencesPayload.model_validate(await mooi.fetch_suggested_commit_preferences(caller))
+
+
+@router.put("/sessions/{session_id}/suggested-commit/agent", status_code=status.HTTP_204_NO_CONTENT)
+async def agent_update_suggested_commit(
+    session_id: UUID, request: Request, body: SuggestedCommitUpdate
+) -> None:
+    session, caller = await _agent_access(session_id, request, "session")
+    preferences = await mooi.fetch_suggested_commit_preferences(caller)
+    if not preferences["enabled"]:
+        raise ApiException.conflict("Suggested commit messages are disabled")
+    if body.language != preferences["language"]:
+        raise ApiException.conflict("Suggested commit language changed; read the preference again")
+    async with session.changes_lock:
+        summary = await workspaces.changes(session.workspace, session.base_commit)
+        if not summary.files:
+            raise ApiException.conflict("There are no unmerged changes to describe")
+        revision = await workspaces.revision(session.workspace)
+    message = body.message.strip()
+    if not message:
+        raise ApiException.bad_request("The suggested commit message cannot be blank")
+    session.suggested_commit = SuggestedCommit(message, body.language, revision)
+    record(session, "commit.suggestion.updated", {"message": message, "language": body.language})
 
 
 # --- the project's to-do list: docs/TODOS.md on the default branch, the file being the only copy ---
@@ -2917,6 +3009,7 @@ They are VIRTUAL documents stored only in the Mooi platform. Never write them to
 - `DEPLOYMENT.md` (field `manifest`): the natural-language manifest of the deployment, and the source you or another agent read to change or repair it later. Describe every target, the method, prerequisites, the repository files and variables involved (names only, never values), the production-specific resource names, how a release reaches each target and how the service is verified. Keep it true: update it with every change to the setup.
 - `deploy.sh` (field `script`): a non-interactive bash script the platform runs from a detached checkout of the release being deployed (that checkout is the working directory). It must start with `set -euo pipefail`, be idempotent (a fresh target and an already deployed one both end up running the release; prepare one-time prerequisites itself when it can), read every value from environment variables, deploy exactly `MOOI_PRODUCTION_RELEASE_SHA` to every target and exit non-zero when any target fails.
 - `status.sh` (field `statusScript`): a non-interactive, read-only bash script, safe to run repeatedly from an empty working directory, that exits 0 only while every deployed target is healthy and prints concise status details per target. It must not depend on release variables or repository files.
+- Deployment destinations (field `targets`): every stable HTTP or HTTPS endpoint where a user can open the deployed project, as `[{{"label": "Production", "url": "https://example.com"}}]`. Include every browsable target, use short distinct labels, and use an empty list only when the deployed project truly has no web endpoint. Keep these in sync with DEPLOYMENT.md.
 
 Save each document with the platform API as soon as you write or change it, one document per request, so the user follows your progress in the Platform files tab.
 
@@ -2948,7 +3041,7 @@ So commit every repository change the deployment needs before you test. Never ru
 ## Platform API
 Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`:
 - `GET {base}/documents`: active and draft documents plus the names of stored environment variables.
-- `PATCH {base}/documents` with any of the JSON keys `manifest`, `script`, `statusScript`: saves those documents into the draft and keeps the others.
+- `PATCH {base}/documents` with any of the JSON keys `manifest`, `script`, `statusScript`, `targets`: saves those fields into the draft and keeps the others.
 - `GET {base}/environment`: `values` (the project's stored `MOOI_PRODUCTION_` and inherited `MOOI_DEVELOPMENT_` values the scripts receive) and `serverProvided` (names of server-wide values whose values you cannot read).
 - `PUT {base}/environment` with JSON `{{"values": {{"MOOI_PRODUCTION_NAME": "value"}}}}` (null removes a variable).
 - `POST {base}/repository/commit` with JSON `{{"message": "<commit title>"}}`: commits every repository change onto `{branch}` as one commit and pushes it. It answers 409 with the conflicting files when `{branch}` moved in a conflicting way.
@@ -2961,7 +3054,7 @@ Use Python urllib with an inline JSON body, never a temporary file, and send the
 2. Settle the targets and the method with the user and ask for every missing value.
 3. Write the repository files, save the platform files and store the variables.
 4. Commit the repository changes once the user approves them.
-5. Test. Testing is mandatory: finish every setup, update or fix with a successful test deployment. Once all three documents are saved, every required variable is stored and any repository change is committed, start the test and wait for its result. If it fails, find the cause in the output, save the corrected documents (ask the user for anything missing) and test again. A successful test deploys that release to production and makes the draft the active configuration.
+5. Test. Testing is mandatory: finish every setup, update or fix with a successful test deployment. Once all three documents and the deployment destinations are saved, every required variable is stored and any repository change is committed, start the test and wait for its result. If it fails, find the cause in the output, save the corrected documents (ask the user for anything missing) and test again. A successful test deploys that release to production and makes the draft the active configuration.
 6. Only after a successful test tell the user clearly that the deployment is tested and working: from now on the Deploy button runs this script deterministically for any release, without an agent. Suggest clearing this chat (or closing it); it can be reused later to change or fix the deployment.
 
 Never run deploy.sh yourself and never change production with your own tools (SSH, Docker, cloud CLIs...): every change reaches production through deploy.sh and the test endpoint. Read-only inspection to diagnose a failure is fine.
@@ -3057,6 +3150,7 @@ async def production_overview(project_id: UUID, caller: Annotated[Caller, Depend
     return ProductionOverview(
         configured=files is not None and files.complete, deployed=documents.active is not None,
         hasDraft=documents.draft is not None, revision=documents.revision,
+        targets=documents.active.targets if documents.active is not None else files.targets if files is not None else [],
         environment=[ProductionEnvironmentVariable(name=name, configured=name in stored or name in server
                                                    or name in development, required=name in required,
                                                    inherited=name.startswith("MOOI_DEVELOPMENT_"))

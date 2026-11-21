@@ -23,6 +23,18 @@ const COPY: Record<string, AgentProviderCopy> = {
     },
     pasted: { label: 'Antigravity token', placeholder: 'Paste the token', hint: 'Antigravity links only with Google sign-in.' },
   },
+  opencode: {
+    signIn: {
+      action: 'Connect OpenCode',
+      instructions: 'OpenCode connects with an API key.',
+      codeHint: 'Create a personal or service-account key in OpenCode Console.',
+    },
+    pasted: {
+      label: 'OpenCode API key',
+      placeholder: 'oc_sk_…',
+      hint: 'Paste the oc_sk_… value, not the Console or Mooi URL. Mooi encrypts it and never exposes it again.',
+    },
+  },
 };
 
 const fallback = (label: string): AgentProviderCopy => ({

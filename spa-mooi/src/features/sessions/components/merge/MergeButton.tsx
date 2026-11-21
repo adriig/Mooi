@@ -73,7 +73,8 @@ export const MergeButton = ({ session, disabled = false, onCloseSession, closeBu
         <MergeDialog targetBranch={target} branch={session.branch} changes={changes}
           merging={phase === 'merging'} merged={phase === 'merged'} closeBusy={closeBusy} onCloseSession={onCloseSession}
           branchDeleteWarning={result?.branchDeleteWarning ?? null}
-          error={error} onCancel={cancel} onCommit={(title) => void commit(title)} />
+          error={error} suggestedMessage={result?.suggestedMessage ?? null}
+          onCancel={cancel} onCommit={(title) => void commit(title)} />
       ) : null}
     </>
   );

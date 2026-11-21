@@ -23,7 +23,8 @@ interface AddAgentAccountDialogProps {
  * whose sign-in is off (it is deprecated); the other providers sign in through their own flow.
  */
 const pastes = (provider: AgentProvider | undefined) =>
-  !!provider && !provider.oauthEnabled && provider.modes.includes('setup_token');
+  !!provider && !provider.oauthEnabled
+    && (provider.modes.includes('setup_token') || provider.modes.includes('api_key'));
 
 const optionClass = (selected: boolean) => cn(
   'flex items-center justify-between rounded-xl border px-4 py-3 text-left text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-brand disabled:opacity-60',
@@ -67,7 +68,7 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
       <label className="flex flex-col gap-2">
         <span className="text-xs font-semibold text-ink-muted">Account title <span className="text-danger">*</span></span>
         <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100}
-          disabled={pairing} required autoFocus placeholder="e.g. Claude Ana or Antigravity Joserra"
+          disabled={pairing} required autoFocus placeholder="e.g. Claude Ana or OpenCode work"
           className="h-12 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:opacity-60" />
       </label>
       <div>
