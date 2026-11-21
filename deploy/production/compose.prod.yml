@@ -1,23 +1,6 @@
-# Mooi production stack behind the host's Traefik (external `proxy` network, Cloudflare DNS-01
-# certificates, `intranet-firewall` allow list). Driven by tools/deploy-production.sh or the Mooi platform's
-# production deployment; values come from the env file documented in .env.example.
-#
-#   https://${DOMAIN} -> spa-mooi nginx: SPA + /api/mooi + /api/sessions + /api/stt + /preview
-#
-# Only the gateway is routed by Traefik; previews hang off its origin (/preview/<id>/), so they need
-# no DNS record or certificate of their own.
-#
-# Session deployments are sibling containers on the host engine (mounted socket); they join only the
-# external `mooi-previews` network and are never published.
-#
-# Production uses its own `mooi-prod` project and data. Development stacks use root compose.yml
-# with each session's assigned COMPOSE_PROJECT_NAME and generated resource names and ports.
-#
-# Container and internal network names follow the project name, and the defaulted MOOI_* knobs below
-# (Traefik routing, proxy and previews networks) let a verification run start this same file as a
-# disjoint stack: own project, data directory, networks and secrets, nothing routed or published.
-
-name: mooi-prod
+# Isolated Mooi production stack. Tailscale Serve is the only remote ingress; the gateway's
+# dynamically assigned host port is bound to loopback and is never published on a public interface.
+name: ${COMPOSE_PROJECT_NAME:?required}
 
 x-logging: &logging
   driver: json-file
@@ -26,72 +9,72 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  # One-shot: data directories with the ownership each service runs with (idempotent).
   init-data:
     image: busybox:1.37
     command:
       - sh
       - -c
       - >-
-        mkdir -p /data/postgres /data/workspaces /data/speech /data/ssh &&
+        mkdir -p /data/postgres /data/workspaces /data/speech /data/ssh /data/tailscale &&
         chown 1001:1001 /data/workspaces /data/speech /data/ssh &&
         chmod 700 /data/ssh
     volumes:
-      - ${DATA_DIR:?}:/data
+      - ${DATA_DIR:?required}:/data
     network_mode: none
     restart: "no"
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
 
   postgres:
     image: postgres:18-alpine
-    container_name: ${COMPOSE_PROJECT_NAME}-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: mooi
-      POSTGRES_USER: mooi
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - ${DATA_DIR:?}/postgres:/var/lib/postgresql/data
+      - ${DATA_DIR:?required}/postgres:/var/lib/postgresql/data
     depends_on:
       init-data:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mooi -d mooi"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 20
     networks:
       - internal
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
     logging: *logging
 
   mic-mooi:
     build:
       context: ../../mic-mooi
-    image: mooi/mic-mooi:${MOOI_RELEASE:-latest}
-    labels:
-      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
-    container_name: ${COMPOSE_PROJECT_NAME}-mic-mooi
+      dockerfile: ../deploy/production/mic-mooi/Dockerfile
+    image: mooi-production/mic-mooi:${MOOI_RELEASE:?required}
     restart: unless-stopped
     environment:
       SERVER_PORT: "8080"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: mooi
-      POSTGRES_USER: mooi
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       POSTGRES_SCHEMA: public
-      CORS_ORIGIN: https://${DOMAIN:?}
-      SECRETS_KEY: ${SECRETS_KEY:?}
-      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?}
-      JWT_SECRET: ${JWT_SECRET:?}
+      CORS_ORIGIN: https://${DOMAIN:?required}
+      SECRETS_KEY: ${SECRETS_KEY:?required}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?required}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?required}
+      JWT_SECRET: ${JWT_SECRET:?required}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
-      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?}
-      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?}
-      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
-      GITHUB_REDIRECT_URI: https://${DOMAIN:?}/account/github/callback
-      AGENT_CLAUDE_REDIRECT_URI: https://${DOMAIN:?}/account/agents/claude/callback
-      # Gemini CLI sign-in (Google): offered only once both client values are set.
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?required}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?required}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:?required}
+      GITHUB_REDIRECT_URI: https://${DOMAIN:?required}/account/github/callback
+      AGENT_CLAUDE_REDIRECT_URI: https://${DOMAIN:?required}/account/agents/claude/callback
       AGENT_GEMINI_ENABLED: ${AGENT_GEMINI_ENABLED:-true}
       AGENT_GEMINI_CLIENT_ID: ${AGENT_GEMINI_CLIENT_ID:-}
       AGENT_GEMINI_CLIENT_SECRET: ${AGENT_GEMINI_CLIENT_SECRET:-}
@@ -103,41 +86,39 @@ services:
         condition: service_healthy
     networks:
       - internal
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
     logging: *logging
 
   mic-sessions:
     build:
       context: ../../mic-sessions
-    image: mooi/mic-sessions:${MOOI_RELEASE:-latest}
-    labels:
-      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
-    container_name: ${COMPOSE_PROJECT_NAME}-mic-sessions
+      dockerfile: ../deploy/production/mic-sessions/Dockerfile
+    image: mooi-production/mic-sessions:${MOOI_RELEASE:?required}
     restart: unless-stopped
-    # tini reaps the agent, Git and Docker CLI children the service spawns.
     init: true
     group_add:
-      - ${DOCKER_GID:?}
+      - ${DOCKER_GID:?required}
     environment:
       MOOI_API_BASE_URL: http://mic-mooi:8080
-      SERVICE_TOKEN: ${SERVICE_TOKEN:?}
-      JWT_SECRET: ${JWT_SECRET:?}
-      CORS_ORIGIN: https://${DOMAIN:?}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?required}
+      JWT_SECRET: ${JWT_SECRET:?required}
+      CORS_ORIGIN: https://${DOMAIN:?required}
       MAX_SESSIONS: ${MAX_SESSIONS:-8}
       MAX_SESSIONS_PER_PLAYER: ${MAX_SESSIONS_PER_PLAYER:-4}
       SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-180}
       MAX_DEPLOYMENTS: ${MAX_DEPLOYMENTS:-4}
       PREVIEW_UPSTREAM: network
-      PREVIEW_NETWORK: ${MOOI_PREVIEWS_NETWORK:-mooi-previews}
+      PREVIEW_NETWORK: ${MOOI_PREVIEWS_NETWORK:?required}
       AGENT_CLAUDE_MODEL: ${AGENT_CLAUDE_MODEL:-sonnet}
       AGENT_CLAUDE_EFFORT: ${AGENT_CLAUDE_EFFORT:-high}
       AGENT_GEMINI_MODEL: ${AGENT_GEMINI_MODEL:-auto}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${DATA_DIR:?}/workspaces:/var/lib/mooi/workspaces
-      # SSH identity used by production deploy/backup scripts.
-      - ${DATA_DIR:?}/ssh:/home/mooi/.ssh
-    # Graceful shutdown stops every running session deployment before exiting.
+      - ${DATA_DIR:?required}/workspaces:/var/lib/mooi/workspaces
+      - ${DATA_DIR:?required}/ssh:/home/mooi/.ssh
     stop_grace_period: 300s
     depends_on:
       init-data:
@@ -147,68 +128,88 @@ services:
     networks:
       - internal
       - previews
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
     logging: *logging
 
   spa-mooi:
     build:
       context: ../../spa-mooi
+      dockerfile: ../deploy/production/spa-mooi/Dockerfile
       args:
-        VITE_API_BASE_URL: https://${DOMAIN:?}/api/mooi
-        VITE_SESSIONS_BASE_URL: https://${DOMAIN:?}/api/sessions
-        VITE_SPEECH_BASE_URL: https://${DOMAIN:?}
-        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?}
-    image: mooi/spa-mooi:${MOOI_RELEASE:-latest}
-    container_name: ${COMPOSE_PROJECT_NAME}-spa-mooi
+        VITE_API_BASE_URL: https://${DOMAIN:?required}/api/mooi
+        VITE_SESSIONS_BASE_URL: https://${DOMAIN:?required}/api/sessions
+        VITE_SPEECH_BASE_URL: https://${DOMAIN:?required}
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?required}
+        VITE_STORAGE_PREFIX: ${VITE_STORAGE_PREFIX:-mooi-production}
+    image: mooi-production/spa-mooi:${MOOI_RELEASE:?required}
     restart: unless-stopped
+    ports:
+      - "127.0.0.1::80"
     networks:
       - internal
-      - proxy
+      - previews
+    depends_on:
+      mic-mooi:
+        condition: service_healthy
+      mic-sessions:
+        condition: service_healthy
     labels:
-      - dev.mooi.production.sha=${MOOI_RELEASE:-latest}
-      - traefik.enable=${MOOI_TRAEFIK_ENABLE:-true}
-      - traefik.docker.network=${MOOI_PROXY_NETWORK:-proxy}
-      - traefik.http.routers.mooi.rule=Host(`${DOMAIN:?}`)
-      - traefik.http.routers.mooi.entrypoints=websecure
-      - traefik.http.routers.mooi.tls=true
-      - traefik.http.routers.mooi.tls.certresolver=cloudflare
-      - traefik.http.routers.mooi.middlewares=intranet-firewall@docker
-      - traefik.http.routers.mooi.service=mooi
-      - traefik.http.services.mooi.loadbalancer.server.port=80
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
     logging: *logging
 
-  # Loopback only, as in development: it shares the gateway's network namespace, so nginx reaches it
-  # on 127.0.0.1 and nothing else can.
   mic-speech:
     build:
       context: ../../mic-speech
-    image: mooi/mic-speech:${MOOI_RELEASE:-latest}
-    labels:
-      dev.mooi.production.sha: ${MOOI_RELEASE:-latest}
-    container_name: ${COMPOSE_PROJECT_NAME}-mic-speech
+      dockerfile: ../deploy/production/mic-speech/Dockerfile
+    image: mooi-production/mic-speech:${MOOI_RELEASE:?required}
     restart: unless-stopped
     network_mode: service:spa-mooi
     environment:
-      CORS_ORIGIN: https://${DOMAIN:?}
+      CORS_ORIGIN: https://${DOMAIN:?required}
       SPEECH_LANGUAGE: ${SPEECH_LANGUAGE:-es-ES}
       SPEECH_CONTEXTS: ${SPEECH_CONTEXTS:-}
       SPEECH_MAX_SECONDS: ${SPEECH_MAX_SECONDS:-300}
       SPEECH_STARTUP_TIMEOUT_SECONDS: ${SPEECH_STARTUP_TIMEOUT_SECONDS:-120}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
-      - ${DATA_DIR:?}/speech:/var/lib/mooi/speech
+      - ${DATA_DIR:?required}/speech:/var/lib/mooi/speech
     depends_on:
       init-data:
         condition: service_completed_successfully
       spa-mooi:
         condition: service_started
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
+    logging: *logging
+
+  tailscale:
+    image: tailscale/tailscale:v1.104.7
+    hostname: mooi-production
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TAILSCALE_AUTH_KEY:?required}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: mooi-production
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+    volumes:
+      - ${DATA_DIR:?required}/tailscale:/var/lib/tailscale
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    labels:
+      dev.mooi.production.owner: ${COMPOSE_PROJECT_NAME:?required}
+      dev.mooi.production.sha: ${MOOI_RELEASE:?required}
     logging: *logging
 
 networks:
   internal:
-    name: ${COMPOSE_PROJECT_NAME}-internal
-  proxy:
-    name: ${MOOI_PROXY_NETWORK:-proxy}
-    external: true
+    name: ${COMPOSE_PROJECT_NAME:?required}-internal
   previews:
-    name: ${MOOI_PREVIEWS_NETWORK:-mooi-previews}
+    name: ${MOOI_PREVIEWS_NETWORK:?required}
     external: true
