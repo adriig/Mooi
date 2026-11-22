@@ -8,6 +8,8 @@ import { cn } from '@/shared/utils/cn';
 
 const NAME = /^[A-Z0-9_]{1,100}$/;
 
+const removable = (variable: PlatformEnvironmentVariable) => !variable.required && !variable.inherited && variable.configured;
+
 interface PlatformEnvironmentDialogProps {
   /** The name prefix of the variables this configuration owns, e.g. `MOOI_PRODUCTION_`. */
   prefix: string;
@@ -32,7 +34,10 @@ export const PlatformEnvironmentDialog = ({
   emptyDescription = 'The scripts do not read any variable yet.', save, onClose, onSaved,
 }: PlatformEnvironmentDialogProps) => {
   const [values, setValues] = useState<Record<string, string>>({});
-  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Variables no script reads any more start marked for removal; the user can still keep them.
+  const [removed, setRemoved] = useState<Set<string>>(() => new Set(variables.filter(removable).filter((variable) => variable.used === false)
+    .map((variable) => variable.name)));
+  const unused = variables.filter((variable) => removable(variable) && variable.used === false).length;
   const [added, setAdded] = useState<{ name: string; value: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +63,8 @@ export const PlatformEnvironmentDialog = ({
       <Button variant="brand" onClick={() => void submit()} disabled={busy || invalid || loading}>
         {busy ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}{busy ? 'Saving…' : 'Save variables'}
       </Button></>}>
+    {unused > 0 ? <p className="mb-4 rounded-control border border-warning/30 bg-warning-soft px-4 py-2.5 text-sm text-warning">
+      {unused === 1 ? '1 variable is' : `${unused} variables are`} no longer read by the scripts and will be removed on save. Click a variable's bin to keep it.</p> : null}
     <ul className="flex flex-col gap-3">
       {variables.map((variable) => {
         const removing = removed.has(variable.name);
@@ -65,9 +72,10 @@ export const PlatformEnvironmentDialog = ({
           <div className="flex items-center justify-between gap-2">
             <span className="min-w-0 truncate font-mono text-xs font-bold text-ink">{variable.name}</span>
             <span className="flex shrink-0 items-center gap-2 text-[11px] font-semibold">
+              {variable.used === false ? <span className="text-warning">Unused</span> : null}
               <span className={variable.configured ? 'text-success' : variable.required ? 'text-danger' : 'text-ink-subtle'}>
                 {variable.configured ? 'Set' : variable.required ? 'Missing' : 'Not set'}</span>
-              {!variable.required && !variable.inherited && variable.configured ? <button type="button" disabled={busy}
+              {removable(variable) ? <button type="button" disabled={busy}
                 onClick={() => setRemoved((current) => { const next = new Set(current); if (removing) next.delete(variable.name); else next.add(variable.name); return next; })}
                 aria-label={removing ? `Keep ${variable.name}` : `Remove ${variable.name}`} title={removing ? 'Keep' : 'Remove'}
                 className="grid size-7 place-items-center rounded-md text-ink-subtle hover:bg-danger-soft hover:text-danger">

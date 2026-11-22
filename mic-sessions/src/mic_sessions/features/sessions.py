@@ -322,6 +322,8 @@ class ProductionEnvironmentVariable(BaseModel):
     required: bool
     # A MOOI_DEVELOPMENT_ value, managed in the project's sessions.
     inherited: bool = False
+    # Mentioned by deploy.sh or status.sh (active or draft) or by the backup scripts, which inherit it.
+    used: bool = True
 
 
 class ProductionOverview(BaseModel):
@@ -3140,12 +3142,19 @@ async def _save_production_environment(caller: Caller, project_id: UUID,
 @router.get("/production/projects/{project_id}")
 async def production_overview(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> ProductionOverview:
     _, run = await _owned_production(caller, project_id)
-    documents, development = await asyncio.gather(_production_documents(caller, project_id),
-                                                  _development_environment(caller, project_id))
+    documents, development, backups = await asyncio.gather(_production_documents(caller, project_id),
+                                                           _development_environment(caller, project_id),
+                                                           _backup_documents(caller, project_id))
     files = documents.draft or documents.active
     required = set(_required_environment(files))
     stored = set(documents.environment)
     server = {name for name, value in production_environment().items() if value}
+    # Backups inherit production values, so a value only their scripts read is still used.
+    scripts =[text for stored_files in (documents.active, documents.draft) if stored_files is not None
+               for text in (stored_files.script, stored_files.statusScript)]
+    scripts += [text for stored_files in (backups.active, backups.draft) if stored_files is not None
+                for text in (stored_files.backupScript, stored_files.restoreScript, stored_files.deleteScript)]
+    mentioned = {name for text in scripts for name in _PRODUCTION_VARIABLE.findall(text)}
     chat = _production_chat(caller.player_id, project_id)
     return ProductionOverview(
         configured=files is not None and files.complete, deployed=documents.active is not None,
@@ -3153,7 +3162,9 @@ async def production_overview(project_id: UUID, caller: Annotated[Caller, Depend
         targets=documents.active.targets if documents.active is not None else files.targets if files is not None else [],
         environment=[ProductionEnvironmentVariable(name=name, configured=name in stored or name in server
                                                    or name in development, required=name in required,
-                                                   inherited=name.startswith("MOOI_DEVELOPMENT_"))
+                                                   inherited=name.startswith("MOOI_DEVELOPMENT_"),
+                                                   # Without any script yet nothing can be judged unused.
+                                                   used=files is None or name in mentioned)
                      for name in sorted(required | stored)],
         snapshot=run.snapshot, chatSessionId=chat.id if chat else None,
         chatTested=bool(chat and chat.platform_tested),

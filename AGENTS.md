@@ -162,7 +162,8 @@ from it. Where they differ, this context wins over the current implementation (s
 - **Repository files** (committed only when the target needs them): e.g. a production Compose file reading
   env variables, holding variable references, never values.
 - **Production variables**: values stored only in the platform; set manually in their menu or by the chat;
-  both views stay in sync.
+  both views stay in sync. Stored values that neither the deployment scripts nor the backup scripts read
+  are flagged as unused and preselected for removal.
 - An open production chat can be reused to change or fix the deployment.
 
 ## Backups

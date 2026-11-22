@@ -5,4 +5,6 @@ export interface PlatformEnvironmentVariable {
   required: boolean;
   /** Owned by another configuration (development values reused by deployments, production values by backups): read-only here. */
   inherited?: boolean;
+  /** `false` when no script reads the stored value any more, so it can be removed; absent means used. */
+  used?: boolean;
 }
