@@ -36,8 +36,6 @@ const BRANCH_PREFIX = 'feat/';
 
 const randomSuffix = (): string => Math.random().toString(36).slice(2, 8);
 
-const issuePlanningMessage = (description: string): string => `Plan this work as issues for the project's shared To-dos board.\n\nWork description:\n${description.trim()}\n\nInspect the repository and turn this into a concise, ordered series of actionable issues. Each issue should explain its outcome and enough acceptance detail to be independently understood. Do not implement the work in this session. Read the current To-dos list through the session To-dos platform API, preserve existing items, and add the issues as open items using the documented API. If the list is unsupported, do not change it; explain why. If a revision conflict occurs, reread and retry while preserving concurrent changes. Confirm which issues were added.`;
-
 /**
  * Suggest a fresh branch per opening; users can also reuse an existing remote branch.
  * Each session has its own clone, so matching branch names can run independently.
@@ -62,8 +60,6 @@ export const NewSessionDialog = ({
   onCreate,
 }: NewSessionDialogProps) => {
   const [branch, setBranch] = useState('');
-  const [planIssues, setPlanIssues] = useState(false);
-  const [workDescription, setWorkDescription] = useState('');
   const [refreshingConnections, setRefreshingConnections] = useState(false);
   const choice = useAgentModelChoice(open, connections);
   const wasOpenRef = useRef(false);
@@ -78,8 +74,6 @@ export const NewSessionDialog = ({
   useEffect(() => {
     if (open && !wasOpenRef.current) {
       branchEditedRef.current = false;
-      setPlanIssues(false);
-      setWorkDescription('');
       setRefreshingConnections(true);
       void onRefreshConnections().finally(() => setRefreshingConnections(false));
     }
@@ -87,8 +81,7 @@ export const NewSessionDialog = ({
     wasOpenRef.current = open;
   }, [open, projectName, onRefreshConnections]);
 
-  const canSubmit = !refreshingConnections && Boolean(project) && choice.ready && branch.trim().length > 0
-    && (!planIssues || workDescription.trim().length > 0);
+  const canSubmit = !refreshingConnections && Boolean(project) && choice.ready && branch.trim().length > 0;
 
   const handleSubmit = () => {
     if (!project || !canSubmit) {
@@ -103,7 +96,6 @@ export const NewSessionDialog = ({
       model: choice.model,
       effort: choice.effort || null,
       branch: branch.trim(),
-      initialMessage: planIssues ? issuePlanningMessage(workDescription) : undefined,
     }).then((succeeded) => {
       if (succeeded) {
         onClose();
@@ -136,21 +128,6 @@ export const NewSessionDialog = ({
         </div> : null}
 
         <AgentModelFields choice={choice} onLeave={onClose} />
-
-        <div className="flex flex-col gap-3 rounded-control border border-line bg-surface-2 p-4">
-          <label className="flex items-center gap-3 text-sm font-medium text-ink">
-            <input type="checkbox" checked={planIssues} onChange={(event) => setPlanIssues(event.target.checked)}
-              className="size-4 accent-brand" />
-            Generate issues for the project To-dos board
-          </label>
-          {planIssues ? <label className="flex flex-col gap-2">
-            <span className="text-xs text-ink-muted">Describe the work to plan</span>
-            <textarea value={workDescription} onChange={(event) => setWorkDescription(event.target.value)}
-              rows={4} required placeholder="What should this session break down into issues?"
-              className="w-full resize-y rounded-control border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-subtle focus:border-brand/50 focus:outline-none" />
-            <span className="text-xs text-ink-subtle">The agent will inspect the project, add documented issues to its shared To-dos list, and report back without implementing them.</span>
-          </label> : null}
-        </div>
 
         {connections.length > 0 ? <label className="flex flex-col gap-2">
           <span className="text-xs font-medium text-ink-muted">Branch</span>
