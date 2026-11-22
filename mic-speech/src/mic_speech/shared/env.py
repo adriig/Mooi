@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     speech_host: str = "127.0.0.1"
     speech_port: int = 59100
 
-    # Web: the SPA origin is the only WebSocket `Origin` accepted.
+    # Web: the SPA origin is the only `Origin` accepted for transcriptions.
     cors_origin: str = "http://localhost:28471"
 
     # Recognition

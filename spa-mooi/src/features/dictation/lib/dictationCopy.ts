@@ -5,5 +5,5 @@ export const DICTATION_STATE_LABELS: Record<DictationState, string> = {
   idle: 'Dictate (tap, hold or Ctrl+Shift+.)',
   connecting: 'Connecting microphone…',
   recording: 'Stop dictation (Esc to discard)',
-  stopping: 'Finishing transcription…',
+  stopping: 'Transcribing…',
 };
