@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, Compass, FileCode2, GitCompareArrows, LayoutDashboard, MessagesSquare, Rocket, Terminal, X } from 'lucide-react';
+import { Activity, Compass, FileCode2, GitCompareArrows, KeyRound, LayoutDashboard, MessagesSquare, Rocket, Terminal, X } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { useProjects } from '@/features/projects/hooks/useProjects';
@@ -9,6 +9,7 @@ import { PlatformAgentDialog } from '@/features/platform/components/PlatformAgen
 import { PlatformChatPanel } from '@/features/platform/components/PlatformChatPanel';
 import { PlatformDeleteDialog } from '@/features/platform/components/PlatformDeleteDialog';
 import { PlatformEnvironmentDialog } from '@/features/platform/components/PlatformEnvironmentDialog';
+import { PlatformEnvironmentCard } from '@/features/platform/components/PlatformEnvironmentCard';
 import { PlatformFilesPanel } from '@/features/platform/components/PlatformFilesPanel';
 import { usePlatformChat } from '@/features/platform/hooks/usePlatformChat';
 import { usePlatformFiles } from '@/features/platform/hooks/usePlatformFiles';
@@ -90,6 +91,7 @@ export const ProjectDeploymentPage = () => {
 
   const tabs: TabItem[] = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'environment', label: 'Environment', icon: KeyRound },
     ...(chat ? [{ id: 'chat', label: 'Chat', icon: MessagesSquare, dot: chat.status === 'working' || chat.status === 'waiting' || chat.status === 'provisioning',
       ...(chatClosable ? { onClose: () => void closeChat(), closeLabel: 'Close deployment chat' } : {}) }] : []),
     ...(snapshot?.operationId ? [{ id: 'console', label: 'Console', icon: Terminal, dot: snapshot.state === 'running' }] : []),
@@ -169,6 +171,14 @@ export const ProjectDeploymentPage = () => {
           onSetup={() => openAgent('setup')} onDeploy={requestDeploy} onOpenChat={() => openTab('chat')}
           onOpenConsole={() => openTab('console')} onFix={fixFailure} onEnvironment={() => setEnvironmentOpen(true)}
           onOpenDeployment={setDetail} onRedeploy={(deployment) => void deploy({ tag: deployment.releaseTag, create: false })} /> : null}
+
+        {tab === 'environment' ? <div className="h-full overflow-y-auto">
+          <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-8 lg:px-10 lg:py-8">
+            {overview ? <PlatformEnvironmentCard variables={overview.environment} onEdit={() => setEnvironmentOpen(true)}
+              emptyDescription="No variables yet. The agent asks for them while it prepares the scripts." />
+              : <Card className="h-40 animate-pulse-soft" />}
+          </div>
+        </div> : null}
 
         {chat ? <div className={cn('h-full', tab !== 'chat' && 'hidden')}>
           <PlatformChatPanel key={chat.id} sessionId={chat.id} loadingLabel="Opening the deployment chat…"

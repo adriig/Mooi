@@ -73,4 +73,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=900s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:59100/health', timeout=4)"]
 
 # Single worker on purpose: the engine and the one-dictation lock live in this process.
-CMD ["sh", "-c", "mkdir -p \"$HOME\" && python -m mic_speech.shared.engine provision && exec uvicorn mic_speech.main:app --host 127.0.0.1 --port \"$SPEECH_PORT\" --ws-max-size 16000 --ws-max-queue 8 --timeout-graceful-shutdown 5"]
+CMD ["sh", "-c", "mkdir -p \"$HOME\" && python -m mic_speech.shared.engine provision && exec uvicorn mic_speech.main:app --host 127.0.0.1 --port \"$SPEECH_PORT\" --timeout-graceful-shutdown 5"]

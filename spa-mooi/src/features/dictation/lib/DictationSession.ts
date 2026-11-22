@@ -1,42 +1,42 @@
 import { DictationAudioHealth } from '@/features/dictation/lib/DictationAudioHealth';
 import { DictationCapture } from '@/features/dictation/lib/DictationCapture';
+import { dictationMaxSeconds } from '@/features/dictation/lib/dictationLimits';
 import { DICTATION_MESSAGES } from '@/features/dictation/lib/dictationMessages';
-import { dictationStreamUrl } from '@/features/dictation/lib/dictationStreamUrl';
+import { dictationUrl } from '@/features/dictation/lib/dictationUrl';
+import { encodeWav } from '@/features/dictation/lib/encodeWav';
 import type { DictationCallbacks } from '@/features/dictation/types/DictationCallbacks';
-import type { DictationServerMessage } from '@/features/dictation/types/DictationServerMessage';
+import type { DictationTranscription } from '@/features/dictation/types/DictationTranscription';
 import { microphoneErrorMessage } from '@/features/dictation/lib/microphoneErrorMessage';
 import { acquireAudioSession } from '@/features/dictation/lib/audioSession';
 
-const CONNECT_TIMEOUT_MS = 15_000;
-const FINALIZE_TIMEOUT_MS = 30_000;
-/** ~4 s of PCM16 at 16 kHz queued unsent: the link cannot keep up with real time. */
-const MAX_BUFFERED_BYTES = 128_000;
-const BYTES_PER_MS = 32;
+const START_TIMEOUT_MS = 15_000;
+/** Flushing the capture, uploading the whole recording and transcribing it on the server. */
+const TRANSCRIBE_TIMEOUT_MS = 120_000;
+const BYTES_PER_SECOND = 32_000;
 
 /**
- * One dictation: microphone → AudioWorklet (native rate in, PCM16 16 kHz 100 ms frames out) → WebSocket to
- * mic-speech, and the running transcript back. The microphone is requested first, inside the user
- * gesture, before any server session exists; the audio engine starts only once it is open. Capture
- * and connection then start together: frames captured before the server is ready are queued, so
- * no spoken word is lost. Recording is announced only when the server is ready *and* the microphone
- * is heard; a capture without signal is rebuilt once (fresh microphone and audio engine), then
- * fails. Every exit path releases every resource, and once disposed no callback fires again.
+ * One dictation, recorded whole and transcribed once (as GitHub Copilot's voice input does):
+ * microphone → AudioWorklet (native rate in, PCM16 16 kHz frames out) → memory, then on stop a single
+ * WAV upload to mic-speech, which answers with the text. Nothing travels while recording. The
+ * microphone is requested first, inside the user gesture; the audio engine starts only once it is
+ * open. Recording is announced once the microphone is heard; a capture without signal is rebuilt
+ * once (fresh microphone and audio engine), then fails. Reaching the service's maximum length stops
+ * the recording and transcribes it. Every exit path releases every resource, and once disposed no
+ * callback fires again.
  */
 export class DictationSession {
   private readonly callbacks: DictationCallbacks;
   private closed = false;
   private stopping = false;
-  private serverReady = false;
   private heard = false;
   private ready = false;
   private audioFailed = false;
-  private maxSeconds = 0;
+  private maxBytes = Infinity;
   private capturedBytes = 0;
-  private pending: ArrayBuffer[] = [];
+  private frames: ArrayBuffer[] = [];
   private capture: DictationCapture | null = null;
-  private socket: WebSocket | null = null;
+  private readonly upload = new AbortController();
   private timer: number | undefined;
-  private limitTimer: number | undefined;
   private releaseAudioSession: (() => void) | null = null;
   private readonly health = new DictationAudioHealth(
     () => this.recoverCapture(),
@@ -53,7 +53,11 @@ export class DictationSession {
       return;
     }
     this.releaseAudioSession = acquireAudioSession();
-    this.arm(CONNECT_TIMEOUT_MS, DICTATION_MESSAGES.audioBlocked);
+    this.arm(START_TIMEOUT_MS, DICTATION_MESSAGES.audioBlocked);
+    void dictationMaxSeconds().then((seconds) => {
+      this.maxBytes = seconds * BYTES_PER_SECOND;
+      this.enforceLimit();
+    });
     const capture = this.createCapture();
     try {
       await capture.openMicrophone();
@@ -62,7 +66,6 @@ export class DictationSession {
       return;
     }
     if (this.closed) return;
-    this.open();
     try {
       await capture.startAudio();
     } catch {
@@ -81,7 +84,7 @@ export class DictationSession {
     if (!this.closed && !this.stopping) this.capture?.resume();
   }
 
-  /** Releases capture synchronously; the worklet then flushes audio already buffered. */
+  /** Releases capture synchronously; the worklet then flushes audio already buffered, and it all uploads. */
   stop(): void {
     if (this.closed || this.stopping) return;
     this.stopping = true;
@@ -92,7 +95,7 @@ export class DictationSession {
       return;
     }
     this.callbacks.onStopping();
-    this.arm(FINALIZE_TIMEOUT_MS, DICTATION_MESSAGES.finalizeTimeout);
+    this.arm(TRANSCRIBE_TIMEOUT_MS, DICTATION_MESSAGES.finalizeTimeout);
     const capture = this.capture;
     void capture?.stop().then(() => this.finishCapture(capture));
   }
@@ -101,14 +104,13 @@ export class DictationSession {
     if (this.closed) return;
     this.closed = true;
     window.clearTimeout(this.timer);
-    window.clearTimeout(this.limitTimer);
     this.health.stop();
     this.capture?.release(this.audioFailed);
     this.capture = null;
-    this.pending = [];
+    this.frames = [];
     this.releaseAudioSession?.();
     this.releaseAudioSession = null;
-    if (this.socket && this.socket.readyState < WebSocket.CLOSING) this.socket.close();
+    this.upload.abort();
   }
 
   private createCapture(): DictationCapture {
@@ -124,83 +126,28 @@ export class DictationSession {
     return capture;
   }
 
-  private open(): void {
-    const socket = new WebSocket(dictationStreamUrl());
-    this.socket = socket;
-    this.arm(CONNECT_TIMEOUT_MS, DICTATION_MESSAGES.connectTimeout);
-    socket.onmessage = (event) => this.receive(event.data);
-    const lost = () => this.fail(this.serverReady ? DICTATION_MESSAGES.connectionInterrupted : DICTATION_MESSAGES.connectFailed);
-    socket.onerror = lost;
-    socket.onclose = lost;
-  }
-
-  private receive(data: unknown): void {
-    if (this.closed) return;
-    let message: DictationServerMessage;
-    try {
-      message = JSON.parse(String(data)) as DictationServerMessage;
-    } catch {
-      this.fail(DICTATION_MESSAGES.invalidResponse);
-      return;
-    }
-    switch (message.type) {
-      case 'ready':
-        this.onServerReady(message.maxSeconds);
-        return;
-      case 'partial':
-        this.callbacks.onPartial(message.text);
-        return;
-      case 'final':
-        // No recognized speech does not imply a broken audio engine.
-        this.dispose();
-        this.callbacks.onFinal(message.text);
-        return;
-      case 'error':
-        this.fail(message.message);
-        return;
-      default:
-        this.fail(DICTATION_MESSAGES.invalidResponse);
-    }
-  }
-
-  private onServerReady(maxSeconds: number): void {
-    window.clearTimeout(this.timer);
-    this.serverReady = true;
-    this.maxSeconds = maxSeconds;
-    const pending = this.pending;
-    this.pending = [];
-    pending.forEach((frame) => this.socket?.send(frame));
-    this.announce();
-  }
-
   private onFrame(frame: ArrayBuffer): void {
     if (this.closed) return;
+    this.frames.push(frame);
     this.capturedBytes += frame.byteLength;
     if (!this.stopping && this.health.frame(frame) && !this.heard) {
       this.heard = true;
       this.announce();
     }
-    if (!this.serverReady) {
-      this.pending.push(frame);
-      return;
-    }
-    const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
-      this.fail(DICTATION_MESSAGES.backpressure);
-      return;
-    }
-    socket.send(frame);
+    this.enforceLimit();
   }
 
-  /** Recording starts when the server is ready and the microphone is heard, whichever comes last. */
+  /** Recording starts once the microphone is heard: it is never shown over a dead microphone. */
   private announce(): void {
-    if (this.ready || this.stopping || !this.serverReady || !this.heard) return;
+    if (this.ready || this.stopping || !this.heard) return;
+    window.clearTimeout(this.timer);
     this.ready = true;
     this.callbacks.onReady();
-    // The server counts every frame, those captured before recording was announced included.
-    const remaining = this.maxSeconds * 1000 - this.capturedBytes / BYTES_PER_MS;
-    this.limitTimer = window.setTimeout(() => this.stop(), Math.max(0, remaining));
+  }
+
+  /** The service rejects longer recordings, so the limit ends the recording and transcribes it. */
+  private enforceLimit(): void {
+    if (!this.stopping && this.capturedBytes >= this.maxBytes) this.stop();
   }
 
   /** The proven path of a page's first capture: a new microphone stream on a fresh audio engine. */
@@ -216,7 +163,34 @@ export class DictationSession {
     if (this.closed || this.capture !== capture) return;
     capture?.release();
     this.capture = null;
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'stop' }));
+    const recording = encodeWav(this.frames);
+    this.frames = [];
+    void this.transcribe(recording);
+  }
+
+  private async transcribe(recording: Blob): Promise<void> {
+    let response: Response;
+    try {
+      response = await fetch(dictationUrl('transcriptions'), {
+        method: 'POST',
+        body: recording,
+        credentials: 'same-origin',
+        signal: this.upload.signal,
+      });
+    } catch {
+      this.fail(DICTATION_MESSAGES.connectFailed);
+      return;
+    }
+    const answer = (await response.json().catch(() => null)) as DictationTranscription | null;
+    if (this.closed) return;
+    if (response.ok && answer && 'text' in answer && typeof answer.text === 'string') {
+      this.dispose();
+      this.callbacks.onFinal(answer.text);
+    } else if (answer && 'message' in answer && typeof answer.message === 'string') {
+      this.fail(answer.message);
+    } else {
+      this.fail(response.ok ? DICTATION_MESSAGES.invalidResponse : DICTATION_MESSAGES.connectFailed);
+    }
   }
 
   private arm(delay: number, message: string): void {

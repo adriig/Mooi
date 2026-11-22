@@ -1,5 +1,4 @@
 import type { Project } from '@/features/projects/types/Project';
-import { PlatformEnvironmentCard } from '@/features/platform/components/PlatformEnvironmentCard';
 import { ProductionHero } from '@/features/production/components/ProductionHero';
 import { ProductionHistoryCard } from '@/features/production/components/ProductionHistoryCard';
 import { ProductionStats } from '@/features/production/components/ProductionStats';
@@ -61,9 +60,7 @@ export const ProductionOverviewPanel = ({ project, overview, error, onRetry, sta
               <summary className="cursor-pointer text-sm font-bold text-danger">status.sh reported a problem</summary>
               <pre className="mt-2 max-h-40 overflow-auto font-mono text-xs whitespace-pre-wrap break-all text-danger">{health.health.output}</pre>
             </details> : null}
-            <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
-              <PlatformEnvironmentCard variables={overview.environment} onEdit={onEnvironment}
-                emptyDescription="No variables yet. The agent asks for them while it prepares the scripts." />
+            <div className="grid items-start gap-5">
               <ProductionHistoryCard deployments={history.deployments} loading={history.loading} error={history.error}
                 canRedeploy={overview.configured && missingVariables === 0 && stage !== 'deploying' && !deploying}
                 onOpen={onOpenDeployment} onRedeploy={onRedeploy} />

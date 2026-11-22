@@ -12,7 +12,7 @@ const ERROR_VISIBLE_MS = 6000;
 
 /**
  * The dictation state machine (`idle → connecting → recording → stopping → idle`) bound to one
- * field: the running transcript is written straight into it, at the cursor. The state is mirrored
+ * field: once the whole recording is transcribed, the text is written into it, at the cursor. The state is mirrored
  * in a ref so window-level listeners always read the current value, and every session callback is
  * ignored once its session is no longer the current one.
  */
@@ -50,9 +50,6 @@ export const useDictation = (field: RefObject<DictationField | null>): Dictation
     const current: DictationSession = new DictationSession({
       onReady: () => {
         if (session.current === current) setState('recording');
-      },
-      onPartial: (partial) => {
-        if (session.current === current) live.update(partial);
       },
       onStopping: () => {
         if (session.current === current) setState('stopping');

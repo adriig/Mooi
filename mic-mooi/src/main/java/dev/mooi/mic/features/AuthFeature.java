@@ -125,6 +125,12 @@ public class AuthFeature {
         return new CurrentPlayerPayload(AuthService.toPayload(principal.player()));
     }
 
+    @PutMapping("/me/preferences/delete-merged-branch")
+    @Auth.Authenticated
+    public CurrentPlayerPayload setDeleteMergedBranch(@RequestBody DeleteMergedBranchRequest request, Auth.Principal principal) {
+        return new CurrentPlayerPayload(authService.setDeleteMergedBranch(principal.player().id(), request.enabled()));
+    }
+
     /**
      * Service-only: a fresh access token for a sign-in that is still live, so an agent or a run acting
      * for the player keeps working after the token of the request that started it expired.
@@ -223,6 +229,13 @@ public class AuthFeature {
                 return Optional.empty();
             }
             return playerRepository.findById(playerId).filter(AuthService::allowed).map(AuthService::toAuthenticatedPlayer);
+        }
+
+        @Transactional
+        public PlayerPayload setDeleteMergedBranch(UUID playerId, boolean enabled) {
+            Player player = playerRepository.findById(playerId).orElseThrow();
+            player.setDeleteMergedBranch(enabled);
+            return toPayload(player);
         }
 
         /**
@@ -521,12 +534,12 @@ public class AuthFeature {
 
         static PlayerPayload toPayload(Player player) {
             return new PlayerPayload(player.getId(), player.getUsername(), player.getEmail(),
-                    player.getAvatarUrl(), player.getRole().wire(), player.getCreatedAt());
+                    player.getAvatarUrl(), player.getRole().wire(), player.getCreatedAt(), player.isDeleteMergedBranch());
         }
 
         static PlayerPayload toPayload(Auth.AuthenticatedPlayer player) {
             return new PlayerPayload(player.id(), player.username(), player.email(), player.avatarUrl(),
-                    player.role().wire(), player.createdAt());
+                    player.role().wire(), player.createdAt(), false);
         }
     }
 
@@ -582,6 +595,9 @@ public class AuthFeature {
         /** NULL means allowed. Set by an administrator: no sign-in is accepted while it is set. */
         @Column(name = "banned_at")
         private OffsetDateTime bannedAt;
+
+        @Column(name = "delete_merged_branch", nullable = false)
+        private boolean deleteMergedBranch;
     }
 
     /** One sign-in — the unit revocation acts on. */
@@ -716,7 +732,10 @@ public class AuthFeature {
 
     /** {@code googleId} is deliberately absent: it never leaves the server. */
     public record PlayerPayload(UUID id, String username, String email, String avatarUrl, String role,
-                                OffsetDateTime createdAt) {
+                                OffsetDateTime createdAt, boolean deleteMergedBranch) {
+    }
+
+    public record DeleteMergedBranchRequest(boolean enabled) {
     }
 
     public record AccessTokenRequest(@NotNull UUID playerId) {

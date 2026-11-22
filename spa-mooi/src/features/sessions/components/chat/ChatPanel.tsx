@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { SessionConfiguration } from '@/features/sessions/types/SessionConfiguration';
 import type { SessionProvider } from '@/features/sessions/types/SessionProvider';
 import { CircleAlert, LoaderCircle } from 'lucide-react';
@@ -34,6 +35,7 @@ interface ChatPanelProps {
   onAllowPermission: (requestId: string, updatedInput?: Record<string, unknown>) => void;
   onDenyPermission: (requestId: string, message?: string) => void;
   onAnswerQuestion: (requestId: string, answers: Record<string, string | string[]>) => void;
+  beforeComposer?: ReactNode;
 }
 
 /**
@@ -62,6 +64,7 @@ export const ChatPanel = ({
   onAllowPermission,
   onDenyPermission,
   onAnswerQuestion,
+  beforeComposer,
 }: ChatPanelProps) => {
   const [sending, setSending] = useState(false);
   const asides = useAsides(session.id);
@@ -121,8 +124,11 @@ export const ChatPanel = ({
 
     <AsideStack asides={asides.asides} onDismiss={asides.dismiss} />
 
+    {beforeComposer}
+
     <ChatComposer
       key={`composer-${session.id}`}
+      draftKey={session.id}
       usage={session.usage}
       status={session.status}
       deploying={deploying}

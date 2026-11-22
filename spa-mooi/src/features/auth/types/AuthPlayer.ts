@@ -7,4 +7,5 @@ export interface AuthPlayer {
   avatarUrl: string | null;
   role: PlayerRole;
   createdAt: string;
+  deleteMergedBranch: boolean;
 }

@@ -17,6 +17,7 @@ import { EmptyState } from '@/shared/components/EmptyState';
 import { useBackLink } from '@/shared/hooks/useBackLink';
 import { buttonStyles } from '@/shared/styles/buttonStyles';
 import { useSessionsStore } from '@/stores/sessionsStore';
+import { Button } from '@/shared/components/Button';
 
 export const SessionPage = () => {
   const { projectId, sessionId } = useParams();
@@ -81,6 +82,12 @@ export const SessionPage = () => {
   const pending = transcript?.pending ?? [];
   const streamState = transcript?.streamState ?? 'closed';
   const deployEnabled = deploymentAvailable(project, session.deployment);
+  const lastMergeEntry = transcript?.lastMerge
+    ? entries.findIndex((entry) => entry.id === `merge-${transcript.lastMerge?.seq}`)
+    : -1;
+  const hasActivityAfterLastMerge = lastMergeEntry < 0 || lastMergeEntry < entries.length - 1;
+  const canCloseMergedSession = Boolean(transcript?.lastMerge) && !hasActivityAfterLastMerge
+    && !transcript?.changes?.files.length && session.status === 'ready';
 
   const handleClose = () => {
     void close(session.id).then((closed) => {
@@ -140,6 +147,11 @@ export const SessionPage = () => {
               onAllowPermission={(requestId, updatedInput) => void allowPermission(requestId, updatedInput)}
               onDenyPermission={(requestId, message) => void denyPermission(requestId, message)}
               onAnswerQuestion={(requestId, answers) => void answer(requestId, answers)}
+              beforeComposer={canCloseMergedSession ? <div className="shrink-0 border-t border-line px-4 py-2.5 lg:px-6">
+                <Button variant="secondary" size="sm" onClick={handleClose} disabled={closing}>
+                  {closing ? 'Closing session…' : 'Close merged session'}
+                </Button>
+              </div> : null}
             />
           </div>
         </div>

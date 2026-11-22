@@ -1,40 +1,35 @@
-"""Feature: push-to-talk dictation bridge.
+"""Feature: push-to-talk dictation, one whole recording per request.
 
-`WS /api/stt/stream` relays raw PCM16 (mono, 16 kHz, little endian) from the browser to one
-engine realtime session and streams the running transcript back, full duplex: browser audio and
-engine results are awaited at the same time, so partials never wait behind audio.
+The browser records the complete dictation and only then uploads it, the way GitHub Copilot's voice
+input does: `POST /api/stt/transcriptions` with an `audio/wav` body (PCM16, mono, 16 kHz). The
+recording goes to the engine's offline transcription endpoint (`POST /v1/audio/transcriptions`, the
+model's full-attention transcript mode rather than its realtime stream) and the answer is
+`{"text": "..."}` (may be empty). Errors answer `{"message": "..."}`: 400 invalid audio, 403 origin,
+413 too long, 503 busy, 502 transcription failure. `GET /api/stt/limits` tells the SPA the maximum
+recording length, so it stops recording on time.
 
-Browser protocol — binary audio frames (even length, at most 500 ms; the SPA sends 100 ms), then
-exactly one `{"type":"stop"}`. Server messages: `ready`, `partial` (whole running text), `final` (definitive
-text, may be empty) and `error` (followed by close). Close codes: 1000 normal, 1008 origin or
-invalid/expired session, 1011 transcription failure, 1013 busy.
-
-One dictation at a time per machine. A new dictation waits briefly for the previous one to be
-released (a browser that abandoned it is only noticed after its queued frames), then gets `busy`.
-The session is released (engine socket closed, metrics queued, lock freed) before `final` is
-sent, so the next dictation can start at once. The engine socket never holds the lock longer than
-`ENGINE_CLOSE_TIMEOUT_SECONDS`: an engine still behind real time acknowledges a close only after
-transcribing its backlog, so an abandoned session is dropped instead. Audio and text are never
+One transcription at a time per machine: the CPU engine serves them in order, and a request that
+waits longer than `QUEUE_WAIT_SECONDS` gets `busy`. A recording without any frame loud enough to be
+speech is answered at once with empty text, without waking the engine. Audio and text are never
 stored nor logged: only counts and timings.
-
-The engine stream starts at the speech onset (`_OnsetGate`): a realtime session whose first audio
-is near-silent stays deaf for several seconds and loses the words spoken meanwhile, whatever
-follows. Chrome's echo-cancelled capture opens with such frames, mostly on a resumed audio engine.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import math
 import sys
 import time
+import wave
 from array import array
-from collections import deque
 
-from fastapi import APIRouter, WebSocket
-from websockets.asyncio.client import ClientConnection, connect
+import httpx
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from mic_speech.shared.engine import get_engine
 from mic_speech.shared.env import Settings, get_settings
@@ -46,29 +41,34 @@ router = APIRouter()
 
 SAMPLE_RATE = 16000
 BYTES_PER_SECOND = SAMPLE_RATE * 2
-MAX_FRAME_BYTES = 16000
-DEADLINE_MARGIN_SECONDS = 30
-IDLE_TIMEOUT_SECONDS = 30
-ENGINE_OPEN_TIMEOUT_SECONDS = 15
-ENGINE_CLOSE_TIMEOUT_SECONDS = 1
-ENGINE_MAX_MESSAGE_BYTES = 1 << 20
-LOCK_WAIT_SECONDS = 3
+# RIFF header and optional chunks a WAV writer may add around the samples.
+WAV_OVERHEAD_BYTES = 4096
+# The SPA stops on the limit; its last audio frame may cross it slightly.
+LENGTH_MARGIN_SECONDS = 1
+QUEUE_WAIT_SECONDS = 30
+ENGINE_CONNECT_TIMEOUT_SECONDS = 5
 CONTEXT_BOOST = 3.0
-# A frame this loud (RMS, PCM16) opens the engine stream: above room noise, below any speech onset.
-ONSET_RMS = 500
-# Audio kept before the onset frame: the engine needs a short lead-in to catch the first word.
-PREROLL_BYTES = BYTES_PER_SECOND // 5
+# A 100 ms window this loud (RMS, PCM16) holds speech: above room noise, below any speech onset.
+SPEECH_RMS = 500
+WINDOW_BYTES = BYTES_PER_SECOND // 10
 
 BUSY_MESSAGE = "Dictation is busy. Try again."
-INVALID_MESSAGE = "The session expired or the audio is not valid. Try again."
+INVALID_MESSAGE = "The recording is not valid audio. Try again."
+TOO_LONG_MESSAGE = "The recording is too long."
+FORBIDDEN_MESSAGE = "Dictation is not available from this origin."
 FAILURE_MESSAGE = "The audio could not be transcribed."
 
 _lock = asyncio.Lock()
 _background: set[asyncio.Task] = set()
 
 
-class _InvalidSession(Exception):
-    """Client broke the protocol or a deadline expired: close with 1008."""
+class _Rejected(Exception):
+    """The request cannot be transcribed: answered with `status` and a user-facing `message`."""
+
+    def __init__(self, status: int, message: str, reason: str) -> None:
+        super().__init__(reason)
+        self.status = status
+        self.message = message
 
 
 def _rms(frame: bytes) -> float:
@@ -78,154 +78,68 @@ def _rms(frame: bytes) -> float:
     return math.sqrt(math.sumprod(samples, samples) / len(samples))
 
 
-class _OnsetGate:
-    """Holds the audio back until the first frame with sound, then releases it with its pre-roll.
-
-    Leading silence carries no words, so dropping it loses nothing; the engine only ever sees a
-    stream that starts on real signal. Once open, every frame passes through untouched.
-    """
-
-    def __init__(self) -> None:
-        self.open = False
-        self.held_back_bytes = 0
-        self._preroll: deque[bytes] = deque()
-        self._preroll_bytes = 0
-
-    def admit(self, frame: bytes) -> list[bytes]:
-        """Returns the frames to forward to the engine now, in order."""
-        if self.open:
-            return [frame]
-        if _rms(frame) >= ONSET_RMS:
-            self.open = True
-            frames = [*self._preroll, frame]
-            self.held_back_bytes -= self._preroll_bytes
-            self._preroll.clear()
-            return frames
-        self.held_back_bytes += len(frame)
-        self._preroll.append(frame)
-        self._preroll_bytes += len(frame)
-        while self._preroll_bytes - len(self._preroll[0]) >= PREROLL_BYTES:
-            self._preroll_bytes -= len(self._preroll.popleft())
-        return []
+def _has_speech(pcm: bytes) -> bool:
+    windows = (pcm[offset:offset + WINDOW_BYTES] for offset in range(0, len(pcm), WINDOW_BYTES))
+    return any(_rms(window) >= SPEECH_RMS for window in windows)
 
 
-class _Transcription:
-    """One engine realtime session plus the text assembled from its events."""
+async def _read_body(request: Request, max_bytes: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise _Rejected(413, TOO_LONG_MESSAGE, "Maximum dictation length exceeded")
+    return bytes(body)
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-        self._engine: ClientConnection | None = None
-        self.finalized: list[str] = []
-        self.draft = ""
-        self.received_bytes = 0
-        self.onset = _OnsetGate()
-        self.partials = 0
-        self.created_at = time.perf_counter()
-        self.first_partial_ms: float | None = None
-        self.stop_at: float | None = None
-        self.final_at: float | None = None
 
-    @property
-    def engine(self) -> ClientConnection:
-        if self._engine is None:
-            raise RuntimeError("Engine session is not open")
-        return self._engine
+def _samples(audio: bytes, max_seconds: int) -> bytes:
+    """The PCM16 samples of a valid recording; rejects any other WAV layout or length."""
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as recording:
+            layout = (recording.getnchannels(), recording.getsampwidth(), recording.getframerate(),
+                      recording.getcomptype())
+            frames = recording.getnframes()
+            pcm = recording.readframes(frames)
+    except (wave.Error, EOFError) as error:
+        raise _Rejected(400, INVALID_MESSAGE, f"Unreadable WAV: {error}") from None
+    if layout != (1, 2, SAMPLE_RATE, "NONE") or not frames or len(pcm) != frames * 2:
+        raise _Rejected(400, INVALID_MESSAGE, "Unexpected WAV layout")
+    if frames > (max_seconds + LENGTH_MARGIN_SECONDS) * SAMPLE_RATE:
+        raise _Rejected(413, TOO_LONG_MESSAGE, "Maximum dictation length exceeded")
+    return pcm
 
-    async def open(self, url: str) -> None:
-        self._engine = await connect(
-            url, max_size=ENGINE_MAX_MESSAGE_BYTES, open_timeout=ENGINE_OPEN_TIMEOUT_SECONDS,
-            close_timeout=ENGINE_CLOSE_TIMEOUT_SECONDS,
+
+async def _transcribe(settings: Settings, audio: bytes) -> str:
+    fields = {
+        "language": settings.speech_language,
+        "response_format": "json",
+        "automatic_punctuation": "true",
+    }
+    if settings.speech_contexts:
+        fields["speech_contexts"] = json.dumps([{"phrases": settings.speech_contexts, "boost": CONTEXT_BOOST}])
+    # Offline transcription runs faster than real time; the recording length bounds the wait generously.
+    timeout = httpx.Timeout(settings.speech_max_seconds, connect=ENGINE_CONNECT_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            get_engine().transcriptions_url, data=fields, files={"file": ("dictation.wav", audio, "audio/wav")},
         )
-        if (await self._receive_event()).get("type") != "session.created":
-            raise RuntimeError("Engine did not create a session")
-        session: dict = {
-            "sample_rate": SAMPLE_RATE,
-            "language": self._settings.speech_language,
-            "automatic_punctuation": True,
-        }
-        if self._settings.speech_contexts:
-            session["speech_contexts"] = [{"phrases": self._settings.speech_contexts, "boost": CONTEXT_BOOST}]
-        await self.engine.send(json.dumps({"type": "session.update", "session": session}))
-        if (await self._receive_event()).get("type") != "session.updated":
-            raise RuntimeError("Engine rejected the language setting")
-
-    async def _receive_event(self) -> dict:
-        return json.loads(await asyncio.wait_for(self.engine.recv(), ENGINE_OPEN_TIMEOUT_SECONDS))
-
-    async def close(self) -> None:
-        engine, self._engine = self._engine, None
-        if engine is not None:
-            await engine.close()
-
-    def apply(self, raw: str | bytes) -> str | None:
-        """Folds one engine event into the text; returns `partial`, `completed` or None (ignored)."""
-        event = json.loads(raw)
-        kind = event.get("type")
-        if kind == "error":
-            raise RuntimeError("Engine reported a transcription error")
-        if kind == "conversation.item.input_audio_transcription.delta":
-            self.draft += event.get("delta") or ""
-            return "partial"
-        if kind == "conversation.item.input_audio_transcription.completed":
-            transcript = (event.get("transcript") or "").strip()
-            if transcript:
-                self.finalized.append(transcript)
-            self.draft = ""
-            return "completed"
-        return None
-
-    def text(self) -> str:
-        return " ".join(part for part in (*self.finalized, self.draft.strip()) if part).strip()
-
-    def mark_partial(self) -> None:
-        self.partials += 1
-        if self.first_partial_ms is None:
-            self.first_partial_ms = (time.perf_counter() - self.created_at) * 1000
+    if response.status_code == 429:
+        raise _Rejected(503, BUSY_MESSAGE, "Engine queue is full")
+    response.raise_for_status()
+    text = response.json().get("text")
+    if not isinstance(text, str):
+        raise TypeError("Engine answered without text")
+    return text.strip()
 
 
-async def _send(websocket: WebSocket, message: dict) -> None:
-    try:
-        await websocket.send_json(message)
-    except Exception:  # noqa: BLE001 - the browser may already be gone; nothing left to tell it
-        pass
-
-
-async def _close(websocket: WebSocket, code: int) -> None:
-    try:
-        await websocket.close(code=code)
-    except Exception:  # noqa: BLE001 - already closed
-        pass
-
-
-async def _cancel(task: asyncio.Task | None) -> None:
-    if task is None:
-        return
-    task.cancel()
-    try:
-        await task
-    except BaseException:  # noqa: BLE001 - its outcome no longer matters
-        pass
-
-
-def _record(dictation: _Transcription, outcome: str) -> None:
-    # Only a transcription the engine finished has a finalization latency; silence ends at once.
-    stop_to_final_ms = (
-        (dictation.final_at - dictation.stop_at) * 1000
-        if outcome in ("final", "empty") and dictation.onset.open and dictation.stop_at and dictation.final_at
-        else None
-    )
+def _record(outcome: str, audio_seconds: float, transcribe_ms: float | None) -> None:
+    # Whole recordings have no partials; `stop_to_final_ms` is the engine's transcription time.
     entry = Dictation(
-        outcome=outcome,
-        audio_seconds=dictation.received_bytes / BYTES_PER_SECOND,
-        first_partial_ms=dictation.first_partial_ms,
-        partial_count=dictation.partials,
-        stop_to_final_ms=stop_to_final_ms,
+        outcome=outcome, audio_seconds=audio_seconds, first_partial_ms=None, partial_count=0,
+        stop_to_final_ms=transcribe_ms,
     )
-    LOG.info(
-        "Dictation outcome=%s audio_s=%.1f lead_silence_s=%.1f first_partial_ms=%s partials=%d stop_to_final_ms=%s",
-        outcome, entry.audio_seconds, dictation.onset.held_back_bytes / BYTES_PER_SECOND,
-        _ms(entry.first_partial_ms), entry.partial_count, _ms(stop_to_final_ms),
-    )
+    LOG.info("Dictation outcome=%s audio_s=%.1f transcribe_ms=%s", outcome, audio_seconds,
+             "-" if transcribe_ms is None else f"{transcribe_ms:.0f}")
 
     async def write() -> None:
         try:
@@ -238,127 +152,51 @@ def _record(dictation: _Transcription, outcome: str) -> None:
     task.add_done_callback(_background.discard)
 
 
-def _ms(value: float | None) -> str:
-    return "-" if value is None else f"{value:.0f}"
+def _error(status: int, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"message": message})
 
 
-def _validate_frame(dictation: _Transcription, frame: bytes, max_seconds: int) -> None:
-    if not frame or len(frame) % 2 or len(frame) > MAX_FRAME_BYTES:
-        raise _InvalidSession("Invalid audio frame")
-    dictation.received_bytes += len(frame)
-    if dictation.received_bytes > max_seconds * BYTES_PER_SECOND:
-        raise _InvalidSession("Maximum dictation length exceeded")
+@router.get("/api/stt/limits")
+async def limits() -> dict:
+    return {"maxSeconds": get_settings().speech_max_seconds}
 
 
-def _is_stop(text: str | None) -> bool:
-    try:
-        return json.loads(text or "") == {"type": "stop"}
-    except ValueError:
-        return False
-
-
-@router.websocket("/api/stt/stream")
-async def stream(websocket: WebSocket) -> None:
+@router.post("/api/stt/transcriptions")
+async def transcriptions(request: Request) -> JSONResponse:
     settings = get_settings()
-    if websocket.headers.get("origin") != settings.cors_origin:
-        await websocket.close(code=1008)
-        return
-    await websocket.accept()
+    if request.headers.get("origin") != settings.cors_origin:
+        return _error(403, FORBIDDEN_MESSAGE)
+
+    audio_seconds = 0.0
     try:
-        await asyncio.wait_for(_lock.acquire(), LOCK_WAIT_SECONDS)
-    except TimeoutError:
-        await _send(websocket, {"type": "error", "message": BUSY_MESSAGE})
-        await _close(websocket, 1013)
-        return
-
-    dictation = _Transcription(settings)
-    browser_task: asyncio.Task | None = None
-    engine_task: asyncio.Task | None = None
-    released = False
-    outcome = "error"
-
-    async def release() -> None:
-        nonlocal released
-        if released:
-            return
-        released = True
+        max_bytes = (settings.speech_max_seconds + LENGTH_MARGIN_SECONDS) * BYTES_PER_SECOND + WAV_OVERHEAD_BYTES
+        audio = await _read_body(request, max_bytes)
+        pcm = _samples(audio, settings.speech_max_seconds)
+        audio_seconds = len(pcm) / BYTES_PER_SECOND
+        if not _has_speech(pcm):  # silence only: nothing to transcribe
+            _record("empty", audio_seconds, None)
+            return JSONResponse({"text": ""})
         try:
-            await _cancel(browser_task)
-            await _cancel(engine_task)
-            await dictation.close()
-            _record(dictation, outcome)
-        except Exception:  # noqa: BLE001 - release must always free the lock
-            LOG.warning("Dictation release failed", exc_info=True)
+            await asyncio.wait_for(_lock.acquire(), QUEUE_WAIT_SECONDS)
+        except TimeoutError:
+            raise _Rejected(503, BUSY_MESSAGE, "Another dictation is being transcribed") from None
+        try:
+            started = time.perf_counter()
+            text = await _transcribe(settings, audio)
+            transcribe_ms = (time.perf_counter() - started) * 1000
         finally:
             _lock.release()
-
-    async def finish(text: str) -> None:
-        nonlocal outcome
-        dictation.final_at = time.perf_counter()
-        outcome = "final" if text else "empty"
-        await release()
-        await _send(websocket, {"type": "final", "text": text})
-
-    loop = asyncio.get_running_loop()
-    try:
-        await dictation.open(get_engine().realtime_url)
-        await _send(websocket, {"type": "ready", "maxSeconds": settings.speech_max_seconds})
-        deadline = loop.time() + settings.speech_max_seconds + DEADLINE_MARGIN_SECONDS
-        browser_task = asyncio.create_task(websocket.receive())
-        engine_task = asyncio.create_task(dictation.engine.recv())
-        stopping = False
-
-        while True:
-            remaining = deadline - loop.time()
-            pending = {task for task in (browser_task, engine_task) if task is not None}
-            done, _ = await asyncio.wait(
-                pending, timeout=max(0.0, min(IDLE_TIMEOUT_SECONDS, remaining)), return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not done:
-                raise _InvalidSession("Dictation timed out")
-
-            if browser_task is not None and browser_task in done:
-                message = browser_task.result()
-                if message["type"] == "websocket.disconnect":
-                    outcome = "cancelled"
-                    return
-                frame = message.get("bytes")
-                if frame is not None:
-                    _validate_frame(dictation, frame, settings.speech_max_seconds)
-                    for audio in dictation.onset.admit(frame):
-                        await dictation.engine.send(audio)
-                    browser_task = asyncio.create_task(websocket.receive())
-                elif _is_stop(message.get("text")):
-                    stopping = True
-                    dictation.stop_at = time.perf_counter()
-                    browser_task = None
-                    if not dictation.onset.open:  # silence only: nothing to transcribe
-                        await finish("")
-                        break
-                    await dictation.engine.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                else:
-                    raise _InvalidSession("Unexpected client message")
-
-            if engine_task in done:
-                event = dictation.apply(engine_task.result())
-                if event == "completed" and stopping:
-                    await finish(dictation.text())
-                    break
-                if event is not None:
-                    dictation.mark_partial()
-                    await _send(websocket, {"type": "partial", "text": dictation.text()})
-                engine_task = asyncio.create_task(dictation.engine.recv())
-
-        await _close(websocket, 1000)
-    except _InvalidSession as error:
-        LOG.info("Dictation rejected: %s", error)
-        await release()
-        await _send(websocket, {"type": "error", "message": INVALID_MESSAGE})
-        await _close(websocket, 1008)
+    except ClientDisconnect:
+        _record("cancelled", audio_seconds, None)
+        return _error(400, INVALID_MESSAGE)
+    except _Rejected as rejection:
+        LOG.info("Dictation rejected: %s", rejection)
+        _record("error", audio_seconds, None)
+        return _error(rejection.status, rejection.message)
     except Exception:  # noqa: BLE001 - any engine or transport failure ends this dictation only
         LOG.warning("Dictation failed", exc_info=True)
-        await release()
-        await _send(websocket, {"type": "error", "message": FAILURE_MESSAGE})
-        await _close(websocket, 1011)
-    finally:
-        await release()
+        _record("error", audio_seconds, None)
+        return _error(502, FAILURE_MESSAGE)
+
+    _record("final" if text else "empty", audio_seconds, transcribe_ms)
+    return JSONResponse({"text": text})

@@ -28,6 +28,8 @@ import { cn } from '@/shared/utils/cn';
 import { compactInstructions } from '@/features/sessions/lib/compactCommand';
 
 interface ChatComposerProps {
+  /** Stable session identity used to keep an unsent draft across navigation and reloads. */
+  draftKey: string;
   status: SessionStatus;
   usage?: SessionUsage;
   busy: boolean;
@@ -73,6 +75,7 @@ const empty: QueuedMessage[] = [];
 const recoverableHint = 'The agent lost its connection. Your draft, workspace and changes are kept.';
 
 export const ChatComposer = ({
+  draftKey,
   status,
   usage,
   busy,
@@ -103,12 +106,28 @@ export const ChatComposer = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dictation = useDictation(textareaRef);
   const menuId = useId();
-  const [value, setValue] = useState('');
+  const storageKey = `mooi:chat-draft:${draftKey}`;
+  const [value, setValue] = useState(() => {
+    try {
+      return window.localStorage.getItem(storageKey) ?? '';
+    } catch {
+      return '';
+    }
+  });
   const [menuIndex, setMenuIndex] = useState(0);
   // The draft the command menu was dismissed on; typing anything else reopens it.
   const [menuDismissedOn, setMenuDismissedOn] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const draft = useImageDraft();
+
+  useEffect(() => {
+    try {
+      if (value) window.localStorage.setItem(storageKey, value);
+      else window.localStorage.removeItem(storageKey);
+    } catch {
+      // Draft persistence is best effort when browser storage is unavailable.
+    }
+  }, [storageKey, value]);
 
   const effortOptions = modelOptions.find((option) => option.id === model)?.efforts ?? [];
   const configurationDisabled = deploying || busy || status === 'closed' || status === 'failed' || status === 'compacting' || modelLoading || Boolean(modelError);

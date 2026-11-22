@@ -129,8 +129,8 @@ class Engine:
         return self._process is not None and self._process.returncode is None
 
     @property
-    def realtime_url(self) -> str:
-        return f"ws://127.0.0.1:{self._port}/v1/audio/transcriptions/realtime"
+    def transcriptions_url(self) -> str:
+        return f"http://127.0.0.1:{self._port}/v1/audio/transcriptions"
 
     async def start(self) -> None:
         binary = resolve_binary(self._settings)

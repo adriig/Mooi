@@ -56,6 +56,9 @@ from it. Where they differ, this context wins over the current implementation (s
   next one, in order, until the queue is empty, even with no device connected. Queued messages can be
   edited or removed until they go out; stopping a turn keeps the queue, and a failed session holds it until
   it reconnects. Same in development, production and backup chats.
+- **Issue planning is decided in the session**: creating a session never plans To-dos. At any point the user
+  can ask the agent in the chat to break work into issues on the project's To-dos list, through the same
+  platform API as the To-dos views.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK; Antigravity, which ships no agent SDK: one adapter, **Antigravity CLI**, which
@@ -159,7 +162,8 @@ from it. Where they differ, this context wins over the current implementation (s
 - **Repository files** (committed only when the target needs them): e.g. a production Compose file reading
   env variables, holding variable references, never values.
 - **Production variables**: values stored only in the platform; set manually in their menu or by the chat;
-  both views stay in sync.
+  both views stay in sync. Stored values that neither the deployment scripts nor the backup scripts read
+  are flagged as unused and preselected for removal.
 - An open production chat can be reused to change or fix the deployment.
 
 ## Backups

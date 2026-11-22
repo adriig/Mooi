@@ -322,6 +322,8 @@ class ProductionEnvironmentVariable(BaseModel):
     required: bool
     # A MOOI_DEVELOPMENT_ value, managed in the project's sessions.
     inherited: bool = False
+    # Mentioned by deploy.sh or status.sh (active or draft) or by the backup scripts, which inherit it.
+    used: bool = True
 
 
 class ProductionOverview(BaseModel):
@@ -702,6 +704,7 @@ class MergePayload(BaseModel):
     targetBranch: str
     conflicts: list[str]
     commit: str | None = None
+    branchDeleteWarning: str | None = None
     suggestedMessage: str | None = None
 
 
@@ -2399,11 +2402,12 @@ def _require_mergeable(session: Session) -> None:
 
 
 def _merge_payload(preview: workspaces.MergePreview, commit: str | None = None,
+                   branch_delete_warning: str | None = None,
                    suggested_message: str | None = None) -> MergePayload:
     state: MergeState = ("merged" if commit else "conflicts" if preview.conflicts
                          else "up_to_date" if preview.up_to_date else "clean")
     return MergePayload(state=state, targetBranch=preview.target, conflicts=preview.conflicts, commit=commit,
-                        suggestedMessage=suggested_message)
+                        branchDeleteWarning=branch_delete_warning, suggestedMessage=suggested_message)
 
 
 async def _current_suggested_commit(session: Session, preferences: dict) -> str | None:
@@ -2505,12 +2509,21 @@ async def merge_session(
         _touch(session)
         async with session.changes_lock:
             preview, commit = await workspaces.merge(session.workspace, session.base_branch, message, identity, token)
+        branch_delete_warning = None
         if commit is not None:
+            try:
+                if await mooi.delete_merged_branch_by_default(caller):
+                    await workspaces.delete_remote_branch(session.workspace, session.branch, token)
+            except Exception as failure:
+                LOG.warning("Merge succeeded but post-merge branch cleanup failed for session %s", session.id,
+                            exc_info=True)
+                branch_delete_warning = str(failure) or "The session branch could not be deleted."
             session.base_commit = commit
-            record(session, EVENT_MERGE_COMPLETED, {"targetBranch": preview.target, "commit": commit, "message": message})
+            record(session, EVENT_MERGE_COMPLETED, {"targetBranch": preview.target, "commit": commit,
+                                                    "message": message, "branchDeleteWarning": branch_delete_warning})
             _record_status(session, STATUS_READY)
             _schedule_changes_refresh(session, debounce=False)
-        return _merge_payload(preview, commit)
+        return _merge_payload(preview, commit, branch_delete_warning)
 
 
 @router.post("/sessions/{session_id}/merge/resolve", status_code=status.HTTP_202_ACCEPTED)
@@ -3129,12 +3142,19 @@ async def _save_production_environment(caller: Caller, project_id: UUID,
 @router.get("/production/projects/{project_id}")
 async def production_overview(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> ProductionOverview:
     _, run = await _owned_production(caller, project_id)
-    documents, development = await asyncio.gather(_production_documents(caller, project_id),
-                                                  _development_environment(caller, project_id))
+    documents, development, backups = await asyncio.gather(_production_documents(caller, project_id),
+                                                           _development_environment(caller, project_id),
+                                                           _backup_documents(caller, project_id))
     files = documents.draft or documents.active
     required = set(_required_environment(files))
     stored = set(documents.environment)
     server = {name for name, value in production_environment().items() if value}
+    # Backups inherit production values, so a value only their scripts read is still used.
+    scripts =[text for stored_files in (documents.active, documents.draft) if stored_files is not None
+               for text in (stored_files.script, stored_files.statusScript)]
+    scripts += [text for stored_files in (backups.active, backups.draft) if stored_files is not None
+                for text in (stored_files.backupScript, stored_files.restoreScript, stored_files.deleteScript)]
+    mentioned = {name for text in scripts for name in _PRODUCTION_VARIABLE.findall(text)}
     chat = _production_chat(caller.player_id, project_id)
     return ProductionOverview(
         configured=files is not None and files.complete, deployed=documents.active is not None,
@@ -3142,7 +3162,9 @@ async def production_overview(project_id: UUID, caller: Annotated[Caller, Depend
         targets=documents.active.targets if documents.active is not None else files.targets if files is not None else [],
         environment=[ProductionEnvironmentVariable(name=name, configured=name in stored or name in server
                                                    or name in development, required=name in required,
-                                                   inherited=name.startswith("MOOI_DEVELOPMENT_"))
+                                                   inherited=name.startswith("MOOI_DEVELOPMENT_"),
+                                                   # Without any script yet nothing can be judged unused.
+                                                   used=files is None or name in mentioned)
                      for name in sorted(required | stored)],
         snapshot=run.snapshot, chatSessionId=chat.id if chat else None,
         chatTested=bool(chat and chat.platform_tested),

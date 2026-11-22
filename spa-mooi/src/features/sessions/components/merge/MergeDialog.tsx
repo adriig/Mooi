@@ -13,13 +13,17 @@ interface MergeDialogProps {
   suggestedMessage: string | null;
   onCancel: () => void;
   onCommit: (message: string) => void;
+  merged: boolean;
+  onCloseSession: () => void;
+  closeBusy: boolean;
+  branchDeleteWarning: string | null;
 }
 
 const MAX_TITLE = 200;
 
 /** Asks for the one mandatory input of a merge: the title of the single commit pushed to the target. */
-export const MergeDialog = ({ targetBranch, branch, changes, merging, error, suggestedMessage,
-  onCancel, onCommit }: MergeDialogProps) => {
+export const MergeDialog = ({ targetBranch, branch, changes, merging, error, suggestedMessage, onCancel, onCommit,
+  merged, onCloseSession, closeBusy, branchDeleteWarning }: MergeDialogProps) => {
   const [title, setTitle] = useState(suggestedMessage ?? '');
   const valid = title.trim().length > 0;
   const submit = () => {
@@ -30,11 +34,11 @@ export const MergeDialog = ({ targetBranch, branch, changes, merging, error, sug
     <Modal open onClose={merging ? () => undefined : onCancel} title={`Merge into ${targetBranch}`}
       description={`No conflicts found. The changes of ${branch} land on ${targetBranch} as one commit, then it is pushed.`}
       footer={<>
-        <Button variant="ghost" onClick={onCancel} disabled={merging}>Cancel</Button>
-        <Button variant="brand" onClick={submit} disabled={!valid || merging}>
+        {merged ? <Button variant="ghost" onClick={onCancel}>Done</Button> : <Button variant="ghost" onClick={onCancel} disabled={merging}>Cancel</Button>}
+        {merged ? <Button variant="brand" onClick={onCloseSession} disabled={closeBusy}>{closeBusy ? 'Closing…' : 'Close session'}</Button> : <Button variant="brand" onClick={submit} disabled={!valid || merging}>
           {merging ? <LoaderCircle className="size-4 animate-spin" /> : <GitCommitHorizontal className="size-4" />}
           {merging ? 'Merging…' : 'Commit & push'}
-        </Button>
+        </Button>}
       </>}>
       <div className="flex flex-col gap-5">
         <label className="flex flex-col gap-2">
@@ -54,6 +58,8 @@ export const MergeDialog = ({ targetBranch, branch, changes, merging, error, sug
             <span className="font-mono text-danger">−{changes.removed}</span>
           </p>
         ) : null}
+        {merged ? <p role="status" className="text-sm text-success">Branch merged into {targetBranch}. You can close this session now.</p> : null}
+        {branchDeleteWarning ? <p role="alert" className="text-sm text-warning">The merge succeeded, but GitHub could not delete the session branch: {branchDeleteWarning}</p> : null}
         {error ? <p role="alert" className="text-sm text-danger [overflow-wrap:anywhere]">{error}</p> : null}
       </div>
     </Modal>
