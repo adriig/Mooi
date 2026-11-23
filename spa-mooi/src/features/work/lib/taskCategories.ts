@@ -1,4 +1,5 @@
-import { BookOpen, Code2, FlaskConical, Palette, Server, type LucideIcon } from 'lucide-react';
+import { BookOpen, Bug, Code2, FlaskConical, Palette, Server, type LucideIcon } from 'lucide-react';
+import type { WorkTask } from '@/features/work/types/WorkTask';
 import type { WorkTaskCategory } from '@/features/work/types/WorkTaskCategory';
 
 export interface TaskCategoryStyle {
@@ -40,6 +41,16 @@ export const TASK_CATEGORIES: Record<WorkTaskCategory, TaskCategoryStyle> = {
     chip: 'border-slate-500/30 bg-slate-500/12 text-slate-700 dark:text-slate-300',
   },
 };
+
+/** QA findings keep their execution category and have a distinct visual identity. */
+export const DEFECT_TASK_STYLE: TaskCategoryStyle = {
+  label: 'Defect', icon: Bug, stroke: '#ef4444',
+  node: 'border-red-500/45 bg-red-500/[0.07]',
+  chip: 'border-red-500/30 bg-red-500/12 text-red-700 dark:text-red-300',
+};
+
+export const taskStyle = (task: WorkTask): TaskCategoryStyle =>
+  task.fixOf ? DEFECT_TASK_STYLE : TASK_CATEGORIES[task.category];
 
 /** What a person may pick: QA tasks come from turning tests on, never from a category change. */
 export const EDITABLE_CATEGORIES: WorkTaskCategory[] = ['ux', 'dev', 'infra', 'docs'];

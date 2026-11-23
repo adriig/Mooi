@@ -11,7 +11,7 @@ import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import { WorkSettingsButton } from '@/features/work/components/WorkSettingsButton';
 import { useProjectWork } from '@/features/work/hooks/useProjectWork';
 import { layoutTaskGraph } from '@/features/work/lib/layoutTaskGraph';
-import { TASK_CATEGORIES } from '@/features/work/lib/taskCategories';
+import { DEFECT_TASK_STYLE, TASK_CATEGORIES, taskStyle } from '@/features/work/lib/taskCategories';
 import { ITEM_STATUS } from '@/features/work/lib/workStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import { Badge } from '@/shared/components/Badge';
@@ -57,7 +57,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const flowEdges: Edge[] = tasks.flatMap((task) => task.dependsOn.filter((id) => byId.has(id)).map((id) => {
       const source = byId.get(id)!;
-      const color = TASK_CATEGORIES[source.category].stroke;
+      const color = taskStyle(source).stroke;
       return {
         id: `${id}->${task.id}`, source: id, target: task.id,
         animated: task.status === 'running' || task.status === 'queued',
@@ -103,7 +103,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
       {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
 
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-subtle">
-        {Object.entries(TASK_CATEGORIES).map(([id, category]) => (
+        {Object.entries({ ...TASK_CATEGORIES, defect: DEFECT_TASK_STYLE }).map(([id, category]) => (
           <span key={id} className="inline-flex items-center gap-1.5">
             <span className="size-2.5 rounded-full" style={{ background: category.stroke }} /> {category.label}
           </span>
@@ -117,12 +117,12 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
           <Background gap={18} size={1} />
           <Controls showInteractive={false} />
           <MiniMap pannable zoomable className="!hidden sm:!block"
-            nodeColor={(node) => TASK_CATEGORIES[(node.data as { task: WorkTask }).task.category].stroke} />
+            nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
         </ReactFlow>
       </div>
 
       {openTask ? (
-        <Modal open size="lg" title={openTask.title} description={TASK_CATEGORIES[openTask.category].label}
+        <Modal open size="lg" title={openTask.title} description={taskStyle(openTask).label}
           onClose={() => setOpenTaskId(null)}>
           <TaskEditor projectId={projectId} task={openTask} tasks={tasks} connections={connections} busy={busy}
             onSave={(update) => run(() => updateWorkTask(projectId, feature.id, openTask.id, update))}

@@ -130,7 +130,9 @@ Each project plans and builds its work as a software factory: agents design it, 
   projects load only as they come into view.
 - **Board tab** (per project and feature): pick a feature and see its tasks as a left-to-right dependency
   graph of coloured nodes. Without opening a task, each node shows and changes auto-merge (robot icon),
-  provider and model, and tests. Finished tasks get a green check and stay where they are.
+  provider and model, and tests. Defects detected by QA appear as fix tasks in red, with a defect icon
+  and label; their connections and minimap markers use the same red. Finished tasks get a green check
+  and stay where they are.
 - **Execution**: **Start** applies to a feature, a defect or a debt item, never to a single task. From then
   on the platform runs it automatically, with no agent orchestrating and no device connected:
   - every unblocked task gets its own new session (one task, one session), within the account's session
