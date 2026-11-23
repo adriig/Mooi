@@ -94,8 +94,9 @@ from it. Where they differ, this context wins over the current implementation (s
 - Provider accounts link by each provider's own sign-in: Claude like the Claude Code app (OAuth2 + PKCE,
   the code Anthropic shows pasted back; a `claude setup-token` token only when operators turn sign-in
   off, and for existing links), Codex by device code, Antigravity like the Antigravity CLI signs in (Google OAuth2
-  performed by `agy` itself, the code Google shows pasted back; no API key), and OpenCode with an encrypted
-  OpenCode Console API key. The platform alone renews
+  performed by `agy` itself, the code Google shows pasted back; no API key), and OpenCode with either an
+  encrypted API key or an encrypted OpenCode account sign-in (including OpenCode Go subscriptions). The
+  account's ACP catalog exposes its available models. The platform alone renews
   Claude's sign-in tokens, so concurrent sessions of one account never race, and live sessions pick up a
   renewed token on their next message; the exception is Antigravity: `agy` renews its own sign-in inside a
   session and the platform stores the renewed bundle for the next one. The platform renews every Claude
