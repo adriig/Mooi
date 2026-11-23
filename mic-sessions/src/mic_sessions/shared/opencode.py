@@ -533,7 +533,7 @@ async def models(credential: Credential, binary: str, scratch: Path,
         await acp.close()
     if not result:
         raise OpenCodeError("OpenCode returned no models for this account")
-    for stale, (expires, _) in list(_catalogs.items()):
+    for stale, (expires, *_) in list(_catalogs.items()):
         if expires <= time.monotonic():
             _catalogs.pop(stale, None)
     if len(_catalogs) >= 1024:
