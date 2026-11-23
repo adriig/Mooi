@@ -442,13 +442,17 @@ Designing a feature:
 - `autoMerge` (default true) merges a finished task on its own, resolving conflicts with the agent; set it to false where the user should review the merge.
 - Assign every task: read `GET {work}/assignment` and follow its brief, as a dedicated sub-agent when your environment offers one, before recording the feature. Fill `assignment` (`provider`, `connectionId`, `model`, `effort`), `alternatives` and, for tasks with tests, `qa.assignment`.
 
+Recording a defect or debt:
+- A defect or debt still runs as one development task (and an optional QA task). Before creating its GitHub issue, read `GET {work}/assignment` and use the assignment expert to choose the task's `assignment` and ordered `alternatives`, weighing the issue's complexity, the user's favorite models and the accounts' current quota. Include both in `task` when calling `POST {work}/issues`; do not leave a task created by you unassigned.
+- If the issue already exists, call `PUT {work}/issues/<number>/item`, then assign its development task through `PATCH {work}/items/<itemId>/tasks/<taskId>` with the same expert-selected `assignment` and `alternatives`. If tests are appropriate, also select and set the QA assignment, using a different model as the assignment brief requires.
+
 Platform API:
 - `GET {work}`: the project's `items` (features, and the defects and debt Mooi already runs, each with its `tasks`) and its `issues` (defects and debt on GitHub; `issuesError` explains an empty list).
 - `POST {work}/features` with JSON `{{"title", "spec", "dependsOn": null, "tasks": [{{"key", "title", "category", "description", "acceptance", "assignment": {{"provider", "connectionId", "model", "effort"}}, "alternatives": [], "autoMerge": true, "tests": false, "qa": {{"acceptance", "assignment"}}, "dependsOn": ["<key>"]}}]}}`.
 - `PATCH {work}/items/<itemId>` (`title`, `spec`, `dependsOn`: an item id, or "" to clear); `POST {work}/items/<itemId>/tasks` (one task as above); `PATCH {work}/items/<itemId>/tasks/<taskId>` (any task field; `dependsOn` replaces the list); `DELETE {work}/items/<itemId>/tasks/<taskId>`.
 - Only when explicitly requested, `POST {work}/items/<itemId>/reassign` rechecks current quota for tasks not yet running and applies the first available saved assignment/fallback; `POST {work}/items/<itemId>/tasks/<taskId>/retry` restarts a queued task or one waiting to retry. Neither starts work on a planned item.
 - `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5). Change them only when the user asks.
-- `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with."""
+- `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with. `task.assignment` and `task.alternatives` come from the assignment expert, just like feature task settings."""
 
 
 def _task_section(run: TaskRun, root: str) -> str:

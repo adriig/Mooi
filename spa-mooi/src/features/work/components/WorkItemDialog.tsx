@@ -1,10 +1,11 @@
 import { lazy, Suspense, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, Network, Settings2, Trash2 } from 'lucide-react';
+import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, Network, RefreshCw, Settings2, Trash2 } from 'lucide-react';
 import { projectPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
-  deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, startWorkItem, updateWorkIssue, updateWorkItem,
+  deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, reassignWorkTasks, startWorkItem,
+  updateWorkIssue, updateWorkItem,
   updateWorkTask,
 } from '@/features/work/api/workApi';
 import { TaskEditor } from '@/features/work/components/TaskEditor';
@@ -44,11 +45,29 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
   const [openTask, setOpenTask] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReassign, setConfirmReassign] = useState(false);
+  const [reassignMessage, setReassignMessage] = useState<string | null>(null);
   const kind = WORK_KINDS[entry.kind];
   const text = item?.spec || entry.issue?.body || '';
   const tasks = item?.tasks ?? [];
   const done = tasks.filter((task) => task.status === 'done').length;
   const status = item ? ITEM_STATUS[item.status] : entry.issue?.state === 'closed' ? ITEM_STATUS.done : ITEM_STATUS.planned;
+  const hasReassignableTasks = tasks.some((task) =>
+    task.status === 'planned' || task.status === 'queued'
+    || (task.status === 'attention' && task.sessionId === null));
+
+  const recalculateAssignments = async () => {
+    if (!item) return;
+    const result = await run(() => reassignWorkTasks(projectId, item.id));
+    setConfirmReassign(false);
+    if (result) {
+      const unchanged = result.eligibleCount - result.changedCount;
+      setReassignMessage(
+        `${result.changedCount} assignment${result.changedCount === 1 ? '' : 's'} updated from current quota; `
+        + `${unchanged} unchanged.`,
+      );
+    }
+  };
 
   const start = async () => {
     const target = item ?? (entry.issue ? await run(() => ensureIssueItem(projectId, entry.issue!.number)) : null);
@@ -67,6 +86,12 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
               className="inline-flex items-center gap-1 text-xs font-semibold text-ink-muted hover:text-ink">
               GitHub #{entry.issue.number} <ExternalLink className="size-3" />
             </a>
+          ) : null}
+          {entry.issue && item && entry.kind !== 'feature' && hasReassignableTasks ? (
+            <Button size="sm" variant="ghost" ariaLabel="Refresh model assignment" disabled={busy}
+              onClick={() => { setReassignMessage(null); setConfirmReassign(true); }}>
+              <RefreshCw className="size-4" /> <span className="hidden sm:inline">Refresh assignment</span>
+            </Button>
           ) : null}
           {item && entry.kind === 'feature' ? (
             <Link to={`${projectPath(projectId)}?tab=board&feature=${item.id}`}
@@ -91,6 +116,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
         </div>
 
         {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
+        {reassignMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{reassignMessage}</p> : null}
 
         {text ? (
           <section className="relative rounded-card border border-line bg-surface-2/40 px-4 py-3 text-sm leading-relaxed text-ink">
@@ -168,6 +194,21 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
             </ul>
           </section>
         ) : null}
+
+        <Modal open={confirmReassign} title="Refresh model assignment"
+          description="Check the latest provider quota and try this item's saved model assignment and alternatives again."
+          onClose={() => setConfirmReassign(false)}
+          footer={<>
+            <Button variant="secondary" disabled={busy} onClick={() => setConfirmReassign(false)}>Cancel</Button>
+            <Button variant="primary" disabled={busy} onClick={() => { void recalculateAssignments(); }}>
+              <RefreshCw className="size-4" /> Refresh
+            </Button>
+          </>}>
+          <p className="text-sm leading-relaxed text-ink-muted">
+            Only tasks that have not started are considered. Running or finished tasks keep their assignment.
+            This refreshes quota and uses the assignment expert's saved choices; it does not start work.
+          </p>
+        </Modal>
 
         {item && entry.kind === 'feature' && item.status !== 'running' ? (
           <div className="flex justify-end border-t border-line pt-3">
