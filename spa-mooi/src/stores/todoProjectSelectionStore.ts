@@ -8,6 +8,8 @@ interface TodoProjectSelectionState {
   select: (playerId: string, projectIds: string[] | null) => void;
 }
 
+export const TODO_PROJECT_SELECTION_STORAGE_KEY = `${env.storagePrefix}:todos-project-selection`;
+
 /** A view preference on this device, kept separately for each signed-in player. */
 export const useTodoProjectSelectionStore = create<TodoProjectSelectionState>()(
   persist(
@@ -17,6 +19,6 @@ export const useTodoProjectSelectionStore = create<TodoProjectSelectionState>()(
         selections: { ...state.selections, [playerId]: projectIds ?? undefined },
       })),
     }),
-    { name: `${env.storagePrefix}:todos-project-selection` },
+    { name: TODO_PROJECT_SELECTION_STORAGE_KEY },
   ),
 );
