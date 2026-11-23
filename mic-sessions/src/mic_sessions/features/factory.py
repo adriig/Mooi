@@ -132,14 +132,15 @@ async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Js
     limits = await mooi.send_work(caller, "GET", project_id, "/settings") or DEFAULT_LIMITS
     connections = [connection for connection in await mooi.fetch_agent_connections(caller)
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
-    quota_snapshots = await _refresh_account_quotas(caller, connections)
+    quota_snapshots, catalogs = await asyncio.gather(
+        _refresh_account_quotas(caller, connections), _account_catalogs(caller, connections))
     changed = 0
     eligible = 0
     for task in item.get("tasks", []):
         if task["status"] not in ("planned", "queued", "attention") or task.get("sessionId") is not None:
             continue
         eligible += 1
-        assignment = _select_assignment(task, connections, _quota_limit(limits), quota_snapshots)
+        assignment = _select_assignment(task, connections, _quota_limit(limits), catalogs, quota_snapshots)
         if assignment is None or _same_assignment(task.get("assignment") or {}, assignment):
             continue
         item = await _update_task(caller, project_id, item_id, UUID(task["id"]), {"assignment": assignment})
@@ -398,6 +399,7 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
 
 ASSIGNMENT_BRIEF = """You are the assignment expert of the software factory: for each task, pick the provider, account, model and thinking effort that will do it best without exhausting the user's quota.
 - Choose only among the accounts, models and efforts listed with this brief. Never invent one.
+- Each assignment and alternative must use a model and effort listed for its specific `connectionId`: accounts of the same provider can offer different catalogs.
 - Decide in this order, and never let a later step override an earlier one:
   1. **Quota first, always.** `quotaLimit` is the project's quota percent from which an account is spared. An account whose known `percent` in any window is at or above `quotaLimit` (`eligible: false`) must not be assigned, nor used as an alternative, while any eligible account exists. `percent: null` means the quota is unknown right now (no live session reads it): such an account is eligible, but prefer known healthy accounts for the heaviest tasks. If no account is eligible, assign as usual: the platform keeps the task waiting until an account has quota left.
   2. **Fit the work.** Architecture, cross-cutting or subtle work gets a strong model with high effort; routine UI, wiring, configuration or documentation gets a fast, cheaper model with low or medium effort. Effort costs quota: raise it only where reasoning pays off. A QA task always runs on a different model than the task it checks, preferably from another provider, with medium effort.
@@ -496,25 +498,36 @@ def _quota_limit(settings: Json) -> float:
     return float(limit if isinstance(limit, (int, float)) else DEFAULT_LIMITS["quotaLimit"])
 
 
+async def _account_catalogs(caller: Caller, connections: list[Json]) -> dict[str, Json]:
+    """Load each account once, concurrently; catalogs are never shared between connections."""
+    async def load(connection: Json) -> tuple[str, Json]:
+        connection_id = str(connection["id"])
+        try:
+            descriptor = PROVIDERS[connection["provider"]]
+            # Preparation and configuration must share a task: account catalogs use ContextVars.
+            async with asyncio.timeout(20):
+                prepared = await descriptor.prepare(caller, connection_id)
+                catalog = descriptor.configuration(prepared.id)
+            return connection_id, {"models": [{"id": model["id"], "efforts": model.get("efforts", [])}
+                                               for model in catalog.get("models", [])],
+                                   "defaultModel": catalog.get("defaultModel")}
+        except Exception:
+            LOG.debug("No model catalog for account %s", connection_id, exc_info=True)
+            return connection_id, {"models": [], "defaultModel": None}
+
+    unique = {str(connection["id"]): connection for connection in connections}
+    return dict(await asyncio.gather(*(load(connection) for connection in unique.values())))
+
+
 async def _capacity(caller: Caller, quota_limit: float, favorites: dict[str, list[str]]) -> list[Json]:
     """Every usable account with its catalog, favorites marked, and whether its quota keeps it eligible."""
+    connections = [connection for connection in await mooi.fetch_agent_connections(caller)
+                   if connection.get("provider") in PROVIDERS and not connection.get("stale")]
+    catalogs = await _account_catalogs(caller, connections)
     accounts = []
-    catalogs: dict[str, Json] = {}
-    for connection in await mooi.fetch_agent_connections(caller):
-        provider = connection.get("provider")
-        if provider not in PROVIDERS or connection.get("stale"):
-            continue
-        if provider not in catalogs:
-            try:
-                descriptor = PROVIDERS[provider]
-                prepared = await asyncio.wait_for(descriptor.prepare(caller, str(connection["id"])), timeout=20)
-                catalog = descriptor.configuration(prepared.id)
-                catalogs[provider] = {"models": [{"id": model["id"], "efforts": model.get("efforts", [])}
-                                                 for model in catalog.get("models", [])],
-                                      "defaultModel": catalog.get("defaultModel")}
-            except Exception:
-                LOG.debug("No model catalog for %s", provider, exc_info=True)
-                catalogs[provider] = {"models": [], "defaultModel": None}
+    for connection in connections:
+        provider = connection["provider"]
+        catalog = catalogs[str(connection["id"])]
         quota = {name: {"percent": value.get("percent"), "resetsAt": value.get("resetsAt")}
                  for name, value in _quota(str(connection["id"])).items() if isinstance(value, dict)}
         percent = _highest_percent(str(connection["id"]))
@@ -524,9 +537,9 @@ async def _capacity(caller: Caller, quota_limit: float, favorites: dict[str, lis
                          "defaultAccount": bool(connection.get("defaultAccount")),
                          "quota": quota or None, "percent": percent,
                          "eligible": percent is None or percent < quota_limit,
-                         **catalogs[provider],
+                         **catalog,
                          "models": [{**model, "favorite": model["id"] in preferred}
-                                    for model in catalogs[provider]["models"]]})
+                                    for model in catalog["models"]]})
     return accounts
 
 
@@ -729,7 +742,7 @@ async def _wait(task: Json, reason: str) -> None:
 async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json) -> None:
     assignment = await _assign(caller, task, _quota_limit(limits))
     if assignment is None:
-        await _wait(task, "Waiting for an account with quota left")
+        await _wait(task, "Waiting for an account with the requested model and quota left")
         return
     key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
     branch = f"factory/{key}-{uuid4().hex[:6]}"
@@ -754,15 +767,16 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
     """The task's assignment, or its first alternative, on an account with quota left. An unnamed account
     is the provider's default one; an account running low is swapped for another of the same provider.
     Quota is checked again here, at launch: no saved preference (favorite model, named account) ever
-    launches on an account whose known quota reached `quota_limit`."""
+    launches on an account whose known quota reached `quota_limit` or whose catalog lacks the model."""
     connections = [connection for connection in await mooi.fetch_agent_connections(caller)
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
-    return _select_assignment(task, connections, quota_limit)
+    catalogs = await _account_catalogs(caller, connections)
+    return _select_assignment(task, connections, quota_limit, catalogs)
 
 
-def _select_assignment(task: Json, connections: list[Json], quota_limit: float,
+def _select_assignment(task: Json, connections: list[Json], quota_limit: float, catalogs: dict[str, Json],
                        quota_snapshots: dict[str, Json] | None = None) -> Json | None:
-    """Pick the first configured assignment/fallback whose account is currently under the quota limit."""
+    """Pick the first configured assignment/fallback whose account offers the model and has quota."""
     if not connections:
         return None
     snapshots = quota_snapshots or {}
@@ -782,6 +796,10 @@ def _select_assignment(task: Json, connections: list[Json], quota_limit: float,
                                               account_percent(connection) or 0.0))
         for account in accounts:
             percent = account_percent(account)
+            catalog = catalogs[str(account["id"])]
+            model = candidate.get("model") or catalog.get("defaultModel")
+            if not any(entry["id"] == model for entry in catalog["models"]):
+                continue
             if percent is None or percent < quota_limit:
                 return {"provider": provider, "connectionId": str(account["id"]),
                         "model": candidate.get("model"), "effort": candidate.get("effort")}
