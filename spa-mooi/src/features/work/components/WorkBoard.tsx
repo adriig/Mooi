@@ -68,7 +68,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const flowEdges: Edge[] = tasks.flatMap((task) => task.dependsOn.filter((id) => byId.has(id)).map((id) => {
       const source = byId.get(id)!;
-      const color = taskStyle(source).stroke;
+      const color = task.fixOf || source.fixOf ? DEFECT_TASK_STYLE.stroke : taskStyle(task).stroke;
       return {
         id: `${id}->${task.id}`, source: id, target: task.id,
         animated: task.status === 'running' || task.status === 'queued',

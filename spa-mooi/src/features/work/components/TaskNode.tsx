@@ -62,11 +62,11 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
       </p>
       <TaskQuickControls task={task} connections={connections} editable={taskEditable(task) && !busy}
         onUpdate={(update) => onUpdate(task, update)} className="mt-auto" />
-      {task.status === 'queued' || (task.status === 'attention' && task.sessionId === null) ? (
+      {task.status === 'attention' && task.sessionId === null ? (
         <div className="flex justify-end" onClick={(event) => event.stopPropagation()}>
           <Button size="sm" variant="secondary" disabled={busy} onClick={() => onRetry(task)}
-            ariaLabel={task.status === 'queued' ? 'Retry this queued task now' : 'Restart this task'}>
-            <RotateCcw className="size-3.5" /> {task.status === 'queued' ? 'Retry' : 'Restart'}
+            ariaLabel="Restart this task">
+            <RotateCcw className="size-3.5" /> Restart
           </Button>
         </div>
       ) : null}

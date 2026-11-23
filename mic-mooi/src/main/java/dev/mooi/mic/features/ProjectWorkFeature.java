@@ -21,6 +21,8 @@ import java.util.stream.Collectors;
 
 import org.hibernate.annotations.Immutable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -431,9 +433,8 @@ public class ProjectWorkFeature {
             requireOpen(item);
             List<WorkTask> all = new ArrayList<>(tasks.findByItemId(itemId));
             WorkTask task = find(all, taskId);
-            if (task.getStatus() != TaskStatus.queued
-                    && !(task.getStatus() == TaskStatus.attention && task.getSessionId() == null)) {
-                throw conflict("Only a queued task or a task waiting to retry can be restarted");
+            if (task.getStatus() != TaskStatus.attention || task.getSessionId() != null) {
+                throw conflict("Only a task waiting to retry can be restarted");
             }
             task.setStatus(TaskStatus.planned);
             task.setSessionId(null);
@@ -565,6 +566,7 @@ public class ProjectWorkFeature {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             WorkItem item = items.findLockedById(task.getItemId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            task = tasks.findLockedById(taskId).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             List<WorkTask> all = tasks.findByItemId(item.getId());
             if (item.getStatus() == ItemStatus.done) {
                 return runnerItem(item, all);
@@ -1322,6 +1324,10 @@ public class ProjectWorkFeature {
     }
 
     public interface WorkTaskRepository extends JpaRepository<WorkTask, UUID> {
+
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select task from WorkTask task where task.id = :id")
+        Optional<WorkTask> findLockedById(@Param("id") UUID id);
 
         List<WorkTask> findByItemId(UUID itemId);
 

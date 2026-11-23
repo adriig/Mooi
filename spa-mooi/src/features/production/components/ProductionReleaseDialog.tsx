@@ -68,7 +68,8 @@ export const ProductionReleaseDialog = ({ projectId, defaultBranch, busy, error,
   const valid = choice.tag.length > 0 && (mode === 'existing' || RELEASE_TAG_PATTERN.test(choice.tag));
   const checkingWork = mode === 'create' && workCheck?.epoch !== epoch;
   const workError = workCheck?.epoch === epoch ? workCheck.error : null;
-  const incompleteFeatures = (items ?? []).filter((item) => item.projectId === projectId && item.kind === 'feature' && item.status !== 'done');
+  const incompleteFeatures = (items ?? []).filter((item) => item.projectId === projectId && item.kind === 'feature'
+    && item.tasks.some((task) => task.status === 'done') && item.tasks.some((task) => task.status !== 'done'));
   // Confirmation belongs to this release and warning; a newly pending feature requires consent again.
   const warningKey = mode === 'create' && !checkingWork && (workError || incompleteFeatures.length > 0)
     ? JSON.stringify([projectId, choice.tag, workError, incompleteFeatures.map(({ id, title }) => [id, title]).sort()]) : null;

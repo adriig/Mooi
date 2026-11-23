@@ -12,7 +12,7 @@ import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
-import { TASK_CATEGORIES } from '@/features/work/lib/taskCategories';
+import { taskStyle } from '@/features/work/lib/taskCategories';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
 import { ITEM_STATUS, TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
@@ -161,7 +161,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
             <h3 className="text-xs font-semibold tracking-[0.08em] text-ink-subtle uppercase">Tasks</h3>
             <ul className="flex flex-col gap-2">
               {tasks.map((task) => {
-                const category = TASK_CATEGORIES[task.category];
+                const category = taskStyle(task);
                 const state = TASK_STATUS[taskState(task, tasks)];
                 const open = openTask === task.id;
                 const Icon = category.icon;

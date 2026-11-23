@@ -45,8 +45,16 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
   useEffect(() => {
     if (!requestedWork) return;
     const entry = entries.find((candidate) => candidate.item?.id === requestedWork);
-    if (entry) setOpenKey(entry.key);
-  }, [entries, requestedWork]);
+    if (entry) {
+      setOpenKey(entry.key);
+      return;
+    }
+    if (items) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('work');
+      setSearchParams(next, { replace: true });
+    }
+  }, [entries, items, requestedWork, searchParams, setSearchParams]);
 
   const closeEntry = () => {
     setOpenKey(null);
