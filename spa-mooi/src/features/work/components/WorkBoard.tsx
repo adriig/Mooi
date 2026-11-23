@@ -66,11 +66,19 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [reassignMessage, setReassignMessage] = useState<string | null>(null);
   const features = useMemo(() => (items ?? []).filter((item) => item.kind === 'feature'), [items]);
+  const showCompleted = searchParams.get('completed') === '1';
+  const selectableFeatures = showCompleted ? features : features.filter((item) => item.status !== 'done');
   const requested = searchParams.get('feature');
-  const feature = features.find((item) => item.id === requested)
-    ?? features.find((item) => item.status !== 'done') ?? features[0] ?? null;
+  const feature = selectableFeatures.find((item) => item.id === requested) ?? selectableFeatures[0] ?? null;
   const tasks = useMemo(() => feature?.tasks ?? [], [feature]);
   const openTask = tasks.find((task) => task.id === openTaskId) ?? null;
+  const updateFeatureSelection = (featureId: string | undefined, includeCompleted: boolean) => {
+    setSearchParams({
+      tab: 'board',
+      ...(featureId ? { feature: featureId } : {}),
+      ...(includeCompleted ? { completed: '1' } : {}),
+    }, { replace: true });
+  };
 
   const { nodes, edges } = useMemo(() => {
     const positions = layoutTaskGraph(tasks);
@@ -106,9 +114,18 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
     return <Card className="h-[60vh] animate-pulse-soft" />;
   }
   if (!feature) {
+    const hasCompletedFeatures = features.some((item) => item.status === 'done');
     return (
-      <EmptyState icon={Network} title="No features yet"
-        description="Describe a feature to the agent of any session: it designs the tasks, and their map shows up here." />
+      <EmptyState icon={Network} title={hasCompletedFeatures ? 'All features resolved' : 'No features yet'}
+        description={hasCompletedFeatures
+          ? 'There are no active features to show on the Board.'
+          : 'Describe a feature to the agent of any session: it designs the tasks, and their map shows up here.'}>
+        {hasCompletedFeatures ? (
+          <Button variant="secondary" onClick={() => updateFeatureSelection(features[0]?.id, true)}>
+            Show completed features
+          </Button>
+        ) : null}
+      </EmptyState>
     );
   }
 
@@ -134,11 +151,21 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <label className="flex min-w-0 flex-1 items-center gap-2">
           <span className="sr-only">Feature</span>
-          <select value={feature.id} onChange={(event) => setSearchParams({ tab: 'board', feature: event.target.value }, { replace: true })}
+          <select value={feature.id} onChange={(event) => updateFeatureSelection(event.target.value, showCompleted)}
             className="h-10 w-full min-w-0 rounded-control border border-line bg-surface px-3 text-sm font-semibold text-ink outline-none focus:border-brand sm:max-w-md">
-            {features.map((item) => <option key={item.id} value={item.id}>{item.title}{item.status === 'done' ? ' (done)' : ''}</option>)}
+            {selectableFeatures.map((item) => <option key={item.id} value={item.id}>{item.title}{item.status === 'done' ? ' (done)' : ''}</option>)}
           </select>
         </label>
+        {features.some((item) => item.status === 'done') ? (
+          <label className="inline-flex min-h-10 shrink-0 items-center gap-2 text-sm text-ink-muted">
+            <input type="checkbox" className="size-3.5 accent-brand" checked={showCompleted}
+              onChange={(event) => updateFeatureSelection(
+                event.target.checked ? feature.id : features.find((item) => item.status !== 'done')?.id,
+                event.target.checked,
+              )} />
+            Show completed
+          </label>
+        ) : null}
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={status.tone}>{status.label}</Badge>
           <span className="font-mono text-[11px] text-ink-subtle tabular-nums">{done}/{tasks.length} done</span>
