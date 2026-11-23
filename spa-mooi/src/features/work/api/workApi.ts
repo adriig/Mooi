@@ -36,6 +36,14 @@ export const deleteWorkItem = (projectId: string, itemId: string) =>
 export const updateWorkTask = (projectId: string, itemId: string, taskId: string, update: WorkTaskUpdate) =>
   send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}`), 'PATCH', 'Could not save this task.', update);
 
+export const retryWorkTask = (projectId: string, itemId: string, taskId: string) =>
+  send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}/retry`), 'POST',
+    'Could not restart this task.');
+
+export const reassignWorkTasks = (projectId: string, itemId: string) =>
+  send<{ item: WorkItem; changedCount: number; eligibleCount: number }>(
+    workPath(projectId, `/items/${itemId}/reassign`), 'POST', 'Could not recalculate task assignments.');
+
 export const deleteWorkTask = (projectId: string, itemId: string, taskId: string) =>
   send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}`), 'DELETE', 'Could not remove this task.');
 

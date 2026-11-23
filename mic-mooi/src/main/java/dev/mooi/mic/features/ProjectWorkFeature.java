@@ -143,6 +143,14 @@ public class ProjectWorkFeature {
         return work.updateTask(principal.player().id(), projectId, itemId, taskId, update);
     }
 
+    @PostMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}/retry")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ItemPayload retryTask(@PathVariable UUID projectId, @PathVariable UUID itemId, @PathVariable UUID taskId,
+                                 Auth.Principal principal) {
+        return work.retryTask(principal.player().id(), projectId, itemId, taskId);
+    }
+
     @DeleteMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}")
     @Auth.Authenticated
     @Auth.ServiceCall
@@ -411,6 +419,27 @@ public class ProjectWorkFeature {
             }
             requireAcyclic(all);
             tasks.saveAll(all);
+            return toPayload(touch(item), all);
+        }
+
+        @Transactional
+        public ItemPayload retryTask(UUID playerId, UUID projectId, UUID itemId, UUID taskId) {
+            project(playerId, projectId);
+            WorkItem item = lockedItem(projectId, itemId);
+            requireOpen(item);
+            List<WorkTask> all = new ArrayList<>(tasks.findByItemId(itemId));
+            WorkTask task = find(all, taskId);
+            if (task.getStatus() != TaskStatus.queued
+                    && !(task.getStatus() == TaskStatus.attention && task.getSessionId() == null)) {
+                throw conflict("Only a queued task or a task waiting to retry can be restarted");
+            }
+            task.setStatus(TaskStatus.planned);
+            task.setSessionId(null);
+            task.setAttempts(0);
+            task.setReport(null);
+            task.setStartedAt(null);
+            task.setFinishedAt(null);
+            tasks.save(task);
             return toPayload(touch(item), all);
         }
 

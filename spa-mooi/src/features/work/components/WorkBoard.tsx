@@ -2,9 +2,11 @@ import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Network } from 'lucide-react';
+import { Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
-import { deleteWorkTask, pauseWorkItem, startWorkItem, updateWorkTask } from '@/features/work/api/workApi';
+import {
+  deleteWorkTask, pauseWorkItem, reassignWorkTasks, retryWorkTask, startWorkItem, updateWorkTask,
+} from '@/features/work/api/workApi';
 import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskNode, type TaskFlowNode } from '@/features/work/components/TaskNode';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
@@ -15,6 +17,7 @@ import { DEFECT_TASK_STYLE, TASK_CATEGORIES, taskStyle } from '@/features/work/l
 import { ITEM_STATUS } from '@/features/work/lib/workStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import { Badge } from '@/shared/components/Badge';
+import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Modal } from '@/shared/components/Modal';
@@ -38,6 +41,8 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
   const theme = useThemeStore((state) => state.theme);
   const [searchParams, setSearchParams] = useSearchParams();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [confirmReassign, setConfirmReassign] = useState(false);
+  const [reassignMessage, setReassignMessage] = useState<string | null>(null);
   const features = useMemo(() => (items ?? []).filter((item) => item.kind === 'feature'), [items]);
   const requested = searchParams.get('feature');
   const feature = features.find((item) => item.id === requested)
@@ -50,9 +55,15 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
     const update = (task: WorkTask, change: Parameters<typeof updateWorkTask>[3]) => {
       if (feature) void run(() => updateWorkTask(projectId, feature.id, task.id, change));
     };
+    const retry = (task: WorkTask) => {
+      if (feature) void run(() => retryWorkTask(projectId, feature.id, task.id));
+    };
     const flowNodes: TaskFlowNode[] = tasks.map((task) => ({
       id: task.id, type: 'task', position: positions.get(task.id) ?? { x: 0, y: 0 }, draggable: false,
-      data: { task, tasks, connections, busy, onUpdate: update, onOpen: (target: WorkTask) => setOpenTaskId(target.id) },
+      data: {
+        task, tasks, connections, busy, onUpdate: update, onRetry: retry,
+        onOpen: (target: WorkTask) => setOpenTaskId(target.id),
+      },
     }));
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const flowEdges: Edge[] = tasks.flatMap((task) => task.dependsOn.filter((id) => byId.has(id)).map((id) => {
@@ -81,6 +92,20 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
 
   const status = ITEM_STATUS[feature.status];
   const done = tasks.filter((task) => task.status === 'done').length;
+  const hasReassignableTasks = tasks.some((task) =>
+    task.status === 'planned' || task.status === 'queued'
+    || (task.status === 'attention' && task.sessionId === null));
+  const recalculate = async () => {
+    const result = await run(() => reassignWorkTasks(projectId, feature.id));
+    setConfirmReassign(false);
+    if (result) {
+      const unchanged = result.eligibleCount - result.changedCount;
+      setReassignMessage(
+        `${result.changedCount} assignment${result.changedCount === 1 ? '' : 's'} updated from current quota; `
+        + `${unchanged} unchanged.`,
+      );
+    }
+  };
 
   return (
     <section className="flex flex-col gap-3">
@@ -92,15 +117,22 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
             {features.map((item) => <option key={item.id} value={item.id}>{item.title}{item.status === 'done' ? ' (done)' : ''}</option>)}
           </select>
         </label>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge tone={status.tone}>{status.label}</Badge>
           <span className="font-mono text-[11px] text-ink-subtle tabular-nums">{done}/{tasks.length} done</span>
           <WorkRunButton item={feature} busy={busy} onStart={() => { void run(() => startWorkItem(projectId, feature.id)); }}
             onPause={() => { void run(() => pauseWorkItem(projectId, feature.id)); }} />
+          <Button size="sm" variant="secondary" ariaLabel="Recalculate task assignments"
+            disabled={busy || !hasReassignableTasks}
+            onClick={() => { setReassignMessage(null); setConfirmReassign(true); }}>
+            <RefreshCw className="size-4" /> <span className="hidden sm:inline">Recalculate assignments</span>
+            <span className="sm:hidden">Recalculate</span>
+          </Button>
           <WorkSettingsButton projectId={projectId} />
         </div>
       </div>
       {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
+      {reassignMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{reassignMessage}</p> : null}
 
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-subtle">
         {Object.entries({ ...TASK_CATEGORIES, defect: DEFECT_TASK_STYLE }).map(([id, category]) => (
@@ -129,6 +161,21 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
             onDelete={() => { void run(() => deleteWorkTask(projectId, feature.id, openTask.id)); setOpenTaskId(null); }} />
         </Modal>
       ) : null}
+      <Modal open={confirmReassign} title="Recalculate task assignments"
+        description="Re-check current account quota for tasks that have not started. The factory chooses among each task’s saved assignment and fallbacks. This does not start tasks or use an agent turn."
+        onClose={() => setConfirmReassign(false)}
+        footer={<>
+          <Button variant="secondary" disabled={busy} onClick={() => setConfirmReassign(false)}>Cancel</Button>
+          <Button variant="primary" disabled={busy} onClick={() => { void recalculate(); }}>
+            <RefreshCw className="size-4" /> Recalculate
+          </Button>
+        </>}>
+        <p className="text-sm leading-relaxed text-ink-muted">
+          Only tasks that have not started and tasks explicitly waiting to retry are considered.
+          Running or finished tasks keep their current assignment.
+          If quota data is unavailable, the existing assignment is preserved.
+        </p>
+      </Modal>
     </section>
   );
 };

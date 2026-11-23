@@ -106,6 +106,47 @@ async def _delete_task(caller: Caller, project_id: UUID, item_id: UUID, task_id:
                                                                f"/items/{item_id}/tasks/{task_id}"))
 
 
+async def _retry_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
+    work = await mooi.fetch_work(caller, project_id)
+    item = next((entry for entry in work.get("items", []) if entry["id"] == str(item_id)), None)
+    task = (next((entry for entry in item.get("tasks", []) if entry["id"] == str(task_id)), None)
+            if item else None)
+    if task is None:
+        raise ApiException.not_found("Task not found")
+    retryable = task["status"] == "queued" or (
+        task["status"] == "attention" and task.get("sessionId") is None)
+    if not retryable:
+        raise ApiException.conflict("Only a queued task or a task waiting to retry can be restarted")
+    item = await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/tasks/{task_id}/retry")
+    item = _publish_item(caller.player_id, item)
+    if item and item.get("status") == "running":
+        wake()
+    return item or {}
+
+
+async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Json:
+    work = await mooi.fetch_work(caller, project_id)
+    item = next((entry for entry in work.get("items", []) if entry["id"] == str(item_id)), None)
+    if item is None:
+        raise ApiException.not_found("Work item not found")
+    limits = await mooi.send_work(caller, "GET", project_id, "/settings") or DEFAULT_LIMITS
+    connections = [connection for connection in await mooi.fetch_agent_connections(caller)
+                   if connection.get("provider") in PROVIDERS and not connection.get("stale")]
+    quota_snapshots = await _refresh_account_quotas(caller, connections)
+    changed = 0
+    eligible = 0
+    for task in item.get("tasks", []):
+        if task["status"] not in ("planned", "queued", "attention") or task.get("sessionId") is not None:
+            continue
+        eligible += 1
+        assignment = _select_assignment(task, connections, float(limits["quotaLimit"]), quota_snapshots)
+        if assignment is None or _same_assignment(task.get("assignment") or {}, assignment):
+            continue
+        item = await _update_task(caller, project_id, item_id, UUID(task["id"]), {"assignment": assignment})
+        changed += 1
+    return {"item": item, "changedCount": changed, "eligibleCount": eligible}
+
+
 async def _create_issue(caller: Caller, project_id: UUID, draft: Json) -> Json:
     created = await mooi.send_work(caller, "POST", project_id, "/issues", draft, github=True) or {}
     _publish_issue(caller.player_id, project_id, created.get("issue"))
@@ -172,6 +213,18 @@ async def add_task(project_id: UUID, item_id: UUID, draft: Annotated[Json, Body(
 async def update_task(project_id: UUID, item_id: UUID, task_id: UUID, update: Annotated[Json, Body()],
                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
     return await _update_task(caller, project_id, item_id, task_id, update)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}/retry")
+async def retry_task(project_id: UUID, item_id: UUID, task_id: UUID,
+                     caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _retry_task(caller, project_id, item_id, task_id)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/reassign")
+async def reassign_tasks(project_id: UUID, item_id: UUID,
+                         caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _reassign_tasks(caller, project_id, item_id)
 
 
 @router.delete("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}")
@@ -273,6 +326,18 @@ async def agent_update_task(session_id: UUID, item_id: UUID, task_id: UUID, requ
     return await _update_task(caller, session.project_id, item_id, task_id, update)
 
 
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}/retry")
+async def agent_retry_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _retry_task(caller, session.project_id, item_id, task_id)
+
+
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/reassign")
+async def agent_reassign_tasks(session_id: UUID, item_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _reassign_tasks(caller, session.project_id, item_id)
+
+
 @router.delete("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}")
 async def agent_delete_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
@@ -348,6 +413,7 @@ Platform API:
 - `GET {work}`: the project's `items` (features, and the defects and debt Mooi already runs, each with its `tasks`) and its `issues` (defects and debt on GitHub; `issuesError` explains an empty list).
 - `POST {work}/features` with JSON `{{"title", "spec", "dependsOn": null, "tasks": [{{"key", "title", "category", "description", "acceptance", "assignment": {{"provider", "connectionId", "model", "effort"}}, "alternatives": [], "autoMerge": true, "tests": false, "qa": {{"acceptance", "assignment"}}, "dependsOn": ["<key>"]}}]}}`.
 - `PATCH {work}/items/<itemId>` (`title`, `spec`, `dependsOn`: an item id, or "" to clear); `POST {work}/items/<itemId>/tasks` (one task as above); `PATCH {work}/items/<itemId>/tasks/<taskId>` (any task field; `dependsOn` replaces the list); `DELETE {work}/items/<itemId>/tasks/<taskId>`.
+- Only when explicitly requested, `POST {work}/items/<itemId>/reassign` rechecks current quota for tasks not yet running and applies the first available saved assignment/fallback; `POST {work}/items/<itemId>/tasks/<taskId>/retry` restarts a queued task or one waiting to retry. Neither starts work on a planned item.
 - `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5). Change them only when the user asks.
 - `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with."""
 
@@ -383,10 +449,28 @@ def _quota(connection_id: str) -> dict[str, Any]:
     return windows
 
 
-def _highest_percent(connection_id: str) -> float | None:
-    percents = [value.get("percent") for value in _quota(connection_id).values() if isinstance(value, dict)]
+def _highest_percent(connection_id: str, snapshot: Json | None = None) -> float | None:
+    windows = _quota(connection_id) if snapshot is None else snapshot
+    percents = [value.get("percent") for value in windows.values() if isinstance(value, dict)]
     known = [float(percent) for percent in percents if isinstance(percent, (int, float))]
     return max(known) if known else None
+
+
+async def _refresh_account_quotas(caller: Caller, connections: list[Json]) -> dict[str, Json]:
+    """Fetch fresh provider quota snapshots for a user-requested assignment recalculation."""
+    snapshots: dict[str, Json] = {}
+    for connection in connections:
+        provider = PROVIDERS[connection["provider"]]
+        if provider.usage is None:
+            continue
+        connection_id = str(connection["id"])
+        try:
+            credential = await asyncio.wait_for(mooi.fetch_agent_credential(caller, connection_id), timeout=20)
+            snapshots[connection_id] = await asyncio.wait_for(provider.usage(credential, True), timeout=30)
+        except Exception:
+            LOG.info("Could not refresh quota for account %s during manual reassignment",
+                     connection_id, exc_info=True)
+    return snapshots
 
 
 async def _capacity(caller: Caller) -> list[Json]:
@@ -641,8 +725,20 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
     is the provider's default one; an account running low is swapped for another of the same provider."""
     connections = [connection for connection in await mooi.fetch_agent_connections(caller)
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
+    return _select_assignment(task, connections, quota_limit)
+
+
+def _select_assignment(task: Json, connections: list[Json], quota_limit: float,
+                       quota_snapshots: dict[str, Json] | None = None) -> Json | None:
+    """Pick the first configured assignment/fallback whose account is currently under the quota limit."""
     if not connections:
         return None
+    snapshots = quota_snapshots or {}
+
+    def account_percent(connection: Json) -> float | None:
+        connection_id = str(connection["id"])
+        return _highest_percent(connection_id, snapshots[connection_id] if connection_id in snapshots else None)
+
     candidates = [task.get("assignment") or {}, *(task.get("alternatives") or [])]
     for candidate in candidates:
         provider = candidate.get("provider") or next(
@@ -651,13 +747,18 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
         accounts = [connection for connection in connections if connection["provider"] == provider]
         accounts.sort(key=lambda connection: (str(connection["id"]) != candidate.get("connectionId"),
                                               not connection.get("defaultAccount"),
-                                              _highest_percent(str(connection["id"])) or 0.0))
+                                              account_percent(connection) or 0.0))
         for account in accounts:
-            percent = _highest_percent(str(account["id"]))
+            percent = account_percent(account)
             if percent is None or percent < quota_limit:
                 return {"provider": provider, "connectionId": str(account["id"]),
                         "model": candidate.get("model"), "effort": candidate.get("effort")}
     return None
+
+
+def _same_assignment(left: Json, right: Json) -> bool:
+    fields = ("provider", "connectionId", "model", "effort")
+    return all(left.get(field) == right.get(field) for field in fields)
 
 
 def _brief(item: Json, task: Json) -> str:

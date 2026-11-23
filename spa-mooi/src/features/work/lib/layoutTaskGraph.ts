@@ -1,7 +1,7 @@
 import type { WorkTask } from '@/features/work/types/WorkTask';
 
 export const NODE_WIDTH = 248;
-export const NODE_HEIGHT = 132;
+export const NODE_HEIGHT = 168;
 const COLUMN_GAP = 96;
 const ROW_GAP = 28;
 

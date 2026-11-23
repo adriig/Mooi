@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { AlertCircle, CheckCircle2, Clock, GitMerge, Loader2, Lock } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, GitMerge, Loader2, Lock, RotateCcw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
 import { NODE_HEIGHT, NODE_WIDTH } from '@/features/work/lib/layoutTaskGraph';
@@ -8,6 +8,7 @@ import { taskStyle } from '@/features/work/lib/taskCategories';
 import { TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import type { WorkTaskUpdate } from '@/features/work/types/WorkTaskUpdate';
+import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
 
 export type TaskNodeData = {
@@ -17,6 +18,7 @@ export type TaskNodeData = {
   busy: boolean;
   onUpdate: (task: WorkTask, update: WorkTaskUpdate) => void;
   onOpen: (task: WorkTask) => void;
+  onRetry: (task: WorkTask) => void;
 };
 
 export type TaskFlowNode = Node<TaskNodeData, 'task'>;
@@ -31,7 +33,7 @@ const STATE_ICON = {
  * the node; a click opens the whole task. Finished tasks keep their place, checked and struck through.
  */
 export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
-  const { task, tasks, connections, busy, onUpdate, onOpen } = data;
+  const { task, tasks, connections, busy, onUpdate, onOpen, onRetry } = data;
   const category = taskStyle(task);
   const state = taskState(task, tasks);
   const status = TASK_STATUS[state];
@@ -60,6 +62,14 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
       </p>
       <TaskQuickControls task={task} connections={connections} editable={taskEditable(task) && !busy}
         onUpdate={(update) => onUpdate(task, update)} className="mt-auto" />
+      {task.status === 'queued' || (task.status === 'attention' && task.sessionId === null) ? (
+        <div className="flex justify-end" onClick={(event) => event.stopPropagation()}>
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => onRetry(task)}
+            ariaLabel={task.status === 'queued' ? 'Retry this queued task now' : 'Restart this task'}>
+            <RotateCcw className="size-3.5" /> {task.status === 'queued' ? 'Retry' : 'Restart'}
+          </Button>
+        </div>
+      ) : null}
       <Handle type="source" position={Position.Right} className="!size-2 !border-0 !bg-line-strong" />
     </div>
   );
