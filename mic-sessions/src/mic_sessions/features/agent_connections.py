@@ -13,19 +13,101 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
 from fastapi import Path as PathParameter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 from mic_sessions.shared import antigravity, opencode
 from mic_sessions.shared.agents import PROVIDERS
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.codex import Client
 from mic_sessions.shared.env import get_settings
-from mic_sessions.shared.mooi import fetch_agent_credential, link_antigravity, link_codex, link_opencode, renewed
+from mic_sessions.shared.mooi import (
+    fetch_agent_connections,
+    fetch_agent_credential,
+    fetch_favorite_models,
+    link_antigravity,
+    link_codex,
+    link_opencode,
+    renewed,
+    replace_favorite_models,
+)
 from mic_sessions.shared.web import ApiException
 
 LOG = logging.getLogger("sessions")
 
 router = APIRouter()
+
+
+# --- Favorite models: provider-wide preferences, catalog-checked before persistence ---------------
+
+
+class FavoriteModelsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_ids: list[Annotated[StrictStr, Field(min_length=1, max_length=255)]] = Field(
+        alias="modelIds", max_length=100)
+
+    @field_validator("model_ids")
+    @classmethod
+    def normalize(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            model_id = value.strip()
+            if not model_id or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
+                                   for char in model_id):
+                raise ValueError("Model ids must not be empty or contain whitespace or controls")
+            if model_id not in normalized:
+                normalized.append(model_id)
+        return normalized
+
+
+@router.get("/agents/favorite-models")
+async def favorite_models(caller: Annotated[Caller, Depends(current_caller)]):
+    return {"favorites": await fetch_favorite_models(caller)}
+
+
+@router.get("/agents/{provider}/favorite-models")
+async def provider_favorite_models(provider: str, caller: Annotated[Caller, Depends(current_caller)]):
+    if provider not in PROVIDERS:
+        raise ApiException.not_found("Unknown agent provider")
+    return {"provider": provider, "modelIds": (await fetch_favorite_models(caller)).get(provider, [])}
+
+
+@router.put("/agents/{provider}/favorite-models")
+async def save_favorite_models(provider: str, update: FavoriteModelsUpdate,
+                               caller: Annotated[Caller, Depends(current_caller)]):
+    """A user can select only ids offered by their own connected accounts, never a supplied catalog.
+
+    Validate in the service that owns provider catalogs and require its secret on the mic-mooi write.
+    Empty lists do not need provider access, so preferences can be cleared after disconnecting.
+    """
+    descriptor = PROVIDERS.get(provider)
+    if descriptor is None:
+        raise ApiException.not_found("Unknown agent provider")
+    if update.model_ids:
+        connections = [connection for connection in await fetch_agent_connections(caller)
+                       if connection.get("provider") == provider and not connection.get("stale")]
+        if not connections:
+            raise ApiException.bad_request("No usable account linked for this provider")
+        available: set[str] = set()
+        unavailable = False
+        for connection in connections:
+            try:
+                async with asyncio.timeout(30):
+                    prepared = await descriptor.prepare(caller, str(connection["id"]))
+                    available.update(model["id"] for model in descriptor.configuration(prepared.id).get("models", []))
+            except ApiException as error:
+                if error.status_code in (401, 403):
+                    raise
+                unavailable = True
+            except Exception:
+                LOG.info("Could not load %s catalog for favorite model validation", provider, exc_info=True)
+                unavailable = True
+            if set(update.model_ids) <= available:
+                break
+        else:
+            if unavailable:
+                raise ApiException(502, "Could not validate favorite models. Try again when provider access is available.")
+            raise ApiException.bad_request("Favorite models must be available in your connected provider catalogs")
+    return await replace_favorite_models(caller, provider, update.model_ids)
 
 
 @dataclass

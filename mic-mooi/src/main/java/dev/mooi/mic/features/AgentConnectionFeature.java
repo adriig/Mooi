@@ -1,8 +1,12 @@
 package dev.mooi.mic.features;
 
+import java.io.Serializable;
 import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -35,14 +39,20 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Feature: agent-provider credentials linked to a player.
@@ -106,6 +116,39 @@ public class AgentConnectionFeature {
     @Auth.Authenticated
     public AgentConnectionsResponse connections(Auth.Principal principal) {
         return new AgentConnectionsResponse(agentConnectionService.list(principal.player().id()));
+    }
+
+    @GetMapping("/me/agents/favorite-models")
+    @Auth.Authenticated
+    public FavoriteModelsResponse favoriteModels(Auth.Principal principal) {
+        return agentConnectionService.favoriteModels(principal.player().id());
+    }
+
+    @GetMapping("/me/agents/{provider}/favorite-models")
+    @Auth.Authenticated
+    public ProviderFavoriteModels favoriteModels(@PathVariable String provider, Auth.Principal principal) {
+        return agentConnectionService.favoriteModels(principal.player().id(), provider);
+    }
+
+    /** Both the player's identity and the service secret are required; no caller-supplied player id. */
+    @GetMapping("/internal/me/agents/favorite-models")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public FavoriteModelsResponse internalFavoriteModels(Auth.Principal principal) {
+        return agentConnectionService.favoriteModels(principal.player().id());
+    }
+
+    /**
+     * mic-sessions validates membership in the caller's connected-provider catalogs before writing.
+     * Like the factory APIs, the player reaches this operation through that service, so a browser
+     * cannot bypass catalog validation by calling the persistence API directly.
+     */
+    @PutMapping("/me/agents/{provider}/favorite-models")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProviderFavoriteModels replaceFavoriteModels(@PathVariable String provider,
+            @Valid @RequestBody FavoriteModelsUpdate update, Auth.Principal principal) {
+        return agentConnectionService.replaceFavoriteModels(principal.player().id(), provider, update);
     }
 
     /** Always 204, linked or not: disconnecting is stated as an outcome, not as a transaction. */
@@ -216,6 +259,7 @@ public class AgentConnectionFeature {
         private final AgentConnectionRepository agentConnectionRepository;
         private final EngineDefaultsRepository engineDefaultsRepository;
         private final AccountPreferenceRepository accountPreferenceRepository;
+        private final ModelFavoritesRepository modelFavoritesRepository;
         private final Agents.Settings settings;
         private final Agents.StateCodec stateCodec;
         private final Agents.OAuthClient oauthClient;
@@ -245,6 +289,52 @@ public class AgentConnectionFeature {
             return agentConnectionRepository.findByPlayerIdOrderByConnectedAtDesc(playerId).stream()
                     .map(connection -> toPayload(connection, defaultId))
                     .toList();
+        }
+
+        /** Missing rows are empty preferences, including for accounts created before this feature. */
+        @Transactional(readOnly = true)
+        public FavoriteModelsResponse favoriteModels(UUID playerId) {
+            Map<String, List<String>> favorites = new LinkedHashMap<>();
+            settings.all().forEach(provider -> favorites.put(provider.id(), List.of()));
+            modelFavoritesRepository.findByPlayerId(playerId).forEach(row -> {
+                if (favorites.containsKey(row.getProvider())) {
+                    favorites.put(row.getProvider(), readFavoriteModels(row));
+                }
+            });
+            return new FavoriteModelsResponse(favorites);
+        }
+
+        @Transactional(readOnly = true)
+        public ProviderFavoriteModels favoriteModels(UUID playerId, String provider) {
+            settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
+            return new ProviderFavoriteModels(provider, modelFavoritesRepository.findByPlayerIdAndProvider(playerId, provider)
+                    .map(this::readFavoriteModels).orElse(List.of()));
+        }
+
+        @Transactional
+        public ProviderFavoriteModels replaceFavoriteModels(UUID playerId, String provider, FavoriteModelsUpdate update) {
+            settings.find(provider).orElseThrow(Agents.AgentsException::unknownProvider);
+            LinkedHashSet<String> normalized = new LinkedHashSet<>();
+            for (Object value : update.modelIds()) {
+                if (!(value instanceof String modelId) || modelId.length() > 255 || modelId.strip().isEmpty()
+                        || modelId.strip().codePoints().anyMatch(codePoint -> Character.isWhitespace(codePoint)
+                                || Character.isSpaceChar(codePoint) || Character.isISOControl(codePoint))) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Model ids must be non-empty strings of at most 255 characters without whitespace or controls");
+                }
+                normalized.add(modelId.strip());
+            }
+            List<String> modelIds = List.copyOf(normalized);
+            // Clearing is allowed even after disconnecting the last account of this provider.
+            if (!modelIds.isEmpty() && !agentConnectionRepository.existsByPlayerIdAndProvider(playerId, provider)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No account linked for this provider");
+            }
+            modelFavoritesRepository.replace(playerId, provider, JsonMapper.shared().writeValueAsString(modelIds));
+            return new ProviderFavoriteModels(provider, modelIds);
+        }
+
+        private List<String> readFavoriteModels(ModelFavorites row) {
+            return JsonMapper.shared().readValue(row.getModelIds(), new TypeReference<List<String>>() { });
         }
 
         /**
@@ -810,9 +900,49 @@ public class AgentConnectionFeature {
         void selectAccount(UUID playerId, UUID connectionId);
     }
 
+    /** Preferences survive disconnecting an individual account; ownership is player + provider. */
+    @Getter
+    @NoArgsConstructor
+    @Entity(name = "AgentModelFavorites")
+    @Table(name = "agent_model_favorites")
+    @IdClass(ModelFavoritesId.class)
+    public static class ModelFavorites {
+        @Id
+        @Column(name = "player_id", nullable = false, updatable = false)
+        private UUID playerId;
+        @Id
+        @Column(name = "provider", nullable = false, updatable = false, length = 32)
+        private String provider;
+        @Column(name = "model_ids", nullable = false, columnDefinition = "text")
+        private String modelIds;
+    }
+
+    @Getter
+    @NoArgsConstructor
+    @EqualsAndHashCode
+    public static class ModelFavoritesId implements Serializable {
+        private UUID playerId;
+        private String provider;
+    }
+
+    public interface ModelFavoritesRepository extends JpaRepository<ModelFavorites, ModelFavoritesId> {
+        List<ModelFavorites> findByPlayerId(UUID playerId);
+
+        Optional<ModelFavorites> findByPlayerIdAndProvider(UUID playerId, String provider);
+
+        /** Atomic replacement also handles simultaneous first writes from different devices. */
+        @Modifying
+        @Query(value = "insert into agent_model_favorites (player_id, provider, model_ids) "
+                + "values (:playerId, :provider, :modelIds) on conflict (player_id, provider) "
+                + "do update set model_ids = excluded.model_ids", nativeQuery = true)
+        void replace(UUID playerId, String provider, String modelIds);
+    }
+
     public interface AgentConnectionRepository extends JpaRepository<AgentConnection, UUID> {
 
         List<AgentConnection> findByPlayerIdOrderByConnectedAtDesc(UUID playerId);
+
+        boolean existsByPlayerIdAndProvider(UUID playerId, String provider);
 
         Optional<AgentConnection> findByPlayerIdAndId(UUID playerId, UUID id);
 
@@ -880,6 +1010,17 @@ public class AgentConnectionFeature {
     }
 
     public record AgentConnectionsResponse(List<AgentConnectionPayload> connections) {
+    }
+
+    /** Provider ids map to lists of exact, case-sensitive model ids; empty means no preference. */
+    public record FavoriteModelsResponse(Map<String, List<String>> favorites) {
+    }
+
+    public record ProviderFavoriteModels(String provider, List<String> modelIds) {
+    }
+
+    /** Wildcard elements intentionally avoid Jackson coercing JSON numbers/booleans into strings. */
+    public record FavoriteModelsUpdate(@NotNull @Size(max = 100) List<?> modelIds) {
     }
 
     /**

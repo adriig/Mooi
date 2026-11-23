@@ -355,6 +355,23 @@ async def fetch_agent_connections(caller: Caller) -> list[dict]:
     return list(body.get("connections") or [])
 
 
+async def fetch_favorite_models(caller: Caller) -> dict[str, list[str]]:
+    """User + service authenticated read for assignment; missing preferences are empty lists.
+
+    Saved ids are preferences, not eligibility: consumers still intersect them with live catalogs
+    and apply the project's quota limit before considering favorites.
+    """
+    body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/internal/me/agents/favorite-models",
+                      _service_headers(caller), "Account not found")
+    return body.get("favorites") or {}
+
+
+async def replace_favorite_models(caller: Caller, provider: str, model_ids: list[str]) -> dict:
+    """Only after checking ids against this player's connected-provider catalogs."""
+    return await _send("PUT", f"/me/agents/{provider}/favorite-models", caller, "Unknown agent provider",
+                       {"modelIds": model_ids}) or {}
+
+
 # --- backups: configuration and durable records ------------------------------------------------
 
 

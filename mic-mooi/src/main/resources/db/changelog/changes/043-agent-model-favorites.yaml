@@ -1,0 +1,16 @@
+databaseChangeLog:
+  - changeSet:
+      id: 043-agent-model-favorites
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE agent_model_favorites (
+                player_id uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                provider varchar(32) NOT NULL REFERENCES agent_engine_defaults(provider) ON DELETE CASCADE,
+                model_ids text NOT NULL DEFAULT '[]',
+                PRIMARY KEY (player_id, provider)
+              );
+      rollback:
+        - dropTable:
+            tableName: agent_model_favorites
