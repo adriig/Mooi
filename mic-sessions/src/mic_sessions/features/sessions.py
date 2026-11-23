@@ -784,6 +784,10 @@ class Session:
     deployment_setup: DeploymentSetup | None = None
     # Outcome of the latest start; None before any. A failed one hands the setup back to the agent.
     deployment_verified: bool | None = None
+    # The complete workspace tree baked into the running preview. Later tree revisions rebuild it
+    # automatically once the session is idle.
+    deployment_workspace_revision: str | None = None
+    preview_update_task: asyncio.Task[None] | None = None
     # The project's development deployment setup passed its test (here or in another of its sessions).
     deployment_ready: bool = False
     # Ready and the workspace holds a root Compose file, refreshed with its changes: Deploy runs it
@@ -1192,6 +1196,7 @@ async def _refresh_changes(session: Session, delay: float) -> None:
                         summary = await workspaces.changes(session.workspace, session.base_commit)
                     _sync_deployment_configured(session)
                 _record_event(session, changes_updated(_changes_payload(session, summary).model_dump()))
+                _schedule_preview_update(session)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -4198,6 +4203,7 @@ _WEB_SCAN_IGNORED = {"node_modules", "target", "build", "dist", "venv", "__pycac
 _WEB_SCAN_MAX_DEPTH = 4
 
 PHASE_PREPARING = "Preparing the deployment"
+PHASE_UPDATING = "Updating the preview"
 PHASE_BUILDING = "Building images and starting containers"
 PHASE_PROBING = "Waiting for the application to answer"
 PHASE_STOPPING = "Stopping the application"
@@ -4332,33 +4338,126 @@ def _failure_lines(error: DockerError) -> list[str]:
     return [f"✖ {error}", *tail]
 
 
-async def _admit_deployment_start(session: Session, *, by_agent: bool = False) -> DeploymentSnapshot:
+def _can_auto_update_preview(session: Session) -> bool:
+    return (
+        not session.closing
+        and session.kind == "session"
+        and session.workspace != _UNSET_PATH
+        and session.status == STATUS_READY
+        and session.pending is None
+        and not session.interactions
+        and not session.queue
+        and session.deployment.state == "running"
+        and session.deployment_verified is True
+        and session.deployment_workspace_revision is not None
+    )
+
+
+def _schedule_preview_update(session: Session) -> None:
+    """Rebuild a running preview after workspace changes settle and the agent is idle."""
+    if not _can_auto_update_preview(session):
+        return
+    task = session.preview_update_task
+    if task is not None and not task.done():
+        return
+    session.preview_update_task = _spawn(session, _auto_update_preview(session))
+
+
+async def _auto_update_preview(session: Session) -> None:
+    """Debounces workspace edits, then rebuilds only when the deployed tree is stale.
+
+    The worker repeats after a successful build if the workspace changed during it; failed
+    deployments are left visible for the user to inspect or retry rather than looped.
+    """
+    try:
+        delay = get_settings().changes_debounce_seconds
+        while not session.closing:
+            if delay:
+                await asyncio.sleep(delay)
+            if not _can_auto_update_preview(session):
+                return
+            try:
+                snapshot = await _admit_deployment_start(session, automatic=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Session %s could not automatically update its preview",
+                            session.id, exc_info=True)
+                return
+            if snapshot.state != "starting":
+                return
+            task = session.deployment_task
+            if task is None:
+                return
+            await _join_deployment(task)
+            if session.deployment.state != "running":
+                return
+            # Check again after the build in case another edit landed during it.
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOG.warning("Session %s could not automatically update its preview", session.id, exc_info=True)
+    finally:
+        if session.preview_update_task is asyncio.current_task():
+            session.preview_update_task = None
+
+
+async def _admit_deployment_start(
+    session: Session, *, by_agent: bool = False, automatic: bool = False,
+) -> DeploymentSnapshot:
     """Atomically admit once; the spawned worker owns finalization and rollback. The setup agent
     starts its test from inside its own turn, so only it may deploy while the chat is busy.
 
     No provider/Docker I/O under operation_lock.
     """
+    source_revision = None
+    if automatic:
+        if not _can_auto_update_preview(session):
+            return session.deployment
+        try:
+            source_revision = await workspaces.revision(session.workspace)
+        except Exception:
+            LOG.warning("Session %s could not read its workspace revision for preview update",
+                        session.id, exc_info=True)
+            return session.deployment
     async with session.operation_lock:
         if session.closing:
+            if automatic:
+                return session.deployment
             raise ApiException.conflict("The session is closing")
-        if session.deployment.state in ("starting", "running"):
+        if automatic:
+            if not _can_auto_update_preview(session):
+                return session.deployment
+            if source_revision == session.deployment_workspace_revision:
+                return session.deployment
+            if session.deployment_task is not None and not session.deployment_task.done():
+                return session.deployment
+        elif session.deployment.state in ("starting", "running"):
             return session.deployment
-        if session.deployment.state == "stopping" or session.deployment.cleanupRequired:
+        if not automatic and (session.deployment.state == "stopping" or session.deployment.cleanupRequired):
             raise ApiException.conflict("Stop the previous deployment before deploying again")
-        if session.deployment_task is not None and not session.deployment_task.done():
+        if not automatic and session.deployment_task is not None and not session.deployment_task.done():
             raise ApiException.conflict("A deployment operation is still finishing")
-        if (not by_agent and (session.status != STATUS_READY or session.pending is not None or session.interactions)
+        if (not automatic and not by_agent
+                and (session.status != STATUS_READY or session.pending is not None or session.interactions)
                 or session.runtime is None or session.workspace == _UNSET_PATH):
+            if automatic:
+                return session.deployment
             raise ApiException.conflict("The chat must be ready with no pending requests before deploying")
-        await _reserve_deployment(session.id)
+        if not automatic:
+            await _reserve_deployment(session.id)
         operation_id = uuid4()
-        snapshot = DeploymentSnapshot(state="starting", operationId=operation_id, phase=PHASE_PREPARING,
-                                      previewUrl=None, result=None, cleanupRequired=False,
-                                      updatedAt=datetime.now(UTC))
+        snapshot = DeploymentSnapshot(
+            state="starting", operationId=operation_id,
+            phase=PHASE_UPDATING if automatic else PHASE_PREPARING,
+            previewUrl=None, result=None, cleanupRequired=False, updatedAt=datetime.now(UTC),
+        )
         # The event-loop cannot execute the worker until this lock scope has returned.
         record(session, EVENT_DEPLOYMENT_UPDATED, snapshot.model_dump())
         _touch(session, snapshot.updatedAt)
-        session.deployment_task = _spawn(session, _run_deployment_start(session, operation_id))
+        session.deployment_task = _spawn(
+            session, _run_deployment_start(session, operation_id, source_revision),
+        )
         return snapshot
 
 
@@ -4536,7 +4635,9 @@ async def _settle_deployment_cleanup(session: Session) -> bool:
 
 
 
-async def _run_deployment_start(session: Session, operation_id: UUID) -> None:
+async def _run_deployment_start(
+    session: Session, operation_id: UUID, source_revision: str | None = None,
+) -> None:
     """Deploys the root Compose deterministically. A failure explains itself in the console, and the
     next Deploy hands it to the agent's setup conversation."""
     failure: list[str] = []
@@ -4545,6 +4646,8 @@ async def _run_deployment_start(session: Session, operation_id: UUID) -> None:
         deadline = asyncio.get_running_loop().time() + get_settings().deployment_timeout_seconds
         async with asyncio.timeout_at(deadline):
             docker, manifests = Docker(), _deployment_storage()
+            if source_revision is None:
+                source_revision = await workspaces.revision(session.workspace)
             # The project's development environment, for Compose interpolation only.
             variables = (await _development_environment(await _agent_caller(session), session.project_id)
                          if session.agent_caller is not None else development_environment())
@@ -4581,9 +4684,11 @@ async def _run_deployment_start(session: Session, operation_id: UUID) -> None:
             if session.closing or session.deployment.operationId != operation_id:
                 raise asyncio.CancelledError
             # No await between publishing the path and the running snapshot that carries it.
+            session.deployment_workspace_revision = source_revision
             _deployment_finish(session, operation_id, "start",
                                url=previews.publish(session.id, label, readiness.endpoint.url))
             session.deployment_monitor = _spawn(session, _monitor_deployment(session, operation_id))
+            _schedule_preview_update(session)
             return
     except asyncio.CancelledError:
         code = "cancelled"
