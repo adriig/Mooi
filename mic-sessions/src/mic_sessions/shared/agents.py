@@ -3841,7 +3841,7 @@ class OpenCodeAcpAgentRuntime:
 
     @classmethod
     async def load_configuration(cls, credential: Credential, refresh: bool = False) -> None:
-        key = credential.connection_id or ""
+        key = opencode.catalog_cache_key(credential)
         cached = cls._catalogs.get(key)
         if not refresh and cached and cached[0] > time.monotonic():
             cls._catalog.set(cached[1])
@@ -3856,8 +3856,12 @@ class OpenCodeAcpAgentRuntime:
         default = selected or models[0]["id"]
         catalog = {"id": "opencode", "label": "OpenCode", "models": models,
                    "defaultModel": default, "defaultEffort": None}
-        if key:
-            cls._catalogs[key] = (time.monotonic() + 300, catalog)
+        for stale, (expires, _) in list(cls._catalogs.items()):
+            if expires <= time.monotonic():
+                cls._catalogs.pop(stale, None)
+        if len(cls._catalogs) >= 1024:
+            cls._catalogs.pop(next(iter(cls._catalogs)))
+        cls._catalogs[key] = (time.monotonic() + 300, catalog)
         cls._catalog.set(catalog)
 
     @classmethod
@@ -3926,7 +3930,7 @@ class OpenCodeAcpAgentRuntime:
             raise ApiException.conflict("OpenCode session is closed")
         acp = opencode.Acp([self._binary(), "acp"], cwd=self._workspace, env=self._process_env(),
                            trace=opencode.trace_path(self._home), updates=self._on_update,
-                           requests=self._on_request)
+                           requests=self._on_request, secrets=(self._credential.token,))
         try:
             await acp.start()
             params = {"cwd": str(self._workspace), "mcpServers": []}

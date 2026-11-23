@@ -10,6 +10,7 @@ Trace and Download log can retain the provider-native conversation after the pro
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -18,10 +19,9 @@ import shutil
 import signal
 import tempfile
 import time
-from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +46,6 @@ _VERIFICATION_URL = re.compile(r"https://\S+")
 _RESERVED = frozenset({"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
                        "OPENCODE_API_KEY", _CREDENTIAL_ENV})
 _RESERVED_PREFIXES = ("OPENCODE_",)
-_STDERR_TAIL = 20
 _CLOSE_SECONDS = 10
 _MESSAGE_LIMIT = 64 * 1024 * 1024
 
@@ -155,6 +154,13 @@ def valid_account(token: str) -> bool:
     return isinstance(value, list) and bool(value) and all(isinstance(entry, dict) for entry in value)
 
 
+def catalog_cache_key(credential: Credential) -> str:
+    """Key account-specific ACP catalogs without retaining a credential in cache keys."""
+    identity = json.dumps([credential.provider, credential.connection_id, credential.mode, credential.token],
+                          ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 async def install_account(home: Path, binary: str, credential: Credential) -> None:
     """Imports the account's sign-in into the session's private profile (never the host's)."""
     if credential.mode != ACCOUNT_MODE:
@@ -260,7 +266,6 @@ class _Process:
         self.cwd = cwd
         self.env = dict(env)
         self.process: asyncio.subprocess.Process | None = None
-        self.stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL)
         self.stderr_task: asyncio.Task[None] | None = None
 
     @property
@@ -283,15 +288,13 @@ class _Process:
         process = self.process
         if process is None or process.stderr is None:
             return
-        while line := await process.stderr.readline():
-            text = line.decode("utf-8", "replace").strip()
-            if text:
-                self.stderr_tail.append(text)
+        while await process.stderr.readline():
+            pass
 
     def failure_detail(self) -> str:
         code = self.process.returncode if self.process else None
-        tail = self.stderr_tail[-1] if self.stderr_tail else ""
-        return f"exit code {code}{f': {tail}' if tail else ''}"
+        # Provider stderr can contain credentials or account data; keep diagnostics non-sensitive.
+        return f"exit code {code}"
 
     async def stop(self) -> None:
         process = self.process
@@ -313,9 +316,11 @@ class Acp:
     """One ordered JSON-RPC stream to ``opencode acp``."""
 
     def __init__(self, arguments: Sequence[str], *, cwd: Path, env: Mapping[str, str], trace: Path,
-                 updates: UpdateHandler, requests: RequestHandler | None = None) -> None:
+                 updates: UpdateHandler, requests: RequestHandler | None = None,
+                 secrets: Sequence[str] = ()) -> None:
         self._process = _Process(arguments, cwd=cwd, env=env)
         self._trace = trace
+        self._secrets = tuple(secret for secret in secrets if secret)
         self._updates = updates
         self._requests = requests
         self._reader: asyncio.Task[None] | None = None
@@ -378,10 +383,13 @@ class Acp:
         self._fail(OpenCodeError("the OpenCode agent process exited"))
 
     def _record(self, direction: str, frame: dict[str, Any]) -> None:
-        entry = {"mooiAt": datetime.now(timezone.utc).isoformat(), "direction": direction, "frame": frame}
+        entry = {"mooiAt": datetime.now(UTC).isoformat(), "direction": direction, "frame": frame}
         try:
             with self._trace.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+                serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+                for secret in self._secrets:
+                    serialized = serialized.replace(secret, "[REDACTED]")
+                handle.write(serialized + "\n")
         except OSError:
             LOG.debug("Could not append the OpenCode ACP trace", exc_info=True)
 
@@ -487,15 +495,14 @@ def catalog(session: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str | Non
                **({"description": entry["description"]} if entry.get("description") else {})}
               for entry in entries or [] if isinstance(entry, dict)
               and isinstance(entry.get("value"), str)
-              and entry["value"].startswith(("opencode/", "opencode-go/"))]
+              and entry["value"].strip()]
     # Models of the Go subscription and of Zen can share a display name: keep them apart.
     labels = [model["label"] for model in models]
     for model in models:
         if labels.count(model["label"]) > 1 and model["id"].startswith("opencode-go/"):
             model["label"] += " (Go)"
     current = option.get("currentValue") or option.get("value")
-    return models, (current if isinstance(current, str)
-                    and current.startswith(("opencode/", "opencode-go/")) else None)
+    return models, (current if isinstance(current, str) and any(model["id"] == current for model in models) else None)
 
 
 _catalogs: dict[str, tuple[float, list[dict[str, Any]], str | None]] = {}
@@ -503,7 +510,7 @@ _catalogs: dict[str, tuple[float, list[dict[str, Any]], str | None]] = {}
 
 async def models(credential: Credential, binary: str, scratch: Path,
                  *, refresh: bool = False) -> tuple[list[dict[str, Any]], str | None]:
-    key = credential.connection_id or ""
+    key = catalog_cache_key(credential)
     cached = _catalogs.get(key)
     if key and not refresh and cached and cached[0] > time.monotonic():
         return cached[1], cached[2]
@@ -517,7 +524,7 @@ async def models(credential: Credential, binary: str, scratch: Path,
         return None
 
     acp = Acp([executable(binary), "acp"], cwd=workspace, env=process_env,
-              trace=trace_path(home), updates=ignore)
+              trace=trace_path(home), updates=ignore, secrets=(credential.token,))
     try:
         await acp.start()
         session = await acp.request("session/new", {"cwd": str(workspace), "mcpServers": []})
@@ -526,6 +533,10 @@ async def models(credential: Credential, binary: str, scratch: Path,
         await acp.close()
     if not result:
         raise OpenCodeError("OpenCode returned no models for this account")
-    if key:
-        _catalogs[key] = (time.monotonic() + 300, result, default)
+    for stale, (expires, _) in list(_catalogs.items()):
+        if expires <= time.monotonic():
+            _catalogs.pop(stale, None)
+    if len(_catalogs) >= 1024:
+        _catalogs.pop(next(iter(_catalogs)))
+    _catalogs[key] = (time.monotonic() + 300, result, default)
     return result, default
