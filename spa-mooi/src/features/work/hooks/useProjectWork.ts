@@ -37,11 +37,17 @@ export const useProjectWork = (projectId: string, enabled = true): UseProjectWor
     if (!enabled) return undefined;
     let active = true;
     const live = useLiveStore.getState();
-    fetchWorkItems(projectId)
+    const initialItems = fetchWorkItems(projectId)
       .then((items) => { if (active) { live.adoptWorkItems(projectId, items); setLoadError(null); } })
       .catch((failure: Error) => { if (active) setLoadError(failure.message); });
-    fetchWorkIssues(projectId)
-      .then((issues) => { if (active) { live.adoptWorkIssues(projectId, issues); setIssuesError(null); } })
+    // Synchronization can close an item: adopt it after the initial snapshot to avoid restoring stale work.
+    void initialItems.then(() => fetchWorkIssues(projectId))
+      .then(({ issues, items }) => {
+        if (!active) return;
+        for (const item of items) live.adoptWorkItem(item);
+        live.adoptWorkIssues(projectId, issues);
+        setIssuesError(null);
+      })
       .catch((failure: Error) => {
         if (!active) return;
         setIssuesError(failure.message);

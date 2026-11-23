@@ -24,8 +24,8 @@ export const fetchWorkItems = async (projectId: string): Promise<WorkItem[]> =>
   (await send<{ items: WorkItem[] }>(workPath(projectId), 'GET', 'Could not load the project work.')).items;
 
 /** Defects and debt as GitHub has them, read with the player's own grant. */
-export const fetchWorkIssues = async (projectId: string): Promise<WorkIssue[]> =>
-  (await send<{ issues: WorkIssue[] }>(workPath(projectId, '/issues'), 'GET', 'Could not load the defects and debt.')).issues;
+export const fetchWorkIssues = (projectId: string): Promise<{ issues: WorkIssue[]; items: WorkItem[] }> =>
+  send(workPath(projectId, '/issues'), 'GET', 'Could not load the defects and debt.');
 
 export const updateWorkItem = (projectId: string, itemId: string, update: { title?: string; spec?: string; dependsOn?: string }) =>
   send<WorkItem>(workPath(projectId, `/items/${itemId}`), 'PATCH', 'Could not save this work item.', update);

@@ -155,6 +155,16 @@ async def _create_issue(caller: Caller, project_id: UUID, draft: Json) -> Json:
     return created
 
 
+async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
+    """GitHub and factory state converge through the same operation for views, agents and runner."""
+    result = await mooi.fetch_issues(caller, project_id)
+    for issue in result.get("issues", []):
+        _publish_issue(caller.player_id, project_id, issue)
+    for item in result.get("items", []):
+        _publish_item(caller.player_id, item)
+    return result
+
+
 async def _save_settings(caller: Caller, project_id: UUID, settings: Json) -> Json:
     saved = await mooi.send_work(caller, "PUT", project_id, "/settings", settings) or {}
     sessions._channels.publish(caller.player_id, EVENT_WORK_SETTINGS, {"projectId": str(project_id), "settings": saved})
@@ -182,7 +192,8 @@ async def project_work(project_id: UUID, caller: Annotated[Caller, Depends(curre
 
 @router.get("/projects/{project_id}/work/issues")
 async def project_issues(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    return await mooi.fetch_issues(caller, project_id)
+    async with _lock:
+        return await _sync_issues(caller, project_id)
 
 
 @router.post("/projects/{project_id}/work/features", status_code=status.HTTP_201_CREATED)
@@ -258,10 +269,11 @@ async def create_issue(project_id: UUID, draft: Annotated[Json, Body()],
 @router.patch("/projects/{project_id}/work/issues/{number}")
 async def update_issue(project_id: UUID, number: int, update: Annotated[Json, Body()],
                        caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    changed = await mooi.send_work(caller, "PATCH", project_id, f"/issues/{number}", update, github=True) or {}
-    _publish_issue(caller.player_id, project_id, changed.get("issue"))
-    _publish_item(caller.player_id, changed.get("item"))
-    return changed
+    async with _lock:
+        changed = await mooi.send_work(caller, "PATCH", project_id, f"/issues/{number}", update, github=True) or {}
+        _publish_issue(caller.player_id, project_id, changed.get("issue"))
+        _publish_item(caller.player_id, changed.get("item"))
+        return changed
 
 
 @router.put("/projects/{project_id}/work/issues/{number}/item")
@@ -286,12 +298,13 @@ class TaskReport(BaseModel):
 @router.get("/sessions/{session_id}/work/agent")
 async def agent_work(session_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
-    work = await mooi.fetch_work(caller, session.project_id)
     try:
-        issues = (await mooi.fetch_issues(caller, session.project_id)).get("issues", [])
+        async with _lock:
+            issues = (await _sync_issues(caller, session.project_id)).get("issues", [])
         issues_error = None
     except ApiException as failure:
         issues, issues_error = [], failure.message
+    work = await mooi.fetch_work(caller, session.project_id)
     return {**work, "issues": issues, "issuesError": issues_error}
 
 
@@ -655,8 +668,22 @@ async def _tick() -> None:
     entries = await mooi.fetch_running_work()
     async with _lock:
         limits: dict[UUID, int] = {}
+        synchronized: dict[UUID, Json] = {}
         for entry in entries:
             try:
+                item = entry["item"]
+                if item.get("status") != "running":
+                    continue
+                if item.get("issueNumber") is not None:
+                    item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
+                    project_id = UUID(item["projectId"])
+                    caller = await _caller(item_id, player_id, entry.get("authSessionId"))
+                    if caller is None:
+                        continue
+                    if project_id not in synchronized:
+                        synchronized[project_id] = await _sync_issues(caller, project_id)
+                    entry = {**entry, "item": next(
+                        (row for row in synchronized[project_id].get("items", []) if row["id"] == item["id"]), item)}
                 await _advance(entry, limits)
             except asyncio.CancelledError:
                 raise
@@ -666,6 +693,8 @@ async def _tick() -> None:
 
 async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
     item = entry["item"]
+    if item.get("status") != "running":
+        return
     item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
     limits = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
     for run in _runs.values():
@@ -699,7 +728,9 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
     if item.get("dependsOn") and not await _dependency_done(caller, item):
         return
     done = {task["id"] for task in tasks if task["status"] == "done"}
-    ready = [task for task in tasks if task["status"] in ("planned", "queued")
+    if item.get("status") != "running":
+        return
+    ready = [task for task in tasks if task["status"] in ("planned", "queued") and not task.get("sessionId")
              and all(dependency in done for dependency in task["dependsOn"])]
     for task in ready:
         if not await _has_room(caller, player_id, limits):
@@ -744,6 +775,15 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
     if assignment is None:
         await _wait(task, "Waiting for an account with the requested model and quota left")
         return
+    # Assignment can take time; refresh GitHub and the locked item before opening a session.
+    if item.get("issueNumber") is not None:
+        item = await mooi.send_work(caller, "PUT", UUID(item["projectId"]),
+                                    f"/issues/{item['issueNumber']}/item", github=True) or {}
+        _publish_item(player_id, item)
+        task = next((row for row in item.get("tasks", []) if row["id"] == task["id"]), {})
+        if (item.get("status") != "running" or task.get("status") not in ("planned", "queued")
+                or task.get("sessionId")):
+            return
     key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
     branch = f"factory/{key}-{uuid4().hex[:6]}"
     try:
@@ -758,8 +798,13 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
         await _report(task, "attention", report=f"Its session could not start: {failure.message}")
         return
     # Registered before provisioning builds the agent's instructions, which read it.
-    _adopt(item, {**task, "status": "running"}, session, player_id, limits)
-    await _report(task, "running", session_id=session.id, attempts=task["attempts"], assignment=assignment)
+    run = _adopt(item, {**task, "status": "running"}, session, player_id, limits)
+    updated = await _report(task, "running", session_id=session.id, attempts=task["attempts"], assignment=assignment)
+    saved = next((row for row in updated.get("tasks", []) if row["id"] == task["id"]), {})
+    if saved.get("sessionId") != str(session.id):
+        # Closure can race another service's write: explicitly close a session whose launch was rejected.
+        await _close(run)
+        return
     LOG.info("Work item %s launched task %s in session %s", item["id"], task["key"], session.id)
 
 

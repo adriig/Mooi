@@ -1,0 +1,33 @@
+databaseChangeLog:
+  - changeSet:
+      id: 046-close-issue-pending-tasks
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_items
+            columns:
+              - column:
+                  name: issue_closed
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        # Repair completed issue items with work left in the queue by the old close path (including #7).
+        # Scope by item ownership rather than a repository-specific issue number; keep live sessions intact.
+        - sql:
+            sql: |
+              UPDATE work_items i
+              SET issue_closed = true, updated_at = CURRENT_TIMESTAMP
+              WHERE i.issue_number IS NOT NULL AND i.status = 'done'
+                AND EXISTS (
+                  SELECT 1 FROM work_tasks t
+                  WHERE t.item_id = i.id AND t.session_id IS NULL
+                    AND t.status IN ('planned', 'queued', 'attention')
+                );
+              UPDATE work_tasks t
+              SET status = 'done',
+                  report = 'Cancelled because the GitHub issue was closed before this task started.',
+                  finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+              FROM work_items i
+              WHERE t.item_id = i.id AND i.issue_number IS NOT NULL AND i.status = 'done'
+                AND t.session_id IS NULL AND t.status IN ('planned', 'queued', 'attention');

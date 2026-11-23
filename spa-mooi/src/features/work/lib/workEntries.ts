@@ -5,7 +5,7 @@ import type { WorkItem } from '@/features/work/types/WorkItem';
 
 const itemStatus = (item: WorkItem): WorkEntryStatus => {
   if (item.status === 'done') return 'done';
-  if (item.status === 'running' || item.status === 'paused' || item.tasks.some((task) => task.status !== 'planned')) {
+  if (item.status === 'running' || item.status === 'paused') {
     return 'inProgress';
   }
   return 'open';
@@ -24,7 +24,7 @@ export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[]
   }));
   const tracked: WorkEntry[] = issues.map((issue) => {
     const item = byIssue.get(issue.number) ?? null;
-    const status: WorkEntryStatus = issue.state === 'closed' ? 'done' : item ? itemStatus(item) : 'open';
+    const status: WorkEntryStatus = item ? itemStatus(item) : issue.state === 'closed' ? 'done' : 'open';
     return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, status, item, issue };
   });
   const rank = (entry: WorkEntry) => Date.parse(entry.item?.createdAt ?? entry.issue?.createdAt ?? '') || 0;

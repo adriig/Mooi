@@ -75,7 +75,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
             </Link>
           ) : null}
           <span className="ml-auto flex gap-2">
-            {entry.issue && item?.status !== 'running' ? (
+            {entry.issue ? (
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => {
                 void run(() => updateWorkIssue(projectId, entry.issue!.number, { state: entry.issue!.state === 'open' ? 'closed' : 'open' }));
               }}>
@@ -83,7 +83,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
                 {entry.issue.state === 'open' ? 'Close issue' : 'Reopen issue'}
               </Button>
             ) : null}
-            {entry.issue?.state !== 'closed' ? (
+            {entry.issue?.state !== 'closed' || item?.status === 'running' ? (
               <WorkRunButton item={item} busy={busy} onStart={() => { void start(); }}
                 onPause={() => { if (item) void run(() => pauseWorkItem(projectId, item.id)); }} />
             ) : null}

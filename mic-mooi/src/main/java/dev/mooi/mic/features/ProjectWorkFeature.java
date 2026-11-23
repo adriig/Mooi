@@ -258,6 +258,8 @@ public class ProjectWorkFeature {
     public static class WorkService {
 
         static final int MAX_TASKS = 80;
+        private static final String ISSUE_CLOSED_REPORT =
+                "Cancelled because the GitHub issue was closed before this task started.";
         private static final Set<TaskStatus> STARTED = Set.of(TaskStatus.running, TaskStatus.merging,
                 TaskStatus.review, TaskStatus.done);
 
@@ -476,12 +478,16 @@ public class ProjectWorkFeature {
             if (all.isEmpty()) {
                 throw conflict("Break it into tasks before starting it");
             }
-            // Starting again retries what waits for the player without a session to answer in.
-            all.stream().filter(task -> task.getStatus() == TaskStatus.attention && task.getSessionId() == null)
+            // Only an explicit Start revives tasks cancelled by closing and reopening an issue.
+            all.stream().filter(task -> task.getSessionId() == null
+                            && (task.getStatus() == TaskStatus.attention
+                                || (task.getStatus() == TaskStatus.done && ISSUE_CLOSED_REPORT.equals(task.getReport()))))
                     .forEach(task -> {
                         task.setStatus(TaskStatus.planned);
                         task.setAttempts(0);
                         task.setReport(null);
+                        task.setStartedAt(null);
+                        task.setFinishedAt(null);
                     });
             tasks.saveAll(all);
             item.setStatus(ItemStatus.running);
@@ -560,7 +566,15 @@ public class ProjectWorkFeature {
             WorkItem item = items.findLockedById(task.getItemId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             List<WorkTask> all = tasks.findByItemId(item.getId());
+            if (item.getStatus() == ItemStatus.done) {
+                return runnerItem(item, all);
+            }
             task = find(all, taskId);
+            // A stale runner snapshot must not launch a paused item or revive a cancelled task.
+            if (task.getStatus() == TaskStatus.done
+                    || (task.getSessionId() == null && item.getStatus() != ItemStatus.running)) {
+                return runnerItem(item, all);
+            }
             OffsetDateTime now = OffsetDateTime.now(clock);
             if (progress.status() == TaskStatus.running && task.getStatus() != TaskStatus.running) {
                 task.setStartedAt(now);
@@ -592,6 +606,9 @@ public class ProjectWorkFeature {
             WorkItem item = items.findLockedById(found.getItemId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             List<WorkTask> all = new ArrayList<>(tasks.findByItemId(item.getId()));
+            if (item.getStatus() == ItemStatus.done) {
+                return runnerItem(item, all);
+            }
             WorkTask qa = find(all, qaTaskId);
             if (qa.getQaOfId() == null) {
                 throw badRequest("Only a QA task reports defects");
@@ -623,7 +640,6 @@ public class ProjectWorkFeature {
             qa.setStartedAt(null);
             qa.setFinishedAt(null);
             tasks.saveAll(all);
-            item.setStatus(item.getStatus() == ItemStatus.done ? ItemStatus.running : item.getStatus());
             items.save(touch(item));
             return runnerItem(item, all);
         }
@@ -632,6 +648,9 @@ public class ProjectWorkFeature {
         public RunnerItem itemStatus(UUID itemId, ItemStatus status) {
             WorkItem item = items.findLockedById(itemId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
+            if (item.getStatus() == ItemStatus.done) {
+                return runnerItem(item, tasks.findByItemId(itemId));
+            }
             item.setStatus(status);
             if (status == ItemStatus.done) {
                 item.setFinishedAt(OffsetDateTime.now(clock));
@@ -641,6 +660,45 @@ public class ProjectWorkFeature {
         }
 
         // --- shared with the issue side ---
+
+        /** Closing is terminal for pending work, including rows left behind by older versions. */
+        @Transactional
+        public ItemPayload reconcileIssue(UUID itemId, Github.Issue issue) {
+            return reconcileIssue(itemId, issue, false);
+        }
+
+        @Transactional
+        public ItemPayload reconcileIssue(UUID itemId, Github.Issue issue, boolean explicitlyReopened) {
+            WorkItem item = items.findLockedById(itemId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
+            List<WorkTask> all = tasks.findByItemId(itemId);
+            item.setTitle(requireText(issue.title(), "title"));
+            item.setSpec(issue.body());
+            if ("closed".equals(issue.state())) {
+                OffsetDateTime now = OffsetDateTime.now(clock);
+                item.setIssueClosed(true);
+                item.setStatus(ItemStatus.done);
+                if (item.getFinishedAt() == null) {
+                    item.setFinishedAt(issue.closedAt() == null ? now : issue.closedAt());
+                }
+                for (WorkTask task : all) {
+                    // Attached sessions finish normally; their late reports cannot revive this item.
+                    if (task.getSessionId() == null && (task.getStatus() == TaskStatus.planned
+                            || task.getStatus() == TaskStatus.queued || task.getStatus() == TaskStatus.attention)) {
+                        task.setStatus(TaskStatus.done);
+                        task.setReport(ISSUE_CLOSED_REPORT);
+                        task.setFinishedAt(now);
+                    }
+                }
+                tasks.saveAll(all);
+            } else if (item.isIssueClosed() || (explicitlyReopened && item.getStatus() == ItemStatus.done)) {
+                item.setIssueClosed(false);
+                item.setStatus(ItemStatus.planned);
+                item.setFinishedAt(null);
+                // Pending tasks stay cancelled until the player explicitly starts this item.
+            }
+            return toPayload(items.save(item), all);
+        }
 
         public WorkItem newItem(UUID projectId, ItemKind kind, Integer issueNumber, String title, String spec) {
             WorkItem item = new WorkItem();
@@ -967,21 +1025,34 @@ public class ProjectWorkFeature {
         private final Crypto.SecretBox secretBox;
         private final Clock clock;
 
-        @Transactional(readOnly = true)
         public IssuesPayload list(UUID playerId, UUID projectId) {
             WorkProject project = work.project(playerId, projectId);
             String token = accessToken(playerId);
             Map<Integer, IssuePayload> byNumber = new LinkedHashMap<>();
+            Map<Integer, Github.Issue> observed = new HashMap<>();
             for (ItemKind kind : List.of(ItemKind.defect, ItemKind.debt)) {
                 for (Github.Issue issue : github.listIssues(project.getOwner(), project.getName(), LABELS.get(kind)[0],
                         token)) {
                     byNumber.putIfAbsent(issue.number(), toPayload(issue, kind));
+                    observed.putIfAbsent(issue.number(), issue);
                 }
+            }
+            List<ItemPayload> reconciled = new ArrayList<>();
+            for (WorkItem item : items.findByProjectId(projectId)) {
+                if (item.getIssueNumber() == null) {
+                    continue;
+                }
+                // The listing is bounded and labels can change: always synchronize tracked issues too.
+                Github.Issue issue = observed.containsKey(item.getIssueNumber())
+                        ? observed.get(item.getIssueNumber())
+                        : github.fetchIssue(project.getOwner(), project.getName(), item.getIssueNumber(), token);
+                byNumber.putIfAbsent(issue.number(), toPayload(issue, item.getKind()));
+                reconciled.add(work.reconcileIssue(item.getId(), issue));
             }
             return new IssuesPayload(byNumber.values().stream()
                     .sorted(Comparator.comparing((IssuePayload issue) -> "closed".equals(issue.state()))
                             .thenComparing(IssuePayload::number, Comparator.reverseOrder()))
-                    .toList());
+                    .toList(), reconciled);
         }
 
         @Transactional
@@ -1018,34 +1089,24 @@ public class ProjectWorkFeature {
             Github.Issue issue = github.updateIssue(project.getOwner(), project.getName(), number, fields,
                     accessToken(playerId));
             ItemKind kind = kindOf(issue);
-            Optional<WorkItem> item = items.findByProjectIdAndIssueNumber(projectId, number);
-            item.ifPresent(row -> {
-                row.setTitle(WorkService.requireText(issue.title(), "title"));
-                row.setSpec(issue.body());
-                if ("closed".equals(issue.state()) && row.getStatus() != ItemStatus.running) {
-                    row.setStatus(ItemStatus.done);
-                    row.setFinishedAt(OffsetDateTime.now(clock));
-                } else if ("open".equals(issue.state()) && row.getStatus() == ItemStatus.done) {
-                    row.setStatus(ItemStatus.planned);
-                    row.setFinishedAt(null);
-                }
-                items.save(row);
-            });
-            return new IssueItemPayload(toPayload(issue, kind), item.map(work::payload).orElse(null));
+            Optional<WorkItem> item = items.findLockedByProjectIdAndIssueNumber(projectId, number);
+            return new IssueItemPayload(toPayload(issue, kind),
+                    item.map(row -> work.reconcileIssue(row.getId(), issue, update.state() == IssueState.open))
+                            .orElse(null));
         }
 
         @Transactional
         public ItemPayload item(UUID playerId, UUID projectId, int number) {
             WorkProject project = work.project(playerId, projectId);
-            Optional<WorkItem> existing = items.findByProjectIdAndIssueNumber(projectId, number);
-            if (existing.isPresent()) {
-                return work.payload(existing.get());
-            }
             Github.Issue issue = github.fetchIssue(project.getOwner(), project.getName(), number, accessToken(playerId));
+            Optional<WorkItem> existing = items.findLockedByProjectIdAndIssueNumber(projectId, number);
+            if (existing.isPresent()) {
+                return work.reconcileIssue(existing.get().getId(), issue);
+            }
             WorkItem item = items.save(work.newItem(projectId, kindOf(issue), issue.number(), issue.title(),
                     issue.body()));
             work.issueTasks(item, issue, null);
-            return work.payload(item);
+            return work.reconcileIssue(item.getId(), issue);
         }
 
         private static ItemKind kindOf(Github.Issue issue) {
@@ -1107,6 +1168,10 @@ public class ProjectWorkFeature {
         @Enumerated(EnumType.STRING)
         @Column(name = "status", nullable = false)
         private ItemStatus status;
+
+        /** Last observed GitHub closure; distinguishes a reopen from work just completed locally. */
+        @Column(name = "issue_closed", nullable = false)
+        private boolean issueClosed;
 
         @Column(name = "depends_on_id")
         private UUID dependsOnId;
@@ -1219,7 +1284,8 @@ public class ProjectWorkFeature {
 
         List<WorkItem> findByStatus(ItemStatus status);
 
-        Optional<WorkItem> findByProjectIdAndIssueNumber(UUID projectId, Integer issueNumber);
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        Optional<WorkItem> findLockedByProjectIdAndIssueNumber(UUID projectId, Integer issueNumber);
 
         Optional<WorkItem> findTopByProjectIdOrderByRankDesc(UUID projectId);
 
@@ -1429,7 +1495,7 @@ public class ProjectWorkFeature {
                                OffsetDateTime createdAt, OffsetDateTime closedAt) {
     }
 
-    public record IssuesPayload(List<IssuePayload> issues) {
+    public record IssuesPayload(List<IssuePayload> issues, List<ItemPayload> items) {
     }
 
     /** {@code item} is null while the issue was never configured or started. */
