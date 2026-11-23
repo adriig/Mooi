@@ -36,7 +36,7 @@ export const AppRecentProject = ({ entry, onNavigate }: AppRecentProjectProps) =
       <ul aria-label={`Open conversations in ${entry.project.name}`}
         className="mt-0.5 mb-1 ml-[22px] flex flex-col gap-0.5 border-l border-line pl-1.5">
         {entry.sessions.map((session) => (
-          <AppRecentSession key={session.id} session={session} onNavigate={onNavigate} />
+          <AppRecentSession key={session.id} session={session} task={entry.taskBySessionId[session.id]} onNavigate={onNavigate} />
         ))}
         {entry.features.map(({ feature, sessions }) => (
           <li key={feature.id} className="mt-1 first:mt-0">
@@ -46,7 +46,7 @@ export const AppRecentProject = ({ entry, onNavigate }: AppRecentProjectProps) =
             </div>
             <ul aria-label={`Sessions for ${feature.title}`} className="flex flex-col gap-0.5">
               {sessions.map((session) => (
-                <AppRecentSession key={session.id} session={session} onNavigate={onNavigate} />
+                <AppRecentSession key={session.id} session={session} task={entry.taskBySessionId[session.id]} onNavigate={onNavigate} />
               ))}
             </ul>
           </li>

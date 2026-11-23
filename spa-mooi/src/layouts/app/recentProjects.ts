@@ -17,6 +17,11 @@ export const recentProjects = (
   const open = sessions.filter((session) => session.status !== 'closed');
   const entries = projects.map((project) => {
     const projectSessions = open.filter((session) => session.projectId === project.id);
+    const taskBySessionId = Object.fromEntries(
+      (work[project.id]?.items ?? []).flatMap((item) =>
+        item.tasks.flatMap((task) => task.sessionId ? [[task.sessionId, task] as const] : []),
+      ),
+    );
     const featureSessionIds = new Set<string>();
     const features = (work[project.id]?.items ?? [])
       .filter((item) => item.kind === 'feature')
@@ -30,6 +35,7 @@ export const recentProjects = (
       project,
       sessions: projectSessions.filter((session) => !featureSessionIds.has(session.id)),
       features,
+      taskBySessionId,
       sessionCount: projectSessions.length,
     };
   });
