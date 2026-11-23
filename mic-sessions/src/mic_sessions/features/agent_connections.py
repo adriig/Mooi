@@ -391,6 +391,8 @@ class OpenCodeAttempt:
     connection_id: str | None
     login: opencode.Login
     task: asyncio.Task | None = None
+    expiry: asyncio.Task | None = None
+    expires_at: float | None = None
     # pending -> authorized -> saving -> connected, or failed / expired. The credential waits only in memory.
     state: str = "pending"
     token: str | None = field(default=None, repr=False)
@@ -420,11 +422,20 @@ async def _drop_opencode(key: str) -> None:
     attempt = _opencode_attempts.pop(key, None)
     if attempt is None:
         return
+    if attempt.expiry and attempt.expiry is not asyncio.current_task():
+        attempt.expiry.cancel()
+        await asyncio.gather(attempt.expiry, return_exceptions=True)
     if attempt.task and not attempt.task.done():
         attempt.task.cancel()
         await asyncio.gather(attempt.task, return_exceptions=True)
     attempt.token = None
     await attempt.login.close()
+
+
+async def _expire_opencode(key: str, attempt: OpenCodeAttempt) -> None:
+    await asyncio.sleep(opencode.LOGIN_SECONDS)
+    if _opencode_attempts.get(key) is attempt:
+        await _drop_opencode(key)
 
 
 @router.post("/agents/opencode/authorization")
@@ -439,13 +450,16 @@ async def start_opencode(caller: Annotated[Caller, Depends(current_caller)],
         raise ApiException.bad_request("An account title is required")
     owner = str(caller.player_id)
     for key, existing in list(_opencode_attempts.items()):
-        if existing.owner == owner or existing.state in ("failed", "expired", "connected"):
+        if (existing.expires_at is not None and existing.expires_at <= asyncio.get_running_loop().time()
+                or existing.owner == owner or existing.state in ("failed", "expired", "connected")):
             await _drop_opencode(key)
     if len(_opencode_attempts) >= _ATTEMPT_LIMIT:
         raise ApiException(429, "Too many sign-in attempts. Try again later.")
     key = uuid4().hex
     attempt = OpenCodeAttempt(owner, name, connection_id, opencode.Login(get_settings().agent_opencode_cli))
     _opencode_attempts[key] = attempt
+    attempt.expires_at = asyncio.get_running_loop().time() + opencode.LOGIN_SECONDS
+    attempt.expiry = asyncio.create_task(_expire_opencode(key, attempt))
     try:
         url, code = await attempt.login.start()
     except opencode.OpenCodeError as error:
