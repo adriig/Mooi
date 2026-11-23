@@ -27,7 +27,6 @@ export const SessionWorkspace = ({ sessionId, deployEnabled, children }: Session
   const [filesVisited, setFilesVisited] = useState(false);
   const [traceVisited, setTraceVisited] = useState(false);
   const changes = useSessionsStore((state) => state.byId[sessionId]?.changes);
-  const changesEventSeq = useSessionsStore((state) => state.byId[sessionId]?.changesEventSeq ?? 0);
   const session = useSessionsStore((state) => state.sessions.find((item) => item.id === sessionId));
   const deployment = session?.deployment;
   const setup = session?.deploymentSetup ?? null;
@@ -108,7 +107,7 @@ export const SessionWorkspace = ({ sessionId, deployEnabled, children }: Session
         </section> : null}
         {keepPreview && deployment ? <section role="tabpanel" aria-label="Application preview" hidden={visiblePane !== 'preview'}
           className={cn('min-h-0 min-w-0', visiblePane !== 'preview' && 'hidden')}>
-          <PreviewPanel deployment={deployment} changesEventSeq={changesEventSeq} visible={visiblePane === 'preview'} />
+          <PreviewPanel deployment={deployment} visible={visiblePane === 'preview'} />
         </section> : null}
       </div>
       {deployEnabled && logOpen && !consoleHidden ? <DeployLogsDrawer sessionId={sessionId} /> : null}
