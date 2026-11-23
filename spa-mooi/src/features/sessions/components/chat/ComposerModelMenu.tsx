@@ -3,6 +3,7 @@ import { ChevronDown, SlidersHorizontal } from 'lucide-react';
 import { useOnClickOutside } from '@/shared/hooks/useOnClickOutside';
 import { useOnEscape } from '@/shared/hooks/useOnEscape';
 import { cn } from '@/shared/utils/cn';
+import { sessionModelLabel } from '@/features/sessions/lib/sessionModelLabel';
 
 interface ComposerModelMenuOption {
   value: string;
@@ -52,7 +53,7 @@ export const ComposerModelMenu = ({ model, effort, modelOptions, effortOptions, 
   useOnClickOutside(containerRef, close, open);
   useOnEscape(dismiss, open);
 
-  const modelLabel = modelOptions.find((option) => option.value === model)?.label ?? model;
+  const modelLabel = modelOptions.find((option) => option.value === model)?.label ?? sessionModelLabel(model, model);
   const summary = effort ? `${modelLabel} · ${effort}` : modelLabel;
 
   return (

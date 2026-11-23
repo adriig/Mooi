@@ -25,6 +25,7 @@ import type { ParsedSlashCommand } from '@/features/sessions/types/ParsedSlashCo
 import type { SlashCommand } from '@/features/sessions/types/SlashCommand';
 import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
+import { sessionModelLabel } from '@/features/sessions/lib/sessionModelLabel';
 import { compactInstructions } from '@/features/sessions/lib/compactCommand';
 
 interface ChatComposerProps {
@@ -375,7 +376,7 @@ export const ChatComposer = ({
           {modelOptions.length > 0 ? (
             <div className="flex min-w-0 flex-1 sm:hidden">
               <ComposerModelMenu model={model} effort={effort} effortOptions={effortOptions}
-                modelOptions={modelOptions.map((option) => ({ value: option.id, label: option.label }))}
+                modelOptions={modelOptions.map((option) => ({ value: option.id, label: sessionModelLabel(option.id, option.label) }))}
                 onModelChange={changeModel} onEffortChange={(value) => onConfigurationChange({ model, effort: value || null })}
                 disabled={configurationDisabled} />
             </div>
@@ -384,7 +385,7 @@ export const ChatComposer = ({
             modelOptions.length > 0 ? 'hidden' : 'flex')}>
           {modelOptions.length > 0 ? (
             <>
-              <ComposerSelect value={model} options={modelOptions.map((option) => ({ value: option.id, label: option.label }))}
+              <ComposerSelect value={model} options={modelOptions.map((option) => ({ value: option.id, label: sessionModelLabel(option.id, option.label) }))}
                 onChange={changeModel} disabled={configurationDisabled} ariaLabel="Agent model"
                 describedBy={modelError ? 'model-error' : undefined} />
               {modelError ? <span id="model-error" className="sr-only">{modelError}</span> : null}

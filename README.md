@@ -53,7 +53,7 @@ sync in real time.
 
 ## 🧭 How it works
 
-1. **Connect**: sign in with Google and link GitHub, Claude, Codex, Antigravity and OpenCode accounts. OpenCode connects either with an API key from its Console or by signing in to your OpenCode account (OpenCode Go included); either way you pick from the models your account offers.
+1. **Connect**: sign in with Google and link GitHub, Claude, Codex, Antigravity and OpenCode accounts. OpenCode supports two separate connection modes: an API key from OpenCode Console, which offers the models that key can use, or an OpenCode account sign-in, including OpenCode Go, which offers the models enabled by that account or subscription. Session creation and chat let you choose from the connected account's available models; OpenCode's provider namespace is hidden in model names, while the canonical model ID is retained when starting a session or changing models.
 2. **Add a project**: any public or private repository you can access.
 3. **Build**: open sessions, chat with agents, watch changes and preview each feature live.
 4. **Merge**: bring finished work into the main branch, conflicts handled by the agent.
