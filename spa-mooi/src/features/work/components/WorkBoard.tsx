@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Network, RefreshCw } from 'lucide-react';
+import { Maximize, Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
   deleteWorkTask, pauseWorkItem, reassignWorkTasks, retryWorkTask, startWorkItem, updateWorkTask,
@@ -20,6 +20,7 @@ import { Badge } from '@/shared/components/Badge';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
+import { IconButton } from '@/shared/components/IconButton';
 import { Modal } from '@/shared/components/Modal';
 import { useThemeStore } from '@/stores/themeStore';
 
@@ -29,6 +30,26 @@ interface WorkBoardProps {
 }
 
 const NODE_TYPES = { task: TaskNode };
+
+interface TaskGraphProps {
+  nodes: TaskFlowNode[];
+  edges: Edge[];
+  theme: string;
+  className: string;
+}
+
+const TaskGraph = ({ nodes, edges, theme, className }: TaskGraphProps) => (
+  <div className={className}>
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.15 }}
+      nodesConnectable={false} nodesDraggable={false} edgesFocusable={false} minZoom={0.2} maxZoom={1.5}
+      colorMode={theme === 'dark' ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+      <Background gap={18} size={1} />
+      <Controls showInteractive={false} />
+      <MiniMap pannable zoomable className="!hidden sm:!block"
+        nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
+    </ReactFlow>
+  </div>
+);
 
 /**
  * The Board: one feature's whole map, its tasks as a left-to-right dependency graph coloured by
@@ -41,6 +62,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
   const theme = useThemeStore((state) => state.theme);
   const [searchParams, setSearchParams] = useSearchParams();
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const [boardExpanded, setBoardExpanded] = useState(false);
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [reassignMessage, setReassignMessage] = useState<string | null>(null);
   const features = useMemo(() => (items ?? []).filter((item) => item.kind === 'feature'), [items]);
@@ -129,6 +151,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
             <span className="sm:hidden">Recalculate</span>
           </Button>
           <WorkSettingsButton projectId={projectId} />
+          <IconButton icon={Maximize} label="Expand board" onClick={() => setBoardExpanded(true)} />
         </div>
       </div>
       {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
@@ -142,17 +165,13 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
         ))}
       </div>
 
-      <div className="h-[min(70dvh,44rem)] min-h-[26rem] overflow-hidden rounded-card border border-line bg-surface-2/40">
-        <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.15 }}
-          nodesConnectable={false} nodesDraggable={false} edgesFocusable={false} minZoom={0.2} maxZoom={1.5}
-          colorMode={theme === 'dark' ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
-          <Background gap={18} size={1} />
-          <Controls showInteractive={false} />
-          <MiniMap pannable zoomable className="!hidden sm:!block"
-            nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
-        </ReactFlow>
-      </div>
+      <TaskGraph nodes={nodes} edges={edges} theme={theme}
+        className="h-[min(70dvh,44rem)] min-h-[26rem] overflow-hidden rounded-card border border-line bg-surface-2/40" />
 
+      <Modal open={boardExpanded} size="full" title={feature.title} description="Task dependency board"
+        onClose={() => setBoardExpanded(false)}>
+        <TaskGraph nodes={nodes} edges={edges} theme={theme} className="h-full min-h-0 overflow-hidden rounded-card border border-line bg-surface-2/40" />
+      </Modal>
       {openTask ? (
         <Modal open size="lg" title={openTask.title} description={taskStyle(openTask).label}
           onClose={() => setOpenTaskId(null)}>

@@ -12,7 +12,7 @@ interface ModalProps {
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
-  size?: 'md' | 'lg' | 'xl';
+  size?: 'md' | 'lg' | 'xl' | 'full';
 }
 
 export const Modal = ({ open, onClose, title, description, children, footer, size = 'md' }: ModalProps) => {
@@ -44,11 +44,17 @@ export const Modal = ({ open, onClose, title, description, children, footer, siz
       aria-describedby={description ? descriptionId : undefined}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
-      className="fixed inset-x-0 top-(--app-offset) m-0 h-app max-h-none w-screen max-w-none bg-transparent px-0 outline-none pt-[calc(var(--safe-top)+0.75rem)] pb-0 text-ink open:flex open:items-end open:justify-center backdrop:bg-black/50 backdrop:backdrop-blur-[6px] backdrop:animate-fade-in sm:p-6 sm:open:items-center"
+      className={cn(
+        'fixed inset-x-0 top-(--app-offset) m-0 h-app max-h-none w-screen max-w-none bg-transparent px-0 outline-none pt-[calc(var(--safe-top)+0.75rem)] pb-0 text-ink open:flex open:items-end open:justify-center backdrop:bg-black/50 backdrop:backdrop-blur-[6px] backdrop:animate-fade-in sm:open:items-center',
+        size === 'full' ? 'sm:p-3' : 'sm:p-6',
+      )}
     >
       {/* A bottom sheet on phones (thumb reach, room for the keyboard), a centered card from `sm`. */}
       {/* On phones and tablets the entire card scrolls, so the keyboard leaves room for inputs. */}
-      <div className={cn('flex max-h-full w-full animate-sheet-in flex-col overflow-x-hidden overflow-y-auto overscroll-contain rounded-t-[22px] border-t border-line bg-surface shadow-pop sm:animate-dialog-in sm:rounded-panel sm:border lg:overflow-hidden', { md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-5xl' }[size])}>
+      <div className={cn(
+        'flex max-h-full w-full animate-sheet-in flex-col overflow-x-hidden overflow-y-auto overscroll-contain rounded-t-[22px] border-t border-line bg-surface shadow-pop sm:animate-dialog-in sm:rounded-panel sm:border lg:overflow-hidden',
+        { md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-5xl', full: 'h-full max-w-none' }[size],
+      )}>
         <header className="relative flex shrink-0 items-start justify-between gap-3 border-b border-line py-4 pr-3 pl-5 sm:px-7 sm:py-5">
           {/* The grabber says "this sheet can be dismissed" on phones, like a native sheet. */}
           <span aria-hidden className="absolute top-2 left-1/2 h-1 w-9 -translate-x-1/2 rounded-full bg-line-strong sm:hidden" />
@@ -58,7 +64,11 @@ export const Modal = ({ open, onClose, title, description, children, footer, siz
           </div>
           <IconButton icon={X} label="Close dialog" onClick={onClose} className="sm:-mt-2 sm:-mr-2" />
         </header>
-        <div className={cn('shrink-0 px-5 pt-5 sm:px-7 sm:py-6 lg:min-h-0 lg:shrink lg:overflow-y-auto lg:overscroll-contain', footer ? 'pb-5' : 'pb-[calc(1.5rem+var(--safe-bottom))]')}>{children}</div>
+        <div className={cn(
+          size === 'full'
+            ? 'min-h-0 flex-1 overflow-hidden p-3 sm:p-4'
+            : cn('shrink-0 px-5 pt-5 sm:px-7 sm:py-6 lg:min-h-0 lg:shrink lg:overflow-y-auto lg:overscroll-contain', footer ? 'pb-5' : 'pb-[calc(1.5rem+var(--safe-bottom))]'),
+        )}>{children}</div>
         {footer ? <footer className="flex shrink-0 gap-2 border-t border-line bg-surface-2/60 px-5 pt-3 pb-[calc(0.75rem+var(--safe-bottom))] *:min-w-0 *:flex-1 sm:justify-end sm:px-7 sm:py-4 sm:*:flex-none">{footer}</footer> : null}
       </div>
     </dialog>, document.body,
