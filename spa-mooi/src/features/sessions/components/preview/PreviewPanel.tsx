@@ -14,7 +14,11 @@ import { COMPACT_LAYOUT_QUERY } from '@/features/sessions/lib/previewViewports';
 import { previewUrl } from '@/features/sessions/lib/previewUrl';
 import type { DeploymentSnapshot } from '@/features/sessions/types/DeploymentSnapshot';
 
-export const PreviewPanel = ({ deployment, visible }: { deployment: DeploymentSnapshot; visible: boolean }) => {
+export const PreviewPanel = ({ deployment, changesEventSeq, visible }: {
+  deployment: DeploymentSnapshot;
+  changesEventSeq: number;
+  visible: boolean;
+}) => {
   // Phones start where their own users are; desktops on the real 1920×1080 layout.
   const [device, setDevice] = useState<PreviewDevice>(() => (window.matchMedia(COMPACT_LAYOUT_QUERY).matches ? 'mobile' : 'desktop'));
   // A scaled desktop is hard to tap on touch screens: there, gestures move and zoom it by default.
@@ -30,7 +34,7 @@ export const PreviewPanel = ({ deployment, visible }: { deployment: DeploymentSn
         <IconButton icon={fullscreen ? Minimize : Maximize} label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} onClick={() => void toggle()} />
       </PreviewToolbar>
       <PreviewViewport device={device} zoom={zoom} navigating={navigating}>
-        <PreviewFrame key={`${deployment.operationId}:${url}:${reload}`} url={url} />
+        <PreviewFrame key={`${deployment.operationId}:${url}:${changesEventSeq}:${reload}`} url={url} />
       </PreviewViewport>
       <PreviewDiagnostics url={url} />
     </div>;
