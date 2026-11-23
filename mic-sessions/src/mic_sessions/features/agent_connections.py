@@ -517,6 +517,15 @@ async def cancel_opencode(key: str, caller: Annotated[Caller, Depends(current_ca
 _usage_locks: dict[str, asyncio.Lock] = {}
 
 
+def account_usage_lock(connection_id: str) -> asyncio.Lock:
+    """Return the shared per-account lock used by every provider quota refresh."""
+    if len(_usage_locks) >= 256:
+        for key, lock in list(_usage_locks.items()):
+            if not lock.locked():
+                _usage_locks.pop(key, None)
+    return _usage_locks.setdefault(connection_id, asyncio.Lock())
+
+
 @router.get("/agents/connections/{connection_id}/usage")
 async def account_usage(connection_id: Annotated[str, PathParameter(max_length=64)],
                         caller: Annotated[Caller, Depends(current_caller)],
@@ -528,11 +537,7 @@ async def account_usage(connection_id: Annotated[str, PathParameter(max_length=6
     descriptor = PROVIDERS.get(credential.provider)
     if descriptor is None or descriptor.usage is None:
         return {"provider": credential.provider, "limits": False, "windows": {}}
-    if len(_usage_locks) >= 256:
-        for key, lock in list(_usage_locks.items()):
-            if not lock.locked():
-                _usage_locks.pop(key, None)
-    async with _usage_locks.setdefault(connection_id, asyncio.Lock()):
+    async with account_usage_lock(connection_id):
         try:
             async with asyncio.timeout(90):
                 windows = await descriptor.usage(credential, refresh)

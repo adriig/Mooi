@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Body, Depends, Request, status
 from pydantic import BaseModel, Field
 
-from mic_sessions.features import sessions
+from mic_sessions.features import agent_connections, sessions
 from mic_sessions.features.sessions import (
     EVENT_MERGE_COMPLETED,
     EVENT_PERMISSION_REQUEST,
@@ -140,10 +140,28 @@ async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Js
         if task["status"] not in ("planned", "queued", "attention") or task.get("sessionId") is not None:
             continue
         eligible += 1
-        assignment = _select_assignment(task, connections, _quota_limit(limits), catalogs, quota_snapshots)
+        current = task.get("assignment") or {}
+        current_connection = _assigned_connection(current, connections)
+        if (current_connection is None or current_connection not in quota_snapshots
+                or _highest_percent(current_connection, quota_snapshots[current_connection]) is None):
+            continue
+        assignment = _select_assignment(task, connections, _quota_limit(limits), quota_snapshots,
+                                        catalogs, quota_only=True, alternatives_first=True)
         if assignment is None or _same_assignment(task.get("assignment") or {}, assignment):
             continue
-        item = await _update_task(caller, project_id, item_id, UUID(task["id"]), {"assignment": assignment})
+        old_alternatives = task.get("alternatives") or []
+        if any(_same_assignment(current, alternative) for alternative in old_alternatives):
+            alternatives = [*old_alternatives, current]
+        else:
+            alternatives = [current, *old_alternatives]
+        deduplicated: list[Json] = []
+        for alternative in alternatives:
+            if not _same_assignment(alternative, assignment) and not any(
+                    _same_assignment(alternative, existing) for existing in deduplicated):
+                deduplicated.append(alternative)
+        item = await _update_task(caller, project_id, item_id, UUID(task["id"]), {
+            "assignment": assignment, "alternatives": deduplicated[:5],
+        })
         changed += 1
     return {"item": item, "changedCount": changed, "eligibleCount": eligible}
 
@@ -495,19 +513,24 @@ def _highest_percent(connection_id: str, snapshot: Json | None = None) -> float 
 
 async def _refresh_account_quotas(caller: Caller, connections: list[Json]) -> dict[str, Json]:
     """Fetch fresh provider quota snapshots for a user-requested assignment recalculation."""
-    snapshots: dict[str, Json] = {}
-    for connection in connections:
+    async def refresh(connection: Json) -> tuple[str, Json] | None:
         provider = PROVIDERS[connection["provider"]]
         if provider.usage is None:
-            continue
+            return None
         connection_id = str(connection["id"])
         try:
-            credential = await asyncio.wait_for(mooi.fetch_agent_credential(caller, connection_id), timeout=20)
-            snapshots[connection_id] = await asyncio.wait_for(provider.usage(credential, True), timeout=30)
+            async with asyncio.timeout(35):
+                credential = await mooi.fetch_agent_credential(caller, connection_id)
+                async with agent_connections.account_usage_lock(connection_id):
+                    snapshot = await provider.usage(credential, True)
+            return (connection_id, snapshot) if snapshot else None
         except Exception:
             LOG.info("Could not refresh quota for account %s during manual reassignment",
                      connection_id, exc_info=True)
-    return snapshots
+            return None
+
+    results = await asyncio.gather(*(refresh(connection) for connection in connections))
+    return dict(result for result in results if result is not None)
 
 
 def _quota_limit(settings: Json) -> float:
@@ -823,8 +846,9 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
     return _select_assignment(task, connections, quota_limit, catalogs)
 
 
-def _select_assignment(task: Json, connections: list[Json], quota_limit: float, catalogs: dict[str, Json],
-                       quota_snapshots: dict[str, Json] | None = None) -> Json | None:
+def _select_assignment(task: Json, connections: list[Json], quota_limit: float,
+                       catalogs: dict[str, Json], quota_snapshots: dict[str, Json] | None = None, *,
+                       quota_only: bool = False, alternatives_first: bool = False) -> Json | None:
     """Pick the first configured assignment/fallback whose account offers the model and has quota."""
     if not connections:
         return None
@@ -832,9 +856,13 @@ def _select_assignment(task: Json, connections: list[Json], quota_limit: float, 
 
     def account_percent(connection: Json) -> float | None:
         connection_id = str(connection["id"])
-        return _highest_percent(connection_id, snapshots[connection_id] if connection_id in snapshots else None)
+        if quota_only and connection_id not in snapshots:
+            return None
+        return _highest_percent(connection_id, snapshots.get(connection_id))
 
-    candidates = [task.get("assignment") or {}, *(task.get("alternatives") or [])]
+    primary = task.get("assignment") or {}
+    alternatives = task.get("alternatives") or []
+    candidates = [*alternatives, primary] if alternatives_first else [primary, *alternatives]
     for candidate in candidates:
         provider = candidate.get("provider") or next(
             (connection["provider"] for connection in connections if connection.get("defaultAccount")),
@@ -849,10 +877,23 @@ def _select_assignment(task: Json, connections: list[Json], quota_limit: float, 
             model = candidate.get("model") or catalog.get("defaultModel")
             if not any(entry["id"] == model for entry in catalog["models"]):
                 continue
-            if percent is None or percent < quota_limit:
+            if (percent is not None and percent < quota_limit) or (percent is None and not quota_only):
                 return {"provider": provider, "connectionId": str(account["id"]),
                         "model": candidate.get("model"), "effort": candidate.get("effort")}
     return None
+
+
+def _assigned_connection(assignment: Json, connections: list[Json]) -> str | None:
+    provider = assignment.get("provider")
+    accounts = [connection for connection in connections if connection.get("provider") == provider]
+    if assignment.get("connectionId"):
+        match = next((connection for connection in accounts
+                      if str(connection["id"]) == str(assignment["connectionId"])), None)
+    else:
+        match = next((connection for connection in accounts if connection.get("defaultAccount")), None)
+        if match is None and accounts:
+            match = accounts[0]
+    return str(match["id"]) if match else None
 
 
 def _same_assignment(left: Json, right: Json) -> bool:
