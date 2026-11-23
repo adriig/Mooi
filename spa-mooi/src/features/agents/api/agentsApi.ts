@@ -144,3 +144,19 @@ export const selectDefaultAccount =async (connectionId: string | null): Promise<
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not change your default account.'));
   return ((await response.json()) as AgentConnectionsResponse).connections;
 };
+
+export const fetchFavoriteModels = async (): Promise<Record<string, string[]>> => {
+  const response = await sessionsFetch('/agents/favorite-models');
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load favorite models.'));
+  return ((await response.json()) as { favorites: Record<string, string[]> }).favorites;
+};
+
+export const saveFavoriteModels = async (provider: string, modelIds: string[]): Promise<string[]> => {
+  const response = await sessionsFetch(`/agents/${encodeURIComponent(provider)}/favorite-models`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modelIds }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not save favorite models.'));
+  return ((await response.json()) as { provider: string; modelIds: string[] }).modelIds;
+};

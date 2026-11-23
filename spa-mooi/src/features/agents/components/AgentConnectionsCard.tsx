@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Bot, LogIn, Pencil, Plus, RefreshCw, Star, TriangleAlert, Unlink } from 'lucide-react';
 import { AddAgentAccountDialog } from '@/features/agents/components/AddAgentAccountDialog';
 import { AgentAccountUsage } from '@/features/agents/components/AgentAccountUsage';
+import { FavoriteModelsCard } from '@/features/agents/components/FavoriteModelsCard';
 import { AuthorizationCodePairing } from '@/features/agents/components/AuthorizationCodePairing';
 import { OpenCodePairing } from '@/features/agents/components/OpenCodePairing';
 import { CodexPairing } from '@/features/agents/components/CodexPairing';
@@ -50,7 +51,8 @@ export const AgentConnectionsCard = () => {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [reload]);
 
-  return <Card className="p-5 sm:p-6">
+  return <>
+  <Card className="p-5 sm:p-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Agent accounts</h2>
@@ -155,5 +157,7 @@ export const AgentConnectionsCard = () => {
       </label>
       {editing && actionError && <p role="alert" className="mt-3 text-sm text-danger">{actionError}</p>}
     </Modal>
-  </Card>;
+  </Card>
+  <FavoriteModelsCard providers={providers} connections={connections} />
+  </>;
 };
