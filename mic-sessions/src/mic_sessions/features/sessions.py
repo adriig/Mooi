@@ -46,7 +46,7 @@ from urllib.parse import quote
 
 import httpx
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import (
     AwareDatetime,
@@ -378,9 +378,34 @@ class ReleaseList(BaseModel):
     releases: list[GithubRelease]
 
 
+_COMMIT_SHA_PATTERN = r"^[0-9a-f]{40}$"
+
+
 class StartProductionRequest(BaseModel):
     tag: str = Field(min_length=1, max_length=120)
     create: bool = False
+    # The target commit the user confirmed in the release preview: a deployment whose release resolves
+    # to another commit (the default branch moved, a tag was moved) is refused instead of published.
+    expectedSha: str | None = Field(default=None, pattern=_COMMIT_SHA_PATTERN)
+
+
+class ReleasePreview(BaseModel):
+    """What a deployment would bring compared with production. `commits` are the SHAs reachable from
+    `targetSha` and not from `baseSha` (newest first); before any deployment, the target's history.
+    Squash merges make every work task's merge one of them."""
+
+    tag: str | None
+    create: bool
+    targetSha: str
+    baseTag: str | None
+    baseSha: str | None
+    comparison: Literal["initial", "identical", "ahead", "behind", "diverged"]
+    commits: list[str]
+    # The comparison holds more commits than the preview could list (very long histories).
+    truncated: bool = False
+
+
+_RELEASE_PREVIEW_PAGES = 10
 
 
 _PRODUCTION_PLATFORM_ENVIRONMENT = frozenset({
@@ -406,9 +431,11 @@ async def _resolve_production_release(project: mooi.Project, caller: Caller,
     if body.create:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", body.tag):
             raise ApiException.bad_request("Invalid release version")
-        branch = quote(project.default_branch or "main", safe="")
-        main = await _github_api(caller, project.full_name, "GET", f"branches/{branch}")
-        main_sha = main["commit"]["sha"]
+        main_sha = await _default_branch_sha(caller, project)
+        if body.expectedSha is not None and main_sha != body.expectedSha:
+            raise ApiException.conflict(
+                f"{project.default_branch or 'main'} has new commits since the release preview; "
+                "refresh the preview and confirm it again")
         try:
             await _github_api(caller, project.full_name, "GET", f"git/ref/tags/{quote(body.tag, safe='')}")
         except ApiException as error:
@@ -423,11 +450,96 @@ async def _resolve_production_release(project: mooi.Project, caller: Caller,
         release = await _github_api(caller, project.full_name, "GET", f"releases/tags/{quote(body.tag, safe='')}")
         if release.get("draft") or release.get("tag_name") != body.tag:
             raise ApiException.conflict("The selected GitHub release is not published")
-    commit = await _github_api(caller, project.full_name, "GET", f"commits/{quote(body.tag, safe='')}")
-    release_sha = commit["sha"]
+    release_sha = await _release_sha(caller, project, body.tag)
     if body.create and release_sha != main_sha:
         raise ApiException.conflict("The new release tag does not point to the selected default branch commit")
+    if not body.create and body.expectedSha is not None and release_sha != body.expectedSha:
+        raise ApiException.conflict(
+            f"Release {body.tag} now points to another commit than the preview; refresh the preview and confirm it again")
     return release, release_sha
+
+
+async def _default_branch_sha(caller: Caller, project: mooi.Project) -> str:
+    branch = quote(project.default_branch or "main", safe="")
+    main = await _github_api(caller, project.full_name, "GET", f"branches/{branch}")
+    return main["commit"]["sha"]
+
+
+async def _release_sha(caller: Caller, project: mooi.Project, tag: str, missing: str | None = None) -> str:
+    """The commit a release tag points to, resolved the same way for previews and deployments."""
+    try:
+        commit = await _github_api(caller, project.full_name, "GET", f"commits/{quote(tag, safe='')}")
+    except ApiException as error:
+        if missing is not None and error.status_code in (status.HTTP_404_NOT_FOUND, status.HTTP_422_UNPROCESSABLE_ENTITY):
+            raise ApiException.not_found(missing) from None
+        raise
+    return commit["sha"]
+
+
+async def _release_preview(caller: Caller, project: mooi.Project, tag: str | None, create: bool) -> ReleasePreview:
+    """Compares the release a deployment would run with the one production runs. Read only: no tag,
+    release or deployment is created."""
+    if create:
+        target_sha = await _default_branch_sha(caller, project)
+    else:
+        if not tag:
+            raise ApiException.bad_request("Choose the release to preview")
+        release = await _github_api_or_missing(caller, project, f"releases/tags/{quote(tag, safe='')}",
+                                               f"Release {tag} was not found on GitHub")
+        if release.get("draft") or release.get("tag_name") != tag:
+            raise ApiException.conflict("The selected GitHub release is not published")
+        target_sha = await _release_sha(caller, project, tag, f"Release {tag} was not found on GitHub")
+    base_tag = await _current_release(caller, project.id)
+    preview = ReleasePreview(tag=None if create else tag, create=create, targetSha=target_sha, baseTag=base_tag,
+                             baseSha=None, comparison="initial", commits=[])
+    if base_tag is None:
+        commits, truncated = await _commit_history(caller, project, target_sha)
+        return preview.model_copy(update={"commits": commits, "truncated": truncated})
+    base_sha = await _release_sha(caller, project, base_tag,
+                                  f"Release {base_tag}, running in production, was not found on GitHub")
+    preview = preview.model_copy(update={"baseSha": base_sha})
+    if base_sha == target_sha:
+        return preview.model_copy(update={"comparison": "identical"})
+    return await _compare_commits(caller, project, preview)
+
+
+async def _github_api_or_missing(caller: Caller, project: mooi.Project, path: str, missing: str) -> Any:
+    try:
+        return await _github_api(caller, project.full_name, "GET", path)
+    except ApiException as error:
+        if error.status_code == status.HTTP_404_NOT_FOUND:
+            raise ApiException.not_found(missing) from None
+        raise
+
+
+async def _commit_history(caller: Caller, project: mooi.Project, sha: str) -> tuple[list[str], bool]:
+    """The newest commits reachable from `sha`, a bounded number of pages."""
+    commits: list[str] = []
+    for page in range(1, _RELEASE_PREVIEW_PAGES + 1):
+        data = await _github_api(caller, project.full_name, "GET", f"commits?sha={sha}&per_page=100&page={page}")
+        commits += [item["sha"] for item in data]
+        if len(data) < 100:
+            return commits, False
+    return commits, True
+
+
+async def _compare_commits(caller: Caller, project: mooi.Project, preview: ReleasePreview) -> ReleasePreview:
+    """Commits the target has and the base lacks (GitHub's three-dot comparison), newest first."""
+    commits: list[str] = []
+    comparison, total = "identical", 0
+    for page in range(1, _RELEASE_PREVIEW_PAGES + 1):
+        data = await _github_api(caller, project.full_name, "GET",
+                                 f"compare/{preview.baseSha}...{preview.targetSha}?per_page=100&page={page}")
+        comparison, total = data.get("status") or "diverged", int(data.get("ahead_by") or 0)
+        page_commits = [item["sha"] for item in data.get("commits") or []]
+        commits += page_commits
+        if len(commits) >= total or len(page_commits) < 100:
+            break
+    if comparison not in ("identical", "ahead", "behind", "diverged"):
+        comparison = "diverged"
+    commits.reverse()
+    return preview.model_copy(update={"comparison": comparison, "commits": commits,
+                                      "truncated": len(commits) < total})
 
 
 _FIRST_RELEASE_TAG = "v1.0.0"
@@ -3207,6 +3319,17 @@ async def production_releases(project_id: UUID, caller: Annotated[Caller, Depend
     return ReleaseList(releases=[GithubRelease(tag=item["tag_name"], name=item.get("name") or item["tag_name"],
                                                url=item["html_url"], publishedAt=item.get("published_at"))
                                  for item in data if not item.get("draft")])
+
+
+@router.get("/production/projects/{project_id}/releases/preview")
+async def production_release_preview(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)],
+                                     create: bool = False,
+                                     tag: Annotated[str | None, Query(min_length=1, max_length=120)] = None,
+                                     ) -> ReleasePreview:
+    """The commits a deployment of an existing release (`tag`) or of a new one (the default branch's
+    head) would bring over production. Deploying it later passes `targetSha` as `expectedSha`."""
+    project, _ = await _owned_production(caller, project_id)
+    return await _release_preview(caller, project, tag, create)
 
 
 @router.post("/production/projects/{project_id}/deployments", status_code=status.HTTP_202_ACCEPTED)
