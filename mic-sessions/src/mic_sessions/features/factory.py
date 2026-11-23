@@ -139,7 +139,7 @@ async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Js
         if task["status"] not in ("planned", "queued", "attention") or task.get("sessionId") is not None:
             continue
         eligible += 1
-        assignment = _select_assignment(task, connections, float(limits["quotaLimit"]), quota_snapshots)
+        assignment = _select_assignment(task, connections, _quota_limit(limits), quota_snapshots)
         if assignment is None or _same_assignment(task.get("assignment") or {}, assignment):
             continue
         item = await _update_task(caller, project_id, item_id, UUID(task["id"]), {"assignment": assignment})
@@ -296,9 +296,26 @@ async def agent_work(session_id: UUID, request: Request) -> Json:
 
 @router.get("/sessions/{session_id}/work/agent/assignment")
 async def agent_assignment(session_id: UUID, request: Request) -> Json:
-    """The assignment expert's brief with the accounts it chooses from, their models and remaining quota."""
-    _, caller = await sessions._agent_access(session_id, request, "session")
-    return {"brief": ASSIGNMENT_BRIEF, "accounts": await _capacity(caller)}
+    """The assignment expert's brief with the accounts it chooses from, their models and remaining quota,
+    the user's favorite models per provider and the project's effective quota limit."""
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    settings = await mooi.send_work(caller, "GET", session.project_id, "/settings") or {}
+    quota_limit = _quota_limit(settings)
+    try:
+        favorites = await mooi.fetch_favorite_models(caller)
+    except ApiException:
+        LOG.info("No favorite models for the assignment expert", exc_info=True)
+        favorites = {}
+    accounts = await _capacity(caller, quota_limit, favorites)
+    available: dict[str, set[str]] = {}
+    for account in accounts:
+        available.setdefault(account["provider"], set()).update(model["id"] for model in account["models"])
+    # Saved ids are preferences only: those no connected catalog offers any more are left out.
+    favorites = {provider: [model for model in models if model in available.get(provider, set())]
+                 for provider, models in favorites.items() if provider in available}
+    return {"brief": ASSIGNMENT_BRIEF, "quotaLimit": quota_limit,
+            "favorites": {provider: models for provider, models in favorites.items() if models},
+            "accounts": accounts}
 
 
 @router.post("/sessions/{session_id}/work/agent/features", status_code=status.HTTP_201_CREATED)
@@ -381,11 +398,12 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
 
 ASSIGNMENT_BRIEF = """You are the assignment expert of the software factory: for each task, pick the provider, account, model and thinking effort that will do it best without exhausting the user's quota.
 - Choose only among the accounts, models and efforts listed with this brief. Never invent one.
-- Match the model to the task: architecture, cross-cutting or subtle work gets the strongest model with high effort; routine UI, wiring, configuration or documentation gets a fast, cheaper model with low or medium effort. Effort costs quota: raise it only where reasoning pays off.
-- A QA task always runs on a different model than the task it checks, preferably from another provider, with medium effort.
-- Spread the load: prefer the accounts with the most quota left (the lowest `percent` across their windows), never pick an account above 80% of any window while another one fits, and avoid stacking parallel tasks of the same dependency level on one account.
-- Give every task one to three `alternatives`, in order, on other accounts or providers: the platform checks quota again when the task launches and falls back to them, so no account runs out of credits mid-feature.
-- `percent: null` means the quota is unknown right now (no live session reads it); treat it as available but prefer known healthy accounts for the heaviest tasks."""
+- Decide in this order, and never let a later step override an earlier one:
+  1. **Quota first, always.** `quotaLimit` is the project's quota percent from which an account is spared. An account whose known `percent` in any window is at or above `quotaLimit` (`eligible: false`) must not be assigned, nor used as an alternative, while any eligible account exists. `percent: null` means the quota is unknown right now (no live session reads it): such an account is eligible, but prefer known healthy accounts for the heaviest tasks. If no account is eligible, assign as usual: the platform keeps the task waiting until an account has quota left.
+  2. **Fit the work.** Architecture, cross-cutting or subtle work gets a strong model with high effort; routine UI, wiring, configuration or documentation gets a fast, cheaper model with low or medium effort. Effort costs quota: raise it only where reasoning pays off. A QA task always runs on a different model than the task it checks, preferably from another provider, with medium effort.
+  3. **Favorites among the eligible.** `favorites` lists the user's favorite models per provider (`favorite: true` on each account's models). Among eligible accounts, prefer a favorite model that fits the task over a non-favorite one. When no favorite is eligible or none fits the task, assign the best eligible non-favorite model: a favorite never justifies an account at or above the limit.
+  4. **Spread the load.** Prefer the eligible accounts with the most quota left (the lowest `percent` across their windows) and avoid stacking parallel tasks of the same dependency level on one account, even when that means using a favorite model on another account or provider, or a non-favorite model.
+- Give every task one to three `alternatives`, in order, on other eligible accounts or providers, following the same order (favorites first among the eligible): the platform checks quota again when the task launches and falls back to them, so no account runs out of credits mid-feature."""
 
 
 def _work_section(session: Session, root: str) -> str:
@@ -473,7 +491,13 @@ async def _refresh_account_quotas(caller: Caller, connections: list[Json]) -> di
     return snapshots
 
 
-async def _capacity(caller: Caller) -> list[Json]:
+def _quota_limit(settings: Json) -> float:
+    limit = settings.get("quotaLimit")
+    return float(limit if isinstance(limit, (int, float)) else DEFAULT_LIMITS["quotaLimit"])
+
+
+async def _capacity(caller: Caller, quota_limit: float, favorites: dict[str, list[str]]) -> list[Json]:
+    """Every usable account with its catalog, favorites marked, and whether its quota keeps it eligible."""
     accounts = []
     catalogs: dict[str, Json] = {}
     for connection in await mooi.fetch_agent_connections(caller):
@@ -493,10 +517,16 @@ async def _capacity(caller: Caller) -> list[Json]:
                 catalogs[provider] = {"models": [], "defaultModel": None}
         quota = {name: {"percent": value.get("percent"), "resetsAt": value.get("resetsAt")}
                  for name, value in _quota(str(connection["id"])).items() if isinstance(value, dict)}
+        percent = _highest_percent(str(connection["id"]))
+        preferred = set(favorites.get(provider) or [])
         accounts.append({"connectionId": connection["id"], "provider": provider,
                          "name": connection.get("name") or connection.get("accountLabel") or connection.get("label"),
                          "defaultAccount": bool(connection.get("defaultAccount")),
-                         "quota": quota or None, **catalogs[provider]})
+                         "quota": quota or None, "percent": percent,
+                         "eligible": percent is None or percent < quota_limit,
+                         **catalogs[provider],
+                         "models": [{**model, "favorite": model["id"] in preferred}
+                                    for model in catalogs[provider]["models"]]})
     return accounts
 
 
@@ -697,7 +727,7 @@ async def _wait(task: Json, reason: str) -> None:
 
 
 async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json) -> None:
-    assignment = await _assign(caller, task, float(limits["quotaLimit"]))
+    assignment = await _assign(caller, task, _quota_limit(limits))
     if assignment is None:
         await _wait(task, "Waiting for an account with quota left")
         return
@@ -722,7 +752,9 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
 
 async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None:
     """The task's assignment, or its first alternative, on an account with quota left. An unnamed account
-    is the provider's default one; an account running low is swapped for another of the same provider."""
+    is the provider's default one; an account running low is swapped for another of the same provider.
+    Quota is checked again here, at launch: no saved preference (favorite model, named account) ever
+    launches on an account whose known quota reached `quota_limit`."""
     connections = [connection for connection in await mooi.fetch_agent_connections(caller)
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
     return _select_assignment(task, connections, quota_limit)
