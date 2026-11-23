@@ -82,7 +82,7 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
         </div>
       </div>
 
-      <IssueComposer disabled={busy} onCreate={(draft) => run(() => createWorkIssue(projectId, draft))} />
+      <IssueComposer projectId={projectId} disabled={busy} onCreate={(draft) => run(() => createWorkIssue(projectId, draft))} />
       <p className="flex items-start gap-2 text-[12.5px] leading-relaxed text-ink-subtle">
         <Info className="mt-0.5 size-3.5 shrink-0" />
         Features are designed in a session: describe one to its agent and it breaks it into tasks here, ready to Start.
