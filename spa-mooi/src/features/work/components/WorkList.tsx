@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Info } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { createWorkIssue, ensureIssueItem, pauseWorkItem, startWorkItem } from '@/features/work/api/workApi';
@@ -31,6 +32,8 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
   const [kind, setKind] = useState<WorkKindFilter>('all');
   const [filter, setFilter] = useState<WorkFilter>('all');
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedWork = searchParams.get('work');
 
   const entries = useMemo(() => workEntries(items ?? [], issues ?? []), [items, issues]);
   const ofKind = useMemo(() => entries.filter((entry) => kind === 'all' || entry.kind === kind), [entries, kind]);
@@ -38,6 +41,21 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
   const visible = ofKind.filter((entry) => filter === 'all' || entry.status === filter);
   const open = entries.find((entry) => entry.key === openKey) ?? null;
   const features = (items ?? []).filter((item) => item.kind === 'feature');
+
+  useEffect(() => {
+    if (!requestedWork) return;
+    const entry = entries.find((candidate) => candidate.item?.id === requestedWork);
+    if (entry) setOpenKey(entry.key);
+  }, [entries, requestedWork]);
+
+  const closeEntry = () => {
+    setOpenKey(null);
+    if (searchParams.has('work')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('work');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   const start = async (entry: WorkEntry) => {
     const item = entry.item ?? (entry.issue ? await run(() => ensureIssueItem(projectId, entry.issue!.number)) : null);
@@ -80,7 +98,7 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
 
       {open ? (
         <WorkItemDialog projectId={projectId} entry={open} features={features} connections={connections} work={work}
-          onClose={() => setOpenKey(null)} />
+          onClose={closeEntry} />
       ) : null}
     </div>
   );

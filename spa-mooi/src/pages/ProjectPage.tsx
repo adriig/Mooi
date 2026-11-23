@@ -16,6 +16,7 @@ import { SessionList } from '@/features/sessions/components/SessionList';
 import { WorkspacesOverview } from '@/features/sessions/components/workspaces/WorkspacesOverview';
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
 import { useProjectWorkspaces } from '@/features/sessions/hooks/useProjectWorkspaces';
+import { useProjectWork } from '@/features/work/hooks/useProjectWork';
 import { WorkPanel } from '@/features/work/components/WorkPanel';
 import { workEntries } from '@/features/work/lib/workEntries';
 import { Card } from '@/shared/components/Card';
@@ -64,6 +65,7 @@ export const ProjectPage = () => {
   const requestedTab = searchParams.get('tab');
   const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
   const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
+  const projectWork = useProjectWork(project?.id ?? '', tab === WORKSPACES_TAB && Boolean(project));
   const openWork = useMemo(() => (work?.items && work.issues
     ? workEntries(work.items, work.issues).filter((entry) => entry.status !== 'done').length : undefined), [work]);
   const features = work?.items?.filter((item) => item.kind === 'feature' && item.status !== 'done').length;
@@ -168,6 +170,10 @@ export const ProjectPage = () => {
           loading={workspaces.loading}
           error={workspaces.error}
           onReload={workspaces.reload}
+          pendingFeatures={projectWork.items?.filter((item) => item.kind === 'feature' && item.status !== 'done') ?? null}
+          featuresLoading={!projectWork.items && !projectWork.loadError}
+          featuresError={projectWork.loadError}
+          onReloadFeatures={projectWork.reload}
         />
       ) : sessions.length > 0 ? (
         <SessionList sessions={sessions} onNewSession={() => setNewSessionOpen(true)} />
