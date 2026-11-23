@@ -142,20 +142,20 @@ async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Js
         eligible += 1
         current = task.get("assignment") or {}
         current_connection = _assigned_connection(current, connections)
-        if (current_connection is None or current_connection not in quota_snapshots
-                or _highest_percent(current_connection, quota_snapshots[current_connection]) is None):
+        if current_connection is None or current_connection not in quota_snapshots:
+            continue
+        current_percent = _highest_percent(current_connection, quota_snapshots[current_connection])
+        # Preserve the saved preference whenever its quota is healthy or unavailable. In particular,
+        # resolving a provider's default account to its current id must not itself count as a change.
+        if current_percent is None or current_percent < _quota_limit(limits):
             continue
         assignment = _select_assignment(task, connections, _quota_limit(limits), quota_snapshots,
                                         catalogs, quota_only=True, alternatives_first=True)
         if assignment is None or _same_assignment(task.get("assignment") or {}, assignment):
             continue
         old_alternatives = task.get("alternatives") or []
-        if any(_same_assignment(current, alternative) for alternative in old_alternatives):
-            alternatives = [*old_alternatives, current]
-        else:
-            alternatives = [current, *old_alternatives]
         deduplicated: list[Json] = []
-        for alternative in alternatives:
+        for alternative in [current, *old_alternatives]:
             if not _same_assignment(alternative, assignment) and not any(
                     _same_assignment(alternative, existing) for existing in deduplicated):
                 deduplicated.append(alternative)
@@ -529,7 +529,14 @@ async def _refresh_account_quotas(caller: Caller, connections: list[Json]) -> di
                      connection_id, exc_info=True)
             return None
 
-    results = await asyncio.gather(*(refresh(connection) for connection in connections))
+    # The bound includes time spent waiting for a concurrent usage read on the same account. Each
+    # account refresh runs concurrently, while account_usage_lock prevents provider refresh races.
+    try:
+        async with asyncio.timeout(35):
+            results = await asyncio.gather(*(refresh(connection) for connection in connections))
+    except TimeoutError:
+        LOG.info("Quota refresh timed out during manual reassignment")
+        return {}
     return dict(result for result in results if result is not None)
 
 
