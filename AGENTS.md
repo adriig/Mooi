@@ -173,6 +173,8 @@ Each project plans and builds its work as a software factory: agents design it, 
   directly only once that setup passed its test; a Compose file already in the repository is not enough.
 - Deploy, stop, configure through buttons or chat; the chat knows the deployment prompt, so setup from chat
   equals setup from the Deploy button. Build/run logs and progress stream live.
+- After workspace code changes, the active preview refreshes automatically by rebuilding its deployment;
+  agents and tools must not trigger separate automatic restarts or deploys themselves.
 
 ## Production deployments
 
@@ -218,9 +220,11 @@ Each project plans and builds its work as a software factory: agents design it, 
   - **Account session limits**: administrators configure a positive maximum of open agent sessions per
     user account (default: eight), shared across projects, providers and development, production and
     backup chats. Changes apply to new creations immediately; lowering a limit keeps existing sessions
-    open. The sessions pod's capacity (all accounts together) caps every account's limit: sized by
-    default from the memory the pod may use (a per-session memory budget, never below eight), or fixed
-    by operators; the console shows it and accepts no account limit above it.
+    open. The sessions pod's capacity (all accounts together) caps the effective limit for each account:
+    sized by default from the memory the pod may use (a per-session memory budget, never below eight), or
+    fixed by operators; the console shows it.
+  - **Settings**: administrators configure the platform-wide maximum number of simultaneous development
+    previews, stored in `platform_settings` and enforced when a preview starts.
   - Other platform settings as they come.
 
 ## Other capabilities
@@ -266,4 +270,6 @@ owner (its Mooi platform prompt); otherwise treat them as read-only.
 - Files shared by channels (e.g. service `Dockerfile`s) must keep every channel working.
 - Secrets live in the platform or git-ignored files (`.env`, `.env.local`), never in the repository.
 - Respect isolation: keep the assigned Compose project, let Docker name resources and pick host ports, and
-  manage only resources the current session owns. No automatic restarts or deploys after code changes.
+  manage only resources the current session owns. Agents and tools must not trigger automatic restarts or
+  deploys after code changes; the Mooi dev preview's platform-managed workspace refresh is the exception
+  described under *Dev deployments*.
