@@ -475,6 +475,20 @@ Platform API:
 
 def _task_section(run: TaskRun, root: str) -> str:
     report = f"{root}/work/agent/task"
+    if run.phase == "resolving":
+        branch_guidance = (
+            "- The platform explicitly started merge-conflict resolution. Follow its conflict-resolution prompt: "
+            "merge the default branch into this task branch, resolve the conflicts and commit that resolution here. "
+            "Do not push, switch branches, or merge this task branch into the default branch; the platform performs "
+            "that final merge."
+        )
+    else:
+        branch_guidance = (
+            "- Do not merge this task branch into the default branch, push, or switch branches; the platform owns "
+            "the final merge. Exception: only when the platform explicitly starts merge-conflict resolution, follow "
+            "its prompt to merge the default branch into this task branch and commit the resolution locally. Do not "
+            "push or switch branches."
+        )
     if run.qa:
         outcomes = ('`{"outcome": "passed", "summary": "<what you checked>"}` when every acceptance criterion is met, '
                     'or `{"outcome": "defect", "title": "<short name>", "summary": "<steps, expected and actual '
@@ -485,7 +499,7 @@ def _task_section(run: TaskRun, root: str) -> str:
 This session runs one task of the project's software factory, on its own; there may be nobody watching. Its first message is the task.
 - Stay within the task. Other tasks run in their own sessions; the tasks this one depended on are already merged into the default branch.
 - Ask the user only when you truly cannot go on: the task then waits for their answer.
-- Never merge, push or switch branches: the platform merges finished development tasks.
+{branch_guidance}
 - Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead."""
 
 
