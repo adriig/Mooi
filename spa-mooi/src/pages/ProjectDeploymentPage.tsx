@@ -217,7 +217,7 @@ export const ProjectDeploymentPage = () => {
           files.reload();
           openTab('chat');
         })} /> : null}
-      {releaseOpen ? <ProductionReleaseDialog projectId={project.id} defaultBranch={project.defaultBranch} busy={deploying}
+      {releaseOpen ? <ProductionReleaseDialog key={project.id} projectId={project.id} defaultBranch={project.defaultBranch} busy={deploying}
         error={actionError} onClose={() => { setReleaseOpen(false); setActionError(null); }} onSelect={(choice) => void deploy(choice)} /> : null}
       {environmentOpen && overview ? <PlatformEnvironmentDialog prefix="MOOI_PRODUCTION_" variables={overview.environment}
         description="Stored encrypted in the platform and passed to deploy.sh and status.sh together with the development values."
