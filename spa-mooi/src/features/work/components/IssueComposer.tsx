@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Bug, Plus, Wrench } from 'lucide-react';
+import { Bug, Plus } from 'lucide-react';
 import { Button } from '@/shared/components/Button';
 import { cn } from '@/shared/utils/cn';
 
@@ -30,11 +30,11 @@ export const IssueComposer = ({ disabled, onCreate }: IssueComposerProps) => {
   return (
     <form onSubmit={(event) => { void submit(event); }} className="flex flex-col gap-2 sm:flex-row sm:items-center">
       <div role="group" aria-label="Kind" className="inline-flex shrink-0 gap-0.5 rounded-control border border-line bg-surface-2 p-0.5">
-        {([['defect', 'Defect', Bug], ['debt', 'Debt', Wrench]] as const).map(([id, label, Icon]) => (
+        {([['defect', 'Defect', Bug], ['debt', 'Debt', undefined]] as const).map(([id, label, Icon]) => (
           <button key={id} type="button" aria-pressed={kind === id} onClick={() => setKind(id)}
             className={cn('inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-[7px] px-3 text-[13px] font-medium transition',
               kind === id ? 'bg-surface text-ink shadow-raised ring-1 ring-line' : 'text-ink-muted hover:text-ink')}>
-            <Icon className="size-3.5" /> {label}
+            {Icon ? <Icon className="size-3.5" /> : null} {label}
           </button>
         ))}
       </div>
