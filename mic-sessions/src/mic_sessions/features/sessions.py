@@ -674,7 +674,7 @@ class MergeRequest(BaseModel):
 
 
 _COMMIT_TITLE_PATTERN = re.compile(
-    r"^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?:\s+\S.*$"
+    r"^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: [^\r\n]+$"
 )
 
 

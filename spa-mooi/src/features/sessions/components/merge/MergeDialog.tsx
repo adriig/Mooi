@@ -20,7 +20,7 @@ interface MergeDialogProps {
 }
 
 const MAX_TITLE = 200;
-const COMMIT_TITLE = /^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?:\s+\S.*$/;
+const COMMIT_TITLE = /^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: [^\r\n]+$/;
 
 /** Asks for the one mandatory input of a merge: the title of the single commit pushed to the target. */
 export const MergeDialog = ({ targetBranch, branch, changes, merging, error, suggestedMessage, onCancel, onCommit,
