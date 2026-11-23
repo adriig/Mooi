@@ -723,14 +723,18 @@ public class ProjectWorkFeature {
 
         /** The one development task an issue runs as, unless the draft names its settings. */
         public List<WorkTask> issueTasks(WorkItem item, Github.Issue issue, TaskSettings settings) {
+            // Manually created defects and debt should proceed without merge review or a separate QA
+            // task by default. Explicit issue settings still take precedence.
+            Boolean autoMerge = settings == null || settings.autoMerge() == null ? true : settings.autoMerge();
+            Boolean tests = settings == null || settings.tests() == null ? false : settings.tests();
             TaskDraft draft = new TaskDraft(item.getKind() == ItemKind.defect ? "fix" : "work",
                     issue.title(), TaskCategory.dev,
                     "GitHub issue #" + issue.number() + ": " + issue.title() + "\n\n" + issue.body(),
                     settings == null ? null : settings.acceptance(),
                     settings == null ? null : settings.assignment(),
                     settings == null ? null : settings.alternatives(),
-                    settings == null ? null : settings.autoMerge(),
-                    settings == null ? null : settings.tests(),
+                    autoMerge,
+                    tests,
                     settings == null ? null : settings.qa(), null);
             List<WorkTask> all = new ArrayList<>();
             WorkTask task = newTask(item.getId(), draft, Set.of(), 0);
