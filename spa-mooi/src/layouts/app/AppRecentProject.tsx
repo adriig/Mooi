@@ -24,19 +24,32 @@ export const AppRecentProject = ({ entry, onNavigate }: AppRecentProjectProps) =
     >
       <Initials value={entry.project.name} size="sm" />
       <span className="min-w-0 flex-1 truncate">{entry.project.name}</span>
-      {entry.sessions.length > 0 ? (
+      {entry.sessionCount > 0 ? (
         <span className="shrink-0 text-[10px] font-semibold text-ink-subtle tabular-nums"
-          aria-label={`${entry.sessions.length} open ${entry.sessions.length === 1 ? 'conversation' : 'conversations'}`}>
-          {entry.sessions.length}
+          aria-label={`${entry.sessionCount} open ${entry.sessionCount === 1 ? 'conversation' : 'conversations'}`}>
+          {entry.sessionCount}
         </span>
       ) : null}
     </NavLink>
 
-    {entry.sessions.length > 0 ? (
+    {entry.sessionCount > 0 ? (
       <ul aria-label={`Open conversations in ${entry.project.name}`}
         className="mt-0.5 mb-1 ml-[22px] flex flex-col gap-0.5 border-l border-line pl-1.5">
         {entry.sessions.map((session) => (
           <AppRecentSession key={session.id} session={session} onNavigate={onNavigate} />
+        ))}
+        {entry.features.map(({ feature, sessions }) => (
+          <li key={feature.id} className="mt-1 first:mt-0">
+            <div className="truncate px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-ink-subtle"
+              title={feature.title}>
+              {feature.title}
+            </div>
+            <ul aria-label={`Sessions for ${feature.title}`} className="flex flex-col gap-0.5">
+              {sessions.map((session) => (
+                <AppRecentSession key={session.id} session={session} onNavigate={onNavigate} />
+              ))}
+            </ul>
+          </li>
         ))}
       </ul>
     ) : null}

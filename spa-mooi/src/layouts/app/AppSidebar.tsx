@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
+import { fetchWorkItems } from '@/features/work/api/workApi';
 import { AppNavItem } from '@/layouts/app/AppNavItem';
 import { AppRecentProject } from '@/layouts/app/AppRecentProject';
 import { AppSidebarUser } from '@/layouts/app/AppSidebarUser';
@@ -12,6 +13,7 @@ import { IconButton } from '@/shared/components/IconButton';
 import { Logo } from '@/shared/components/Logo';
 import { cn } from '@/shared/utils/cn';
 import { useAuthStore } from '@/stores/authStore';
+import { useLiveStore } from '@/stores/liveStore';
 import { useProjectsStore } from '@/stores/projectsStore';
 import { useSessionsStore } from '@/stores/sessionsStore';
 
@@ -27,8 +29,38 @@ export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
   const player = useAuthStore((state) => state.player);
   const projects = useProjectsStore((state) => state.projects);
   const sessions = useSessionsStore((state) => state.sessions);
+  const work = useLiveStore((state) => state.work);
+  const requestingWork = useRef(new Set<string>());
+  const openProjectIds = useMemo(
+    () => [...new Set(sessions.filter((session) => session.status !== 'closed').map((session) => session.projectId))],
+    [sessions],
+  );
   const links = appNavLinks.filter((link) => !link.adminOnly || player?.role === 'admin');
-  const sidebarProjects = useMemo(() => recentProjects(projects, sessions, SIDEBAR_PROJECTS), [projects, sessions]);
+  const sidebarProjects = useMemo(
+    () => recentProjects(projects, sessions, SIDEBAR_PROJECTS, work),
+    [projects, sessions, work],
+  );
+
+  useEffect(() => {
+    openProjectIds.forEach((projectId) => {
+      if (useLiveStore.getState().work[projectId]?.items != null || requestingWork.current.has(projectId)) return;
+      requestingWork.current.add(projectId);
+      fetchWorkItems(projectId)
+        .then((items) => {
+          const stillSignedIn = useAuthStore.getState().player?.id === player?.id;
+          const stillOpen = useSessionsStore.getState().sessions.some(
+            (session) => session.projectId === projectId && session.status !== 'closed',
+          );
+          if (stillSignedIn && stillOpen && useLiveStore.getState().work[projectId]?.items == null) {
+            useLiveStore.getState().adoptWorkItems(projectId, items);
+          }
+        })
+        .catch(() => {
+          // Feature grouping is supplemental navigation; an unavailable work list must not affect sessions.
+        })
+        .finally(() => requestingWork.current.delete(projectId));
+    });
+  }, [openProjectIds, player?.id]);
 
   return (
     <aside className={cn('flex flex-col', className)}>
