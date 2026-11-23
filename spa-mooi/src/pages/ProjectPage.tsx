@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { Compass, FolderGit2, ListTodo, MessagesSquare, Plus } from 'lucide-react';
+import { Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { sessionPath } from '@/app/paths';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
@@ -16,7 +16,8 @@ import { SessionList } from '@/features/sessions/components/SessionList';
 import { WorkspacesOverview } from '@/features/sessions/components/workspaces/WorkspacesOverview';
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
 import { useProjectWorkspaces } from '@/features/sessions/hooks/useProjectWorkspaces';
-import { TodosPanel } from '@/features/todos/components/TodosPanel';
+import { WorkPanel } from '@/features/work/components/WorkPanel';
+import { workEntries } from '@/features/work/lib/workEntries';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Button } from '@/shared/components/Button';
@@ -30,12 +31,16 @@ import { useLiveStore } from '@/stores/liveStore';
  * Deploy and preview live inside each session; whether sessions offer them is a project setting,
  * edited from the header.
  *
- * The active tab lives in `?tab=` so a reload lands back on the same view. The to-do list is the
- * repository's own `docs/TODOS.md`, so its tab reads and commits that file rather than any copy.
+ * The active tab lives in `?tab=` so a reload lands back on the same view. To-dos lists the project's
+ * features, defects and debt; Board maps one feature's tasks and their dependencies.
  */
+// The graph library only loads with the Board.
+const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then((module) => ({ default: module.WorkBoard })));
+
 const WORKSPACES_TAB = 'workspaces';
 const TODOS_TAB = 'todos';
-const TABS = new Set([WORKSPACES_TAB, TODOS_TAB]);
+const BOARD_TAB = 'board';
+const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -58,7 +63,10 @@ export const ProjectPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
   const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
-  const todos = useLiveStore((live) => (projectId ? live.todos[projectId] : undefined));
+  const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
+  const openWork = useMemo(() => (work?.items && work.issues
+    ? workEntries(work.items, work.issues).filter((entry) => entry.status !== 'done').length : undefined), [work]);
+  const features = work?.items?.filter((item) => item.kind === 'feature' && item.status !== 'done').length;
   const sessionsRevision = useMemo(
     () => sessions.map((session) => `${session.id}:${session.status}:${session.deployment.state}:${session.workspacePath ?? ''}`).join('|'),
     [sessions],
@@ -66,7 +74,7 @@ export const ProjectPage = () => {
   const workspaces = useProjectWorkspaces(tab === WORKSPACES_TAB ? project?.id : undefined, sessionsRevision);
 
   const handleTabChange = (next: string) =>
-    setSearchParams(TABS.has(next) ? { tab: next } : {}, { replace: true });
+    setSearchParams(TABS.has(next) ? { tab: next, ...(next === BOARD_TAB && searchParams.get('feature') ? { feature: searchParams.get('feature')! } : {}) } : {}, { replace: true });
 
   if (!project) {
     if (status === 'loading' || status === 'idle') {
@@ -139,14 +147,19 @@ export const ProjectPage = () => {
             id: TODOS_TAB,
             label: 'To-dos',
             icon: ListTodo,
-            // Open items, once the file was read: the tab never reaches GitHub before it is opened.
-            count: todos?.state === 'ready' ? todos.items.filter((item) => item.status !== 'done').length : undefined,
+            // Once read: the tab never reaches GitHub before it is opened.
+            count: openWork,
           },
+          { id: BOARD_TAB, label: 'Board', icon: Network, count: features },
         ]}
       />
 
       {tab === TODOS_TAB ? (
-        <TodosPanel projectId={project.id} branch={project.defaultBranch ?? 'the default branch'} />
+        <WorkPanel projectId={project.id} connections={connections} />
+      ) : tab === BOARD_TAB ? (
+        <Suspense fallback={<Card className="h-[60vh] animate-pulse-soft" />}>
+          <WorkBoard projectId={project.id} connections={connections} />
+        </Suspense>
       ) : tab === WORKSPACES_TAB ? (
         <WorkspacesOverview
           projectId={project.id}

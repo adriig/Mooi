@@ -359,32 +359,6 @@ class DevelopmentEnvironment(BaseModel):
     environment: list[DevelopmentEnvironmentVariable]
 
 
-TodoStatus = Literal["open", "inProgress", "done"]
-
-
-class TodoItem(BaseModel):
-    """One line of any length; `status` is written `[ ]`, `[/]` or `[x]` in docs/TODOS.md."""
-
-    text: str = Field(min_length=1)
-    status: TodoStatus = "open"
-
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_done(cls, value: Any) -> Any:
-        # Agents briefed before item statuses existed still send `done`: read it as the status it meant.
-        if isinstance(value, dict) and "status" not in value and "done" in value:
-            return {**value, "status": "done" if value["done"] else "open"}
-        return value
-
-
-class TodosUpdate(BaseModel):
-    """The whole list, against the revision it was read at (null creates docs/TODOS.md)."""
-
-    revision: str | None = Field(default=None, max_length=128)
-    title: str | None = Field(default=None, max_length=200)
-    items: list[TodoItem] = Field(max_length=500)
-
-
 class AgentEnvironment(BaseModel):
     """What an agent reads: the project's own values. Server-wide defaults from .env belong to the
     operator, so only their names are listed."""
@@ -985,6 +959,19 @@ def get_registry() -> SessionRegistry:
     return SessionRegistry()
 
 
+# --- extension points ---------------------------------------------------------------------------
+#
+# Features built on top of sessions (the software factory) plug in here instead of being imported:
+# a listener sees every event the fold records, after its state transition, and an instruction
+# section adds standing guidance to every plain session's system instructions (`root` is the
+# session's own agent API root).
+
+SessionListener = Callable[[Session, str, dict[str, Any]], None]
+InstructionSection = Callable[[Session, str], str]
+session_listeners: list[SessionListener] = []
+instruction_sections: list[InstructionSection] = []
+
+
 # --- the event fold ----------------------------------------------------------------------------
 
 
@@ -1082,6 +1069,11 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         _announce(session)
     if session.status == STATUS_READY and previous_status != STATUS_READY:
         _schedule_queue(session)  # Each turn's end hands the agent the next queued message.
+    for listener in session_listeners:
+        try:
+            listener(session, type_, data)
+        except Exception:
+            LOG.warning("A session listener failed on %s", type_, exc_info=True)
     return event
 
 
@@ -1566,7 +1558,6 @@ _announced: set[UUID] = set()
 EVENT_SESSION_UPDATED = "session.updated"
 EVENT_SESSION_REMOVED = "session.removed"
 EVENT_DEVELOPMENT_ENVIRONMENT = "development.environment"
-EVENT_PROJECT_TODOS = "project.todos"
 # Session events that change what a session list shows; anything else stays in the transcript.
 _SUMMARY_EVENTS = frozenset({
     EVENT_SESSION_STATUS, EVENT_PERMISSION_REQUEST, EVENT_QUESTION_REQUEST, EVENT_PERMISSION_RESOLVED,
@@ -2621,6 +2612,7 @@ def _session_instructions(session: Session) -> str:
         return ""
     root = f"http://127.0.0.1:{get_settings().sessions_port}/sessions/{session.id}"
     base = f"{root}/development/agent/environment"
+    extensions = "".join(f"{section(session, root)}\n\n" for section in instruction_sections)
     return f"""## Mooi platform API
 Every Mooi endpoint below lives inside this pod. Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`.
 
@@ -2640,14 +2632,7 @@ Use the Mooi platform API:
 - `GET {base}`: `values` (the project's variables) and `serverProvided` (names of server-wide defaults whose values you cannot read).
 - `PUT {base}` with JSON `{{"values": {{"MOOI_DEVELOPMENT_NAME": "value"}}}}` (null removes a variable): saves them and returns the stored names.
 
-## Project to-do list
-The project's to-do list is `docs/TODOS.md` on the default branch, shown in the project's To-dos tab and on the workspace To-dos page. Whenever the user asks in this chat to show, add, start, complete, reopen, edit, reorder or remove to-dos, use the Mooi platform API, never edit that file in this session's branch: Mooi commits the change to the default branch and every open view updates at once.
-- `GET {root}/todos/agent`: `state` (`missing`: no file yet; `ready`: managed by Mooi; `unsupported`: content Mooi cannot render, listed in `issues`), `revision`, `title` and `items` (`text`, `status`: `open`, `inProgress` or `done`).
-- `PUT {root}/todos/agent` with JSON `{{"revision": "<revision you read, null when missing>", "title": "<title>", "items": [{{"text": "...", "status": "open"}}]}}`: commits the whole list in that order (items have no length limit). A 409 means the list changed meanwhile: read it again and reapply the request.
-- Keep the order the Mooi views keep: a new item goes on top; done items stay at the bottom, so completing one moves it just above the other done items, and reopening or starting a done one moves it just below the items still to do.
-- When `state` is `unsupported`, do not save: tell the user Mooi cannot render the file and ask whether to clean it up (save the `salvage` items) or keep it and edit it by hand.
-
-## Suggested commit message
+{extensions}## Suggested commit message
 At the end of every turn in which you changed repository files, after all edits and verification are complete, update the session's suggested commit message. This is an internal action: do not mention it in the user-facing answer.
 - Read `GET {root}/suggested-commit/agent` immediately before writing. If `enabled` is false, do nothing.
 - Write `PUT {root}/suggested-commit/agent` with JSON `{{"message": "<title>", "language": "<language returned by GET>"}}`.
@@ -2807,40 +2792,6 @@ async def agent_update_suggested_commit(
         raise ApiException.bad_request("The suggested commit message cannot be blank")
     session.suggested_commit = SuggestedCommit(message, body.language, revision)
     record(session, "commit.suggestion.updated", {"message": message, "language": body.language})
-
-
-# --- the project's to-do list: docs/TODOS.md on the default branch, the file being the only copy ---
-
-
-@router.get("/projects/{project_id}/todos")
-async def project_todos(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> dict:
-    return await mooi.fetch_todos(caller, project_id)
-
-
-@router.put("/projects/{project_id}/todos")
-async def save_project_todos(project_id: UUID, body: TodosUpdate,
-                             caller: Annotated[Caller, Depends(current_caller)]) -> dict:
-    return await _save_todos(caller, project_id, body)
-
-
-async def _save_todos(caller: Caller, project_id: UUID, body: TodosUpdate) -> dict:
-    """Commits the list and announces it live, whichever side (the To-dos tab, another device or an
-    agent) changed it."""
-    todos = await mooi.write_todos(caller, project_id, body.model_dump(mode="json"))
-    _channels.publish(caller.player_id, EVENT_PROJECT_TODOS, {"projectId": str(project_id), "todos": todos})
-    return todos
-
-
-@router.get("/sessions/{session_id}/todos/agent")
-async def agent_todos(session_id: UUID, request: Request) -> dict:
-    session, caller = await _agent_access(session_id, request, "session")
-    return await mooi.fetch_todos(caller, session.project_id)
-
-
-@router.put("/sessions/{session_id}/todos/agent")
-async def agent_save_todos(session_id: UUID, request: Request, body: TodosUpdate) -> dict:
-    session, caller = await _agent_access(session_id, request, "session")
-    return await _save_todos(caller, session.project_id, body)
 
 
 class PlatformHandoffRequest(BaseModel):

@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
 import { ChevronsDownUp, ChevronsUpDown, FolderGit2 } from 'lucide-react';
 import { useProjects } from '@/features/projects/hooks/useProjects';
-import { ProjectTodosSection } from '@/features/todos/components/ProjectTodosSection';
-import { TodoProjectFilter } from '@/features/todos/components/TodoProjectFilter';
-import { countTodos } from '@/features/todos/lib/countTodos';
-import { expandedTodoProjects } from '@/features/todos/lib/expandedTodoProjects';
+import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
+import { ProjectWorkSection } from '@/features/work/components/ProjectWorkSection';
+import { WorkProjectFilter } from '@/features/work/components/WorkProjectFilter';
+import { expandedWorkProjects } from '@/features/work/lib/expandedWorkProjects';
+import { countWork, workEntries } from '@/features/work/lib/workEntries';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
@@ -23,28 +24,31 @@ const Stat = ({ label, value }: { label: string; value: number }) => (
 );
 
 /**
- * Every project's to-do list on one page, each expanding into the same editor as the project's own
- * tab, so the player follows and moves work forward across the workspace without switching
- * projects. Each list is still its repository's `docs/TODOS.md`, read and committed per project.
+ * Every project's features, defects and debt on one page, each expanding into the same list as the
+ * project's own To-dos tab, so the player follows and starts work across the workspace without
+ * switching projects.
  */
 export const TodosPage = () => {
   const { projects, status, error, reload } = useProjects();
-  const todos = useLiveStore((live) => live.todos);
+  const work = useLiveStore((live) => live.work);
+  const { connections } = useAgentConnections();
   const playerId = useAuthStore((state) => state.player?.id);
   const selection = useTodoProjectSelectionStore((state) => playerId ? state.selections[playerId] : undefined);
   const select = useTodoProjectSelectionStore((state) => state.select);
-  const [expanded, setExpanded] = useState(() => new Set(expandedTodoProjects.read()));
+  const [expanded, setExpanded] = useState(() => new Set(expandedWorkProjects.read()));
 
   const selectedIds = useMemo(() => new Set(selection ?? projects.map((project) => project.id)), [selection, projects]);
   const visibleProjects = useMemo(() => projects.filter((project) => selectedIds.has(project.id)), [projects, selectedIds]);
 
-  // Lists read so far: each one is read once its row nears the screen.
-  const totals = useMemo(() => countTodos(visibleProjects.flatMap((project) =>
-    (todos[project.id]?.state === 'ready' ? todos[project.id].items : []))), [visibleProjects, todos]);
+  // Projects read so far: each one is read once its row nears the screen.
+  const totals = useMemo(() => countWork(visibleProjects.flatMap((project) => {
+    const current = work[project.id];
+    return current?.items && current.issues ? workEntries(current.items, current.issues) : [];
+  })), [visibleProjects, work]);
 
   const remember = (next: Set<string>) => {
     setExpanded(next);
-    expandedTodoProjects.write([...next]);
+    expandedWorkProjects.write([...next]);
   };
   const toggle = (projectId: string) => {
     const next = new Set(expanded);
@@ -65,7 +69,7 @@ export const TodosPage = () => {
           <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Workspace</p>
           <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">To-dos</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-muted">
-            Choose the projects you want to see. Expand a project to add, start, complete and reorder its items.
+            Features, defects and debt of every project. Expand a project to open its work and start it.
           </p>
         </div>
         <dl className="flex gap-6">
@@ -83,7 +87,7 @@ export const TodosPage = () => {
 
       {projects.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
-          <TodoProjectFilter projects={projects} selectedIds={selectedIds}
+          <WorkProjectFilter projects={projects} selectedIds={selectedIds}
             onChange={(ids) => { if (playerId) select(playerId, ids); }} />
           <Button variant="ghost" size="sm" onClick={toggleAll} disabled={visibleProjects.length === 0} className="ml-auto shrink-0">
             {allExpanded ? <ChevronsDownUp className="size-4" /> : <ChevronsUpDown className="size-4" />}
@@ -101,7 +105,7 @@ export const TodosPage = () => {
       ) : (
         <ul aria-label="Projects" className="flex flex-col gap-3">
           {visibleProjects.map((project) => (
-            <ProjectTodosSection key={project.id} project={project}
+            <ProjectWorkSection key={project.id} project={project} connections={connections}
               expanded={expanded.has(project.id)} onToggle={() => toggle(project.id)} />
           ))}
         </ul>

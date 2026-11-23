@@ -4,7 +4,10 @@ import { applyPlatformSnapshot, applyPlatformStreamEvent } from '@/features/plat
 import type { PlatformEnvironmentVariable } from '@/features/platform/types/PlatformEnvironmentVariable';
 import type { PlatformSnapshot } from '@/features/platform/types/PlatformSnapshot';
 import type { PlatformStreamState } from '@/features/platform/types/PlatformStreamState';
-import type { TodoList } from '@/features/todos/types/TodoList';
+import type { ProjectWork } from '@/features/work/types/ProjectWork';
+import type { WorkIssue } from '@/features/work/types/WorkIssue';
+import type { WorkItem } from '@/features/work/types/WorkItem';
+import type { WorkSettings } from '@/features/work/types/WorkSettings';
 import type { LiveState } from '@/stores/types/LiveState';
 
 interface OperationPayload {
@@ -23,7 +26,27 @@ const initial = {
   epoch: 0,
   finished: { production: 0, backup: 0 },
   developmentEnvironments: {},
-  todos: {},
+  work: {},
+  workSettings: {},
+};
+
+const EMPTY_WORK: ProjectWork = { items: null, issues: null };
+
+/** Inserts or replaces by id, keeping the list's order; a new item goes on top, like the server lists it. */
+const upsertItem = (work: ProjectWork | undefined, item: WorkItem): ProjectWork => {
+  const current = work ?? EMPTY_WORK;
+  if (!current.items) return current;
+  const index = current.items.findIndex((entry) => entry.id === item.id);
+  const items = index < 0 ? [item, ...current.items] : current.items.map((entry) => (entry.id === item.id ? item : entry));
+  return { ...current, items };
+};
+
+const upsertIssue = (work: ProjectWork | undefined, issue: WorkIssue): ProjectWork => {
+  const current = work ?? EMPTY_WORK;
+  if (!current.issues) return current;
+  const index = current.issues.findIndex((entry) => entry.number === issue.number);
+  const issues = index < 0 ? [issue, ...current.issues] : current.issues.map((entry) => (entry.number === issue.number ? issue : entry));
+  return { ...current, issues };
 };
 
 const bump = (counters: Record<string, number>, ...keys: string[]): Record<string, number> =>
@@ -40,7 +63,7 @@ const ended = (snapshot: PlatformSnapshot | null | undefined): boolean =>
  * Everything live outside session transcripts, folded from the player's channel: each project's
  * production and backup operation with its console, and revisions that tell views when a
  * configuration, an environment or a persisted history changed, whichever side changed it, and
- * each project's to-do list as last read or committed.
+ * each project's work (features, defects and debt) as last read or announced.
  * Session summaries from the same channel go to `sessionsStore`. Not persisted: server state.
  */
 export const useLiveStore = create<LiveState>((set) => ({
@@ -61,8 +84,19 @@ export const useLiveStore = create<LiveState>((set) => ({
       };
     }
     const projectId = String(data.projectId ?? '');
-    if (frame.type === 'project.todos') {
-      return { todos: { ...state.todos, [projectId]: data.todos as TodoList } };
+    if (frame.type === 'work.item') {
+      return { work: { ...state.work, [projectId]: upsertItem(state.work[projectId], data.item as WorkItem) } };
+    }
+    if (frame.type === 'work.removed') {
+      const current = state.work[projectId];
+      if (!current?.items) return state;
+      return { work: { ...state.work, [projectId]: { ...current, items: current.items.filter((item) => item.id !== data.itemId) } } };
+    }
+    if (frame.type === 'work.settings') {
+      return { workSettings: { ...state.workSettings, [projectId]: data.settings as WorkSettings } };
+    }
+    if (frame.type === 'work.issue') {
+      return { work: { ...state.work, [projectId]: upsertIssue(state.work[projectId], data.issue as WorkIssue) } };
     }
     if (frame.type === 'development.environment') {
       return {
@@ -86,7 +120,25 @@ export const useLiveStore = create<LiveState>((set) => ({
       [projectId]: applyPlatformSnapshot(state.operations[kind][projectId] ?? EMPTY, snapshot) } },
   })),
 
-  adoptTodos: (projectId, todos) => set((state) => ({ todos: { ...state.todos, [projectId]: todos } })),
+  adoptWorkItems: (projectId, items) => set((state) => ({
+    work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), items } },
+  })),
+
+  adoptWorkIssues: (projectId, issues) => set((state) => ({
+    work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), issues } },
+  })),
+
+  adoptWorkItem: (item) => set((state) => ({
+    work: { ...state.work, [item.projectId]: upsertItem(state.work[item.projectId], item) },
+  })),
+
+  adoptWorkSettings: (projectId, settings) => set((state) => ({
+    workSettings: { ...state.workSettings, [projectId]: settings },
+  })),
+
+  adoptWorkIssue: (projectId, issue) => set((state) => ({
+    work: { ...state.work, [projectId]: upsertIssue(state.work[projectId], issue) },
+  })),
 
   reconnect: () => set((state) => ({ generation: state.generation + 1 })),
 

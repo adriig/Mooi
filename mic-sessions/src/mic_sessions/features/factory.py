@@ -1,0 +1,840 @@
+"""Feature: the software factory — a project's features, defects and debt, and the runner that builds them.
+
+Work items live in `mic-mooi` (features) and on GitHub (defects and debt, as labelled issues); this
+feature is the one path to them, from the To-dos and Board views and from session agents alike, and
+announces every change on the player's live channel:
+
+- `work.item` `{projectId, item}`: an item was created or changed (its tasks travel with it);
+- `work.removed` `{projectId, itemId}`;
+- `work.issue` `{projectId, issue}`: a defect or debt issue was created or changed;
+- `work.settings` `{projectId, settings}`: the project's factory limits changed.
+
+Every plain session's agent decides whether a request is a single task (done in that very session), a
+feature (which it designs, as orchestrator, into tasks with blocking dependencies), a defect or debt,
+and records the last three through the agent endpoints below, guided by its session instructions.
+
+**The runner.** Starting an item hands it to a loop that runs with no agent orchestrating and no device
+connected, acting for the sign-in that pressed Start: each unblocked task gets its own new session (one
+task, one session) within the account's session limit, on the account its assignment names unless that
+account runs low on quota (then its alternatives, in order). A development task ends with its merge,
+automatic (agentic on conflicts) or by the player; a QA task ends when its acceptance criteria are met,
+and a defect it finds becomes a fix task the QA waits for. A finished task's session is closed. The
+runner reconciles from `mic-mooi` on every tick, so a restart only relaunches the tasks it interrupted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from collections.abc import Coroutine
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Literal
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Body, Depends, Request, status
+from pydantic import BaseModel, Field
+
+from mic_sessions.features import sessions
+from mic_sessions.features.sessions import (
+    EVENT_MERGE_COMPLETED,
+    EVENT_PERMISSION_REQUEST,
+    EVENT_PERMISSION_RESOLVED,
+    EVENT_QUESTION_REQUEST,
+    EVENT_QUESTION_RESOLVED,
+    EVENT_SESSION_STATUS,
+    EVENT_TURN_RESULT,
+    CreateSessionRequest,
+    MergeRequest,
+    SendMessageRequest,
+    Session,
+    get_registry,
+)
+from mic_sessions.shared import mooi
+from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED
+from mic_sessions.shared.auth import Caller, current_caller
+from mic_sessions.shared.env import get_settings
+from mic_sessions.shared.web import ApiException
+
+LOG = logging.getLogger("factory")
+
+router = APIRouter(tags=["work"])
+
+EVENT_WORK_ITEM = "work.item"
+EVENT_WORK_REMOVED = "work.removed"
+EVENT_WORK_ISSUE = "work.issue"
+EVENT_WORK_SETTINGS = "work.settings"
+
+Json = dict[str, Any]
+
+
+def _publish_item(player_id: UUID, item: Json | None) -> Json | None:
+    if item:
+        sessions._channels.publish(player_id, EVENT_WORK_ITEM, {"projectId": item["projectId"], "item": item})
+    return item
+
+
+def _publish_issue(player_id: UUID, project_id: UUID, issue: Json | None) -> None:
+    if issue:
+        sessions._channels.publish(player_id, EVENT_WORK_ISSUE, {"projectId": str(project_id), "issue": issue})
+
+
+# --- one path for every change, whichever side asks ---------------------------------------------
+
+
+async def _create_feature(caller: Caller, project_id: UUID, draft: Json) -> Json:
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "POST", project_id, "/features", draft))
+
+
+async def _update_item(caller: Caller, project_id: UUID, item_id: UUID, update: Json) -> Json:
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "PATCH", project_id, f"/items/{item_id}", update))
+
+
+async def _add_task(caller: Caller, project_id: UUID, item_id: UUID, draft: Json) -> Json:
+    return _publish_item(caller.player_id,
+                         await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/tasks", draft))
+
+
+async def _update_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID, update: Json) -> Json:
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "PATCH", project_id,
+                                                               f"/items/{item_id}/tasks/{task_id}", update))
+
+
+async def _delete_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "DELETE", project_id,
+                                                               f"/items/{item_id}/tasks/{task_id}"))
+
+
+async def _create_issue(caller: Caller, project_id: UUID, draft: Json) -> Json:
+    created = await mooi.send_work(caller, "POST", project_id, "/issues", draft, github=True) or {}
+    _publish_issue(caller.player_id, project_id, created.get("issue"))
+    _publish_item(caller.player_id, created.get("item"))
+    return created
+
+
+async def _save_settings(caller: Caller, project_id: UUID, settings: Json) -> Json:
+    saved = await mooi.send_work(caller, "PUT", project_id, "/settings", settings) or {}
+    sessions._channels.publish(caller.player_id, EVENT_WORK_SETTINGS, {"projectId": str(project_id), "settings": saved})
+    return saved
+
+
+# --- the player's views (To-dos and Board) ------------------------------------------------------
+
+
+@router.get("/projects/{project_id}/work/settings")
+async def work_settings(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await mooi.send_work(caller, "GET", project_id, "/settings") or {}
+
+
+@router.put("/projects/{project_id}/work/settings")
+async def save_work_settings(project_id: UUID, settings: Annotated[Json, Body()],
+                             caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _save_settings(caller, project_id, settings)
+
+
+@router.get("/projects/{project_id}/work")
+async def project_work(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await mooi.fetch_work(caller, project_id)
+
+
+@router.get("/projects/{project_id}/work/issues")
+async def project_issues(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await mooi.fetch_issues(caller, project_id)
+
+
+@router.post("/projects/{project_id}/work/features", status_code=status.HTTP_201_CREATED)
+async def create_feature(project_id: UUID, draft: Annotated[Json, Body()],
+                         caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _create_feature(caller, project_id, draft)
+
+
+@router.patch("/projects/{project_id}/work/items/{item_id}")
+async def update_item(project_id: UUID, item_id: UUID, update: Annotated[Json, Body()],
+                      caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _update_item(caller, project_id, item_id, update)
+
+
+@router.delete("/projects/{project_id}/work/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> None:
+    await mooi.send_work(caller, "DELETE", project_id, f"/items/{item_id}")
+    sessions._channels.publish(caller.player_id, EVENT_WORK_REMOVED,
+                               {"projectId": str(project_id), "itemId": str(item_id)})
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/tasks")
+async def add_task(project_id: UUID, item_id: UUID, draft: Annotated[Json, Body()],
+                   caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _add_task(caller, project_id, item_id, draft)
+
+
+@router.patch("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}")
+async def update_task(project_id: UUID, item_id: UUID, task_id: UUID, update: Annotated[Json, Body()],
+                      caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _update_task(caller, project_id, item_id, task_id, update)
+
+
+@router.delete("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}")
+async def delete_task(project_id: UUID, item_id: UUID, task_id: UUID,
+                      caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _delete_task(caller, project_id, item_id, task_id)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/start")
+async def start_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    """Hands the item to the runner, which acts for this sign-in from now on, with or without devices."""
+    item = _publish_item(caller.player_id, await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/start"))
+    _callers[item_id] = caller
+    wake()
+    return item or {}
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/pause")
+async def pause_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return _publish_item(caller.player_id,
+                         await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/pause")) or {}
+
+
+@router.post("/projects/{project_id}/work/issues", status_code=status.HTTP_201_CREATED)
+async def create_issue(project_id: UUID, draft: Annotated[Json, Body()],
+                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _create_issue(caller, project_id, draft)
+
+
+@router.patch("/projects/{project_id}/work/issues/{number}")
+async def update_issue(project_id: UUID, number: int, update: Annotated[Json, Body()],
+                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    changed = await mooi.send_work(caller, "PATCH", project_id, f"/issues/{number}", update, github=True) or {}
+    _publish_issue(caller.player_id, project_id, changed.get("issue"))
+    _publish_item(caller.player_id, changed.get("item"))
+    return changed
+
+
+@router.put("/projects/{project_id}/work/issues/{number}/item")
+async def issue_item(project_id: UUID, number: int, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    """The item that runs an issue, created on first use so its settings can be edited."""
+    return _publish_item(caller.player_id,
+                         await mooi.send_work(caller, "PUT", project_id, f"/issues/{number}/item", github=True)) or {}
+
+
+# --- session agents ------------------------------------------------------------------------------
+
+
+class TaskReport(BaseModel):
+    """What a factory task's agent reports once its turn's work is over."""
+
+    outcome: Literal["done", "blocked", "passed", "defect"]
+    summary: str = Field(min_length=1, max_length=20_000)
+    # A defect only: a short name for it; `summary` then holds steps, expected and actual behaviour.
+    title: str | None = Field(default=None, max_length=200)
+
+
+@router.get("/sessions/{session_id}/work/agent")
+async def agent_work(session_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    work = await mooi.fetch_work(caller, session.project_id)
+    try:
+        issues = (await mooi.fetch_issues(caller, session.project_id)).get("issues", [])
+        issues_error = None
+    except ApiException as failure:
+        issues, issues_error = [], failure.message
+    return {**work, "issues": issues, "issuesError": issues_error}
+
+
+@router.get("/sessions/{session_id}/work/agent/assignment")
+async def agent_assignment(session_id: UUID, request: Request) -> Json:
+    """The assignment expert's brief with the accounts it chooses from, their models and remaining quota."""
+    _, caller = await sessions._agent_access(session_id, request, "session")
+    return {"brief": ASSIGNMENT_BRIEF, "accounts": await _capacity(caller)}
+
+
+@router.post("/sessions/{session_id}/work/agent/features", status_code=status.HTTP_201_CREATED)
+async def agent_create_feature(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _create_feature(caller, session.project_id, draft)
+
+
+@router.patch("/sessions/{session_id}/work/agent/items/{item_id}")
+async def agent_update_item(session_id: UUID, item_id: UUID, request: Request, update: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _update_item(caller, session.project_id, item_id, update)
+
+
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks")
+async def agent_add_task(session_id: UUID, item_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _add_task(caller, session.project_id, item_id, draft)
+
+
+@router.patch("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}")
+async def agent_update_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request,
+                            update: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _update_task(caller, session.project_id, item_id, task_id, update)
+
+
+@router.delete("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}")
+async def agent_delete_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _delete_task(caller, session.project_id, item_id, task_id)
+
+
+@router.post("/sessions/{session_id}/work/agent/issues", status_code=status.HTTP_201_CREATED)
+async def agent_create_issue(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _create_issue(caller, session.project_id, draft)
+
+
+@router.get("/sessions/{session_id}/work/agent/settings")
+async def agent_work_settings(session_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await mooi.send_work(caller, "GET", session.project_id, "/settings") or {}
+
+
+@router.put("/sessions/{session_id}/work/agent/settings")
+async def agent_save_work_settings(session_id: UUID, request: Request, settings: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _save_settings(caller, session.project_id, settings)
+
+
+@router.post("/sessions/{session_id}/work/agent/task", status_code=status.HTTP_204_NO_CONTENT)
+async def agent_report_task(session_id: UUID, request: Request, report: TaskReport) -> None:
+    """Recorded now, acted on when the agent's turn ends: the agent may still be wrapping up."""
+    await sessions._agent_access(session_id, request, "session")
+    run = _runs.get(session_id)
+    if run is None:
+        raise ApiException.conflict("This session does not run a factory task")
+    if run.qa != (report.outcome in ("passed", "defect")) and report.outcome != "blocked":
+        raise ApiException.bad_request("A QA task reports passed or defect; a development task reports done")
+    if report.outcome == "defect" and not (report.title or "").strip():
+        raise ApiException.bad_request("Name the defect in `title`")
+    run.outcome = report
+
+
+# --- standing guidance for every plain session ---------------------------------------------------
+
+
+ASSIGNMENT_BRIEF = """You are the assignment expert of the software factory: for each task, pick the provider, account, model and thinking effort that will do it best without exhausting the user's quota.
+- Choose only among the accounts, models and efforts listed with this brief. Never invent one.
+- Match the model to the task: architecture, cross-cutting or subtle work gets the strongest model with high effort; routine UI, wiring, configuration or documentation gets a fast, cheaper model with low or medium effort. Effort costs quota: raise it only where reasoning pays off.
+- A QA task always runs on a different model than the task it checks, preferably from another provider, with medium effort.
+- Spread the load: prefer the accounts with the most quota left (the lowest `percent` across their windows), never pick an account above 80% of any window while another one fits, and avoid stacking parallel tasks of the same dependency level on one account.
+- Give every task one to three `alternatives`, in order, on other accounts or providers: the platform checks quota again when the task launches and falls back to them, so no account runs out of credits mid-feature.
+- `percent: null` means the quota is unknown right now (no live session reads it); treat it as available but prefer known healthy accounts for the heaviest tasks."""
+
+
+def _work_section(session: Session, root: str) -> str:
+    """Factory task sessions get their task's rules instead of the planning guidance."""
+    run = _runs.get(session.id)
+    if run is not None:
+        return _task_section(run, root)
+    work = f"{root}/work/agent"
+    return f"""## Project work: features, defects and debt (the software factory)
+Mooi runs this project as a software factory. Whenever the user asks for work, first decide what it is, and say which one you chose:
+- **A single task** (one focused change): do it right here in this session. Never record it.
+- **A feature** (work worth several tasks): do not implement it here. Design it as the factory's orchestrator and record it; the user reviews it in the To-dos and Board tabs and presses Start, and the platform then runs every task in its own session.
+- **A defect** (something that does not work as it should) or **debt** (technical debt to pay back): record it as a GitHub issue through the platform API, never with your own tools. Fix it here only if the user asks you to.
+Never start work items yourself: Start belongs to the user.
+
+Designing a feature:
+- Read the code first. Write a `spec`: the goal, the user-facing behaviour and the main technical decisions.
+- Break it into tasks of about one to four hours of agent work. Each task runs in a fresh session that only sees the feature's spec and its own task, so its `description` must be self-contained: what to build, where in the code, and the decisions it must follow. Write verifiable `acceptance` criteria for every task.
+- Categories: `ux` (UX/UI), `dev` (development), `infra` (infrastructure/DevOps), `docs` (documentation). QA tasks are never written by hand: set `tests: true` on a task whose behaviour must be checked, with optional `qa` settings, and the platform adds its QA task, blocked until the task merges.
+- `dependsOn` lists the keys of tasks of the same feature that must be merged first. Add a dependency only when a task really builds on another's code (a new system before the features that use it); everything else stays parallel. Never make a task depend on another feature; at most a whole feature `dependsOn` another feature's id.
+- `autoMerge` (default true) merges a finished task on its own, resolving conflicts with the agent; set it to false where the user should review the merge.
+- Assign every task: read `GET {work}/assignment` and follow its brief, as a dedicated sub-agent when your environment offers one, before recording the feature. Fill `assignment` (`provider`, `connectionId`, `model`, `effort`), `alternatives` and, for tasks with tests, `qa.assignment`.
+
+Platform API:
+- `GET {work}`: the project's `items` (features, and the defects and debt Mooi already runs, each with its `tasks`) and its `issues` (defects and debt on GitHub; `issuesError` explains an empty list).
+- `POST {work}/features` with JSON `{{"title", "spec", "dependsOn": null, "tasks": [{{"key", "title", "category", "description", "acceptance", "assignment": {{"provider", "connectionId", "model", "effort"}}, "alternatives": [], "autoMerge": true, "tests": false, "qa": {{"acceptance", "assignment"}}, "dependsOn": ["<key>"]}}]}}`.
+- `PATCH {work}/items/<itemId>` (`title`, `spec`, `dependsOn`: an item id, or "" to clear); `POST {work}/items/<itemId>/tasks` (one task as above); `PATCH {work}/items/<itemId>/tasks/<taskId>` (any task field; `dependsOn` replaces the list); `DELETE {work}/items/<itemId>/tasks/<taskId>`.
+- `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5). Change them only when the user asks.
+- `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with."""
+
+
+def _task_section(run: TaskRun, root: str) -> str:
+    report = f"{root}/work/agent/task"
+    if run.qa:
+        outcomes = ('`{"outcome": "passed", "summary": "<what you checked>"}` when every acceptance criterion is met, '
+                    'or `{"outcome": "defect", "title": "<short name>", "summary": "<steps, expected and actual '
+                    'behaviour>"}` for the most important defect you found')
+    else:
+        outcomes = '`{"outcome": "done", "summary": "<what you changed>"}` once the task is complete'
+    return f"""## Software factory task
+This session runs one task of the project's software factory, on its own; there may be nobody watching. Its first message is the task.
+- Stay within the task. Other tasks run in their own sessions; the tasks this one depended on are already merged into the default branch.
+- Ask the user only when you truly cannot go on: the task then waits for their answer.
+- Never merge, push or switch branches: the platform merges finished development tasks.
+- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead."""
+
+
+sessions.instruction_sections.append(_work_section)
+
+
+# --- capacity: what the assignment expert and the quota guard read ------------------------------
+
+
+def _quota(connection_id: str) -> dict[str, Any]:
+    """The latest account limits any live session of this account read; empty when none did."""
+    windows: dict[str, Any] = {}
+    for session in get_registry().all():
+        if str(session.connection_id) == connection_id and isinstance(session.usage.get("quota"), dict):
+            windows.update(session.usage["quota"])
+    return windows
+
+
+def _highest_percent(connection_id: str) -> float | None:
+    percents = [value.get("percent") for value in _quota(connection_id).values() if isinstance(value, dict)]
+    known = [float(percent) for percent in percents if isinstance(percent, (int, float))]
+    return max(known) if known else None
+
+
+async def _capacity(caller: Caller) -> list[Json]:
+    accounts = []
+    catalogs: dict[str, Json] = {}
+    for connection in await mooi.fetch_agent_connections(caller):
+        provider = connection.get("provider")
+        if provider not in PROVIDERS or connection.get("stale"):
+            continue
+        if provider not in catalogs:
+            try:
+                descriptor = PROVIDERS[provider]
+                prepared = await asyncio.wait_for(descriptor.prepare(caller, str(connection["id"])), timeout=20)
+                catalog = descriptor.configuration(prepared.id)
+                catalogs[provider] = {"models": [{"id": model["id"], "efforts": model.get("efforts", [])}
+                                                 for model in catalog.get("models", [])],
+                                      "defaultModel": catalog.get("defaultModel")}
+            except Exception:
+                LOG.debug("No model catalog for %s", provider, exc_info=True)
+                catalogs[provider] = {"models": [], "defaultModel": None}
+        quota = {name: {"percent": value.get("percent"), "resetsAt": value.get("resetsAt")}
+                 for name, value in _quota(str(connection["id"])).items() if isinstance(value, dict)}
+        accounts.append({"connectionId": connection["id"], "provider": provider,
+                         "name": connection.get("name") or connection.get("accountLabel") or connection.get("label"),
+                         "defaultAccount": bool(connection.get("defaultAccount")),
+                         "quota": quota or None, **catalogs[provider]})
+    return accounts
+
+
+# --- the runner ----------------------------------------------------------------------------------
+
+_TICK_SECONDS = 20
+# The project's limits when mic-mooi sends none; each project changes them in its factory settings.
+DEFAULT_LIMITS: Json = {"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2}
+
+NUDGE = ("Your turn ended without reporting this factory task's outcome. Finish the task if anything is left, "
+         "then report it as your Software factory task instructions say.")
+
+
+@dataclass
+class TaskRun:
+    """One task's live session, as only this process knows it."""
+
+    session_id: UUID
+    item_id: UUID
+    task_id: UUID
+    project_id: UUID
+    player_id: UUID
+    qa: bool
+    title: str
+    auto_merge: bool
+    issue_number: int | None
+    attempts: int
+    qa_rounds: int = 0
+    outcome: TaskReport | None = None
+    nudged: bool = False
+    resolutions: int = 0
+    # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for the player's merge).
+    phase: str = "working"
+    status: str = "running"
+    # The project's factory limits as of the latest tick (see `DEFAULT_LIMITS`).
+    limits: Json = field(default_factory=lambda: dict(DEFAULT_LIMITS))
+
+
+_runs: dict[UUID, TaskRun] = {}
+# The caller each started item acts as, renewed as it ages; rebuilt from mic-mooi after a restart.
+_callers: dict[UUID, Caller] = {}
+_tasks: set[asyncio.Task[None]] = set()
+_runner_task: asyncio.Task[None] | None = None
+_wake_event: asyncio.Event | None = None
+_lock = asyncio.Lock()
+
+
+def wake() -> None:
+    if _wake_event is not None:
+        _wake_event.set()
+
+
+def _background(coro: Coroutine[Any, Any, None]) -> None:
+    task = asyncio.create_task(coro)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -> Caller | None:
+    caller = _callers.get(item_id)
+    if caller is None and auth_session_id:
+        caller = Caller(player_id=player_id, session_id=UUID(auth_session_id), role="", token="", expires_at=0)
+    if caller is None:
+        return None
+    try:
+        caller = await mooi.renewed(caller)
+    except ApiException:
+        LOG.warning("Work item %s lost the sign-in it runs as", item_id)
+        _callers.pop(item_id, None)
+        return None
+    _callers[item_id] = caller
+    return caller
+
+
+async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
+                  attempts: int | None = None, report: str | None = None, assignment: Json | None = None) -> Json:
+    """Saves a task's progress in mic-mooi and announces its item."""
+    if isinstance(run_or_task, TaskRun):
+        task_id, player_hint = run_or_task.task_id, run_or_task.player_id
+        session_id = session_id if session_id is not None else run_or_task.session_id
+        attempts = run_or_task.attempts if attempts is None else attempts
+        run_or_task.status = status_
+    else:
+        task_id, player_hint = UUID(run_or_task["id"]), None
+        attempts = run_or_task.get("attempts", 0) if attempts is None else attempts
+    body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
+            "report": report[:50_000] if report else None, "assignment": assignment}
+    answer = await mooi.report_task(task_id, body)
+    player_id = UUID(answer["playerId"]) if answer.get("playerId") else player_hint
+    if player_id is not None:
+        _publish_item(player_id, answer.get("item"))
+    return answer.get("item") or {}
+
+
+async def _runner_loop() -> None:
+    global _wake_event
+    _wake_event = asyncio.Event()
+    while True:
+        try:
+            await _tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.warning("The factory runner could not advance; retrying", exc_info=True)
+        try:
+            await asyncio.wait_for(_wake_event.wait(), timeout=_TICK_SECONDS)
+        except TimeoutError:
+            pass
+        _wake_event.clear()
+
+
+async def _tick() -> None:
+    entries = await mooi.fetch_running_work()
+    async with _lock:
+        limits: dict[UUID, int] = {}
+        for entry in entries:
+            try:
+                await _advance(entry, limits)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.warning("Work item %s could not advance", (entry.get("item") or {}).get("id"), exc_info=True)
+
+
+async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
+    item = entry["item"]
+    item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
+    limits = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
+    for run in _runs.values():
+        if run.item_id == item_id:
+            run.limits = limits
+    caller = await _caller(item_id, player_id, entry.get("authSessionId"))
+    if caller is None:
+        return
+    registry = get_registry()
+    tasks = item["tasks"]
+
+    # Sessions that are gone (a restart, closed by hand) take their task back to the line.
+    for task in tasks:
+        session_id = task.get("sessionId")
+        if task["status"] not in ("running", "merging", "review", "attention") or not session_id:
+            continue
+        live = registry.get(UUID(session_id))
+        if live is not None and not live.closing:
+            if UUID(session_id) not in _runs:
+                _adopt(item, task, live, player_id, limits)
+            continue
+        _runs.pop(UUID(session_id), None)
+        attempts = task["attempts"] + 1
+        if attempts > limits["maxAttempts"]:
+            item = await _report(task, "attention", attempts=attempts,
+                                 report="Its session ended several times before finishing. Start the item again to retry.")
+        else:
+            item = await _report(task, "planned", attempts=attempts)
+        tasks = item.get("tasks", tasks)
+
+    if item.get("dependsOn") and not await _dependency_done(caller, item):
+        return
+    done = {task["id"] for task in tasks if task["status"] == "done"}
+    ready = [task for task in tasks if task["status"] in ("planned", "queued")
+             and all(dependency in done for dependency in task["dependsOn"])]
+    for task in ready:
+        if not await _has_room(caller, player_id, limits):
+            await _wait(task, "Waiting for a free session")
+            continue
+        await _launch(item, task, caller, player_id, limits)
+
+
+async def _dependency_done(caller: Caller, item: Json) -> bool:
+    work = await mooi.fetch_work(caller, UUID(item["projectId"]))
+    other = next((entry for entry in work.get("items", []) if entry["id"] == item["dependsOn"]), None)
+    return other is None or other["status"] == "done"
+
+
+async def _has_room(caller: Caller, player_id: UUID, limits: dict[UUID, int]) -> bool:
+    if player_id not in limits:
+        limits[player_id] = await mooi.fetch_session_limit(caller)
+    registry = get_registry()
+    return (registry.count() < get_settings().max_sessions
+            and len(registry.list_for(player_id, None)) < limits[player_id])
+
+
+def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Json) -> TaskRun:
+    run = TaskRun(session_id=session.id, item_id=UUID(item["id"]), task_id=UUID(task["id"]),
+                  project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
+                  title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
+                  attempts=task["attempts"],
+                  qa_rounds=sum(1 for other in item["tasks"] if other.get("fixOf") == task["id"]),
+                  status=task["status"], phase="review" if task["status"] == "review" else "working", limits=limits)
+    _runs[session.id] = run
+    return run
+
+
+async def _wait(task: Json, reason: str) -> None:
+    """Queues a task that cannot launch yet; saying it again on every tick would only add noise."""
+    if task["status"] != "queued" or task.get("report") != reason:
+        await _report(task, "queued", report=reason)
+
+
+async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json) -> None:
+    assignment = await _assign(caller, task, float(limits["quotaLimit"]))
+    if assignment is None:
+        await _wait(task, "Waiting for an account with quota left")
+        return
+    key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
+    branch = f"factory/{key}-{uuid4().hex[:6]}"
+    try:
+        session = await sessions._open_session(CreateSessionRequest(
+            projectId=UUID(item["projectId"]), provider=assignment["provider"],
+            connectionId=UUID(assignment["connectionId"]), branch=branch, model=assignment.get("model"),
+            effort=assignment.get("effort"), initialMessage=_brief(item, task)), caller)
+    except ApiException as failure:
+        if failure.status_code == status.HTTP_409_CONFLICT:
+            await _wait(task, failure.message)
+            return
+        await _report(task, "attention", report=f"Its session could not start: {failure.message}")
+        return
+    # Registered before provisioning builds the agent's instructions, which read it.
+    _adopt(item, {**task, "status": "running"}, session, player_id, limits)
+    await _report(task, "running", session_id=session.id, attempts=task["attempts"], assignment=assignment)
+    LOG.info("Work item %s launched task %s in session %s", item["id"], task["key"], session.id)
+
+
+async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None:
+    """The task's assignment, or its first alternative, on an account with quota left. An unnamed account
+    is the provider's default one; an account running low is swapped for another of the same provider."""
+    connections = [connection for connection in await mooi.fetch_agent_connections(caller)
+                   if connection.get("provider") in PROVIDERS and not connection.get("stale")]
+    if not connections:
+        return None
+    candidates = [task.get("assignment") or {}, *(task.get("alternatives") or [])]
+    for candidate in candidates:
+        provider = candidate.get("provider") or next(
+            (connection["provider"] for connection in connections if connection.get("defaultAccount")),
+            connections[0]["provider"])
+        accounts = [connection for connection in connections if connection["provider"] == provider]
+        accounts.sort(key=lambda connection: (str(connection["id"]) != candidate.get("connectionId"),
+                                              not connection.get("defaultAccount"),
+                                              _highest_percent(str(connection["id"])) or 0.0))
+        for account in accounts:
+            percent = _highest_percent(str(account["id"]))
+            if percent is None or percent < quota_limit:
+                return {"provider": provider, "connectionId": str(account["id"]),
+                        "model": candidate.get("model"), "effort": candidate.get("effort")}
+    return None
+
+
+def _brief(item: Json, task: Json) -> str:
+    spec = (item.get("spec") or "").strip()
+    spec = spec if len(spec) <= 30_000 else spec[:30_000] + "\n[...]"
+    kind = {"feature": "Feature", "defect": "Defect", "debt": "Debt"}[item["kind"]]
+    issue = f" (GitHub issue #{item['issueNumber']})" if item.get("issueNumber") else ""
+    lines = [f"# {kind}{issue}: {item['title']}", "", spec or "(no spec)", ""]
+    if task.get("qaOf"):
+        tested = next((other for other in item["tasks"] if other["id"] == task["qaOf"]), None)
+        lines += [f"# Your task: {task['title']} (QA)", "",
+                  (f"Check the work of \"{tested['title'] if tested else 'its task'}\". It is already merged into the "
+                   "default branch together with everything merged before it, and this session's branch starts from "
+                   "there. Do not change repository files."),
+                  "", task.get("description") or "",
+                  "", ("Run the project the way its development deployment brief says (read it with the deployment "
+                       "brief endpoint of your session instructions) and verify the criteria through Playwright, as a "
+                       "user would. When the project is not a web application, verify them with the project's own means."),
+                  "", "## Acceptance criteria", "", task.get("acceptance") or "(none given: use the task description)"]
+    else:
+        lines += [f"# Your task: {task['title']}", "", task.get("description") or "",
+                  "", "## Acceptance criteria", "", task.get("acceptance") or "(none given)",
+                  "", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
+                       "else than this task.")]
+    lines += ["", "Report the outcome before your turn ends, as your Software factory task instructions say."]
+    return "\n".join(lines)
+
+
+# --- reacting to the task sessions ---------------------------------------------------------------
+
+
+def _on_session_event(session: Session, type_: str, data: Json) -> None:
+    run = _runs.get(session.id)
+    if run is None:
+        return
+    if type_ == EVENT_TURN_RESULT:
+        _background(_after_turn(run))
+    elif type_ in (EVENT_QUESTION_REQUEST, EVENT_PERMISSION_REQUEST):
+        _background(_set_status(run, "attention", "The agent is waiting for your answer in its session"))
+    elif ((type_ in (EVENT_QUESTION_RESOLVED, EVENT_PERMISSION_RESOLVED) and session.pending is None)
+          or (type_ == "message.user" and run.status == "attention")):
+        _background(_set_status(run, "running", None))
+    elif type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_FAILED:
+        _background(_set_status(run, "attention", "Its session failed: reconnect it from the session page"))
+    elif type_ == EVENT_MERGE_COMPLETED:
+        _background(_finish(run, f"Merged as {str(data.get('commit') or '')[:10]}"))
+
+
+sessions.session_listeners.append(_on_session_event)
+
+
+async def _set_status(run: TaskRun, status_: str, report: str | None) -> None:
+    async with _lock:
+        if _runs.get(run.session_id) is run and run.status != status_ and run.phase != "merging":
+            await _report(run, status_, report=report)
+
+
+async def _after_turn(run: TaskRun) -> None:
+    async with _lock:
+        session = get_registry().get(run.session_id)
+        if _runs.get(run.session_id) is not run or session is None or session.closing or session.queue:
+            return
+        try:
+            await _settle(run, session)
+        except Exception as failure:
+            LOG.warning("Task %s could not settle", run.task_id, exc_info=True)
+            run.phase = "working"
+            reason = failure.message if isinstance(failure, ApiException) else "Its work could not be wrapped up"
+            with suppress(Exception):
+                await _report(run, "attention", report=f"{reason}: continue in its session or start the item again")
+    wake()
+
+
+async def _settle(run: TaskRun, session: Session) -> None:
+    if run.phase == "resolving":
+        await _merge(run)
+        return
+    if run.phase == "review":
+        return
+    report = run.outcome
+    if report is None:
+        if not run.nudged:
+            run.nudged = True
+            await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), await _run_caller(run))
+            return
+        await _report(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
+        return
+    run.outcome, run.nudged = None, False
+    if report.outcome == "blocked":
+        await _report(run, "attention", report=report.summary)
+    elif report.outcome == "passed":
+        await _finish(run, report.summary, locked=True)
+    elif report.outcome == "defect":
+        if run.qa_rounds >= run.limits["maxQaRounds"]:
+            await _report(run, "attention", report=f"Still failing after {run.qa_rounds} fixes: {report.summary}")
+            return
+        answer = await mooi.report_defect(run.task_id, (report.title or "defect").strip(), report.summary)
+        _publish_item(run.player_id, answer.get("item"))
+        await _close(run)
+    elif run.auto_merge:
+        await _merge(run)
+    else:
+        run.phase = "review"
+        await _report(run, "review", report=f"{report.summary}\n\nReady for your merge from its session.")
+
+
+async def _merge(run: TaskRun) -> None:
+    """Merges a finished development task: clean merges at once, conflicts through the agent first."""
+    caller = await _run_caller(run)
+    preview = await sessions.check_merge(run.session_id, caller)
+    if preview.state == "up_to_date":
+        await _finish(run, "Nothing to merge: the default branch already holds this work", locked=True)
+        return
+    if preview.state == "conflicts":
+        if run.resolutions >= run.limits["maxResolutions"]:
+            await _report(run, "attention", report="Its merge conflicts could not be resolved automatically")
+            return
+        run.resolutions += 1
+        run.phase = "resolving"
+        await _report(run, "merging", report="Resolving merge conflicts with the agent")
+        await sessions.resolve_merge_conflicts(run.session_id, caller)
+        return
+    message = (preview.suggestedMessage or f"{'fix' if run.issue_number else 'feat'}: {run.title}").strip()
+    if run.issue_number:
+        message = f"{message[:180]} (fixes #{run.issue_number})"
+    run.phase = "merging"
+    await _report(run, "merging", report=None)
+    result = await sessions.merge_session(run.session_id, MergeRequest(message=message[:200]), caller)
+    if result.state == "conflicts":
+        run.phase = "working"
+        await _merge(run)
+    # A merged result is finished by the `merge.completed` event.
+
+
+async def _finish(run: TaskRun, report: str, *, locked: bool = False) -> None:
+    """The task is done: saved as such, its session closed, and the runner looks for what it unblocked."""
+    if not locked:
+        async with _lock:
+            await _finish(run, report, locked=True)
+        wake()
+        return
+    if _runs.get(run.session_id) is not run:
+        return
+    item = await _report(run, "done", report=report)
+    await _close(run)
+    if run.issue_number and item.get("status") == "done":
+        # A merge titled by the player may not name the issue: closing it here is idempotent.
+        with suppress(Exception):
+            caller = await _run_caller(run)
+            changed = await mooi.send_work(caller, "PATCH", run.project_id, f"/issues/{run.issue_number}",
+                                           {"state": "closed"}, github=True) or {}
+            _publish_issue(run.player_id, run.project_id, changed.get("issue"))
+
+
+async def _close(run: TaskRun) -> None:
+    _runs.pop(run.session_id, None)
+    _background(sessions.close_session(run.session_id))
+
+
+async def _run_caller(run: TaskRun) -> Caller:
+    caller = await _caller(run.item_id, run.player_id, None)
+    if caller is None:
+        raise ApiException.conflict("The sign-in that started this work ended: start it again")
+    return caller
+
+
+def start_runner() -> None:
+    """Called once from `main.py`'s lifespan; `close_runner` stops it again."""
+    global _runner_task
+    if _runner_task is None:
+        _runner_task = asyncio.create_task(_runner_loop())
+
+
+async def close_runner() -> None:
+    global _runner_task
+    tasks = [task for task in (_runner_task, *_tasks) if task is not None]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _runner_task = None

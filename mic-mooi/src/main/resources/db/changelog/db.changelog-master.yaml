@@ -81,3 +81,5 @@ databaseChangeLog:
       file: db/changelog/changes/040-opencode-provider.yaml
   - include:
       file: db/changelog/changes/041-suggested-commit-preferences.yaml
+  - include:
+      file: db/changelog/changes/042-software-factory.yaml

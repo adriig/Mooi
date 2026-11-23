@@ -56,9 +56,10 @@ from it. Where they differ, this context wins over the current implementation (s
   next one, in order, until the queue is empty, even with no device connected. Queued messages can be
   edited or removed until they go out; stopping a turn keeps the queue, and a failed session holds it until
   it reconnects. Same in development, production and backup chats.
-- **Issue planning is decided in the session**: creating a session never plans To-dos. At any point the user
-  can ask the agent in the chat to break work into issues on the project's To-dos list, through the same
-  platform API as the To-dos views.
+- **Work planning is decided in the session**: creating a session never plans work. Whatever the user asks
+  in a plain session, its agent decides whether it is a single task (done right there), a feature, a defect
+  or debt, and records the last three on the project's software factory (see *Software factory*) through
+  the same platform API as the To-dos and Board views.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK; Antigravity, which ships no agent SDK: one adapter, **Antigravity CLI**, which
@@ -101,26 +102,50 @@ from it. Where they differ, this context wins over the current implementation (s
 - **Agentic merge**: merging an outdated branch with conflicts makes the agent resolve them, preserving
   both sides' features.
 
-## Project to-do list
+## Software factory: To-dos and Board
 
-- Each project has a **To-dos** tab: a view over `docs/TODOS.md` on the default branch, which is the only
-  copy. Mooi stores no list of its own.
-- Items are open, in progress or done, and are reordered by drag and drop (pointer, touch and keyboard).
-  An item's text has no length limit.
-- One order everywhere: new items go on top and done items sit at the bottom; completing an item moves it to
-  the top of the done items, reopening a done one moves it just below the items still to do.
-- A **To-dos** entry in the main menu gathers every project's list on one page: each project expands or
-  collapses into the same editor as its tab, with its progress at a glance. Lists are read only as they
-  come into view, so the page scales to any number of projects.
-- A project dropdown with checkboxes filters the workspace To-dos page and its totals to the selected
-  projects. The selection is remembered per user on the current device.
-- Status filters show their counts in compact pills (`1.2K`) that never overflow, on phones and desktops.
-- Adding, editing, changing the status of, reordering and removing items commits the file transparently
-  with the user's GitHub grant; a missing file is created by the first item. Each save names the file
-  revision it read, so concurrent changes are replayed, never overwritten.
-- Mooi edits only what it renders losslessly: an optional `# Title` and `- [ ]` (open), `- [/]` (in
-  progress) and `- [x]` (done) items. Any other content is reported, never changed, until the user chooses
-  to clean it up or keep managing it by hand.
+Each project plans and builds its work as a software factory: agents design it, the platform runs it.
+
+- **Work items** are of three kinds, and nothing else reaches To-dos:
+  - **Feature**: work worth several tasks, designed by a session agent acting as orchestrator. It holds a
+    spec and its tasks; it lives in the platform. Features are independent of each other: at most a whole
+    feature depends on another whole feature, never a task on a task of another feature.
+  - **Defect** and **Debt**: a GitHub issue of the project labelled `defect` or `debt` (created when
+    missing). GitHub Issues hold only these two kinds, never features; their execution settings live in the
+    platform. A single task asked in a session is developed in that session and never becomes a work item.
+- **Tasks** belong to one feature and carry a title, a category, a description, acceptance criteria, the
+  provider, account, model and effort to run with, **auto-merge** (on or off) and **tests** (on or off),
+  all prefilled by the orchestrator and editable. Dependencies are blocking and stay inside the feature.
+  Categories have fixed colours: UX/UI green, Development yellow, QA blue, Infra/DevOps purple,
+  Documentation grey.
+- **QA**: enabling tests on a task adds a separate QA task to its feature, blocked until that task merges,
+  with acceptance criteria and a different model preselected. Developing and testing never share a session.
+- **Model assignment**: an assignment expert picks each task's provider, model and effort from the user's
+  linked accounts and their remaining quota, with ordered fallbacks, so no account runs out of credits. The
+  platform checks quota again when a task launches and falls back to the next alternative when needed.
+- **To-dos tab** (per project): features, defects and debt. Opening a feature shows its task breakdown and
+  every task's settings; defects and debt offer the same settings. Status filters show their counts in
+  compact pills (`1.2K`) that never overflow. A **To-dos** entry in the main menu gathers every project on
+  one page, filtered by a project dropdown with checkboxes remembered per user on the current device;
+  projects load only as they come into view.
+- **Board tab** (per project and feature): pick a feature and see its tasks as a left-to-right dependency
+  graph of coloured nodes. Without opening a task, each node shows and changes auto-merge (robot icon),
+  provider and model, and tests. Finished tasks get a green check and stay where they are.
+- **Execution**: **Start** applies to a feature, a defect or a debt item, never to a single task. From then
+  on the platform runs it automatically, with no agent orchestrating and no device connected:
+  - every unblocked task gets its own new session (one task, one session), within the account's session
+    limit; the rest wait in line;
+  - a development task ends with its merge into the default branch: automatic (agentic merge on
+    conflicts) or by the user, as the task says. The merge closes the task and its session and unblocks
+    its dependants;
+  - a QA task checks the default branch with everything merged through Playwright and ends when its
+    acceptance criteria are met. A defect it finds is added to the feature as a fix task that runs
+    automatically with no QA of its own, and the failed QA runs again after it;
+  - a defect or debt item closes its GitHub issue when its work merges.
+- **Factory settings** (per project, from To-dos, the Board or the chat): the quota percent from which an
+  account is spared (default 85%), the sessions a task may lose before it waits for the user (3), the
+  fix-and-check-again rounds after a failed QA (3; 0 hands every failure to the user) and the agentic merge
+  attempts on conflicts (2; 0 leaves conflicts to the user).
 - Managed from UI or chat (session agents use the same platform API); changes stream live to every view.
 
 ## Development environment variables

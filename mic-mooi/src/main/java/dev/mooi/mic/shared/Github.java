@@ -153,6 +153,18 @@ public class Github {
                     "This file changed on GitHub since it was loaded. Reload it and try again");
         }
 
+        /** The grant reads the repository but may not read or write its issues: the app lacks the Issues permission. */
+        public static GithubException issuesDenied() {
+            return new GithubException(HttpStatus.FORBIDDEN,
+                    "GitHub denied access to issues. Grant Mooi Issues read and write access and try again");
+        }
+
+        /** The repository has GitHub Issues turned off, so defects and debt have nowhere to live. */
+        public static GithubException issuesDisabled() {
+            return new GithubException(HttpStatus.CONFLICT,
+                    "Issues are turned off in this repository. Enable them in its GitHub settings first");
+        }
+
         /** The grant reads the repository but may not commit to its default branch (permissions or branch protection). */
         public static GithubException contentsWriteDenied() {
             return new GithubException(HttpStatus.FORBIDDEN,
@@ -399,6 +411,11 @@ public class Github {
      * {@link OAuthClient#writeFile} must name, so a commit can never overwrite a change it did not see.
      */
     public record FileContent(String sha, String text) {
+    }
+
+    /** One issue (never a pull request) as the issues API lists it; {@code labels} are their names. */
+    public record Issue(int number, String title, String body, String state, List<String> labels, String htmlUrl,
+                        OffsetDateTime createdAt, OffsetDateTime closedAt) {
     }
 
     /**
@@ -757,6 +774,118 @@ public class Github {
                 throw GithubException.unavailable(description + " returned no revision");
             }
             return revision;
+        }
+
+        /**
+         * The repository's issues carrying {@code label}, open and closed, most recently updated first.
+         * Pull requests share the issues endpoint and are dropped. Bounded like every listing here: a
+         * view a person reads, not a mirror.
+         */
+        public List<Issue> listIssues(String owner, String name, String label, String accessToken) {
+            List<Issue> issues = new ArrayList<>();
+            String base = "/repos/" + encode(owner) + "/" + encode(name) + "/issues?state=all&sort=updated&direction=desc"
+                    + "&labels=" + encode(label) + "&per_page=" + PAGE_SIZE;
+            for (int page = 1; page <= MAX_PAGES; page++) {
+                JsonNode body = readJson(issueCall(repositoryRequest(base + "&page=" + page, accessToken).GET().build(),
+                        "GET /repos/" + owner + "/" + name + "/issues"));
+                if (!body.isArray()) {
+                    throw GithubException.unavailable("GET issues returned no list");
+                }
+                for (JsonNode node : body) {
+                    if (!node.has("pull_request")) {
+                        issues.add(toIssue(node));
+                    }
+                }
+                if (body.size() < PAGE_SIZE) {
+                    break;
+                }
+            }
+            return issues;
+        }
+
+        public Issue fetchIssue(String owner, String name, int number, String accessToken) {
+            JsonNode node = readJson(issueCall(repositoryRequest("/repos/" + encode(owner) + "/" + encode(name)
+                    + "/issues/" + number, accessToken).GET().build(), "GET issue"));
+            if (node.has("pull_request")) {
+                throw GithubException.repositoryNotFound();
+            }
+            return toIssue(node);
+        }
+
+        public Issue createIssue(String owner, String name, String title, String body, List<String> labels,
+                                 String accessToken) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("title", title);
+            payload.put("body", body);
+            payload.put("labels", labels);
+            return toIssue(readJson(issueCall(repositoryRequest("/repos/" + encode(owner) + "/" + encode(name)
+                    + "/issues", accessToken).header(HttpHeaders.CONTENT_TYPE, JSON)
+                    .POST(HttpRequest.BodyPublishers.ofString(json(payload))).build(), "create issue")));
+        }
+
+        /** Changes only the fields given: {@code title}, {@code body}, {@code state} ({@code open|closed}). */
+        public Issue updateIssue(String owner, String name, int number, Map<String, Object> fields, String accessToken) {
+            return toIssue(readJson(issueCall(repositoryRequest("/repos/" + encode(owner) + "/" + encode(name)
+                    + "/issues/" + number, accessToken).header(HttpHeaders.CONTENT_TYPE, JSON)
+                    .method("PATCH", HttpRequest.BodyPublishers.ofString(json(fields))).build(), "update issue")));
+        }
+
+        /** Creates the label when the repository lacks it; one that already exists is left as it is. */
+        public void ensureLabel(String owner, String name, String label, String color, String description,
+                                String accessToken) {
+            HttpResponse<String> response = exchange(repositoryRequest("/repos/" + encode(owner) + "/" + encode(name)
+                    + "/labels", accessToken).header(HttpHeaders.CONTENT_TYPE, JSON)
+                    .POST(HttpRequest.BodyPublishers.ofString(json(Map.of("name", label, "color", color,
+                            "description", description)))).build(), "create label");
+            int status = response.statusCode();
+            if (status == 422 || status / 100 == 2) {
+                return;
+            }
+            issueStatus(status, "create label");
+        }
+
+        private String issueCall(HttpRequest request, String description) {
+            HttpResponse<String> response = exchange(request, description);
+            issueStatus(response.statusCode(), description);
+            return response.body();
+        }
+
+        private static void issueStatus(int status, String description) {
+            switch (status) {
+                case 200, 201 -> { }
+                case 401 -> throw GithubException.reauthorize();
+                case 403 -> throw GithubException.issuesDenied();
+                case 404 -> throw GithubException.repositoryNotFound();
+                case 410 -> throw GithubException.issuesDisabled();
+                default -> throw GithubException.unavailable(description + " answered " + status);
+            }
+        }
+
+        private String json(Object payload) {
+            try {
+                return objectMapper.writeValueAsString(payload);
+            } catch (JacksonException exception) {
+                throw GithubException.unavailable("Unable to build the GitHub request");
+            }
+        }
+
+        private static Issue toIssue(JsonNode node) {
+            int number = node.path("number").asInt(0);
+            if (number <= 0) {
+                throw GithubException.unavailable("GitHub returned an issue without a number");
+            }
+            List<String> labels = new ArrayList<>();
+            node.path("labels").forEach(label -> {
+                String labelName = text(label, "name");
+                if (labelName != null) {
+                    labels.add(labelName);
+                }
+            });
+            String title = text(node, "title");
+            String body = text(node, "body");
+            return new Issue(number, title == null ? "" : title, body == null ? "" : body,
+                    "closed".equals(text(node, "state")) ? "closed" : "open", labels, text(node, "html_url", MAX_URL_LENGTH),
+                    timestamp(node, "created_at"), timestamp(node, "closed_at"));
         }
 
         /** Every path segment encoded on its own, so the separators survive and nothing else can break out. */

@@ -1,0 +1,104 @@
+databaseChangeLog:
+  - changeSet:
+      id: 042-software-factory
+      author: mooi
+      changes:
+        # A project's work items: features (here only) and the defects and debt whose GitHub issue Mooi
+        # runs, which get a row the first time they are configured or started. Tasks belong to one item
+        # and depend only on tasks of the same item; an item may depend on one other whole item.
+        - sql:
+            sql: |
+              CREATE TABLE work_items (
+                id uuid,
+                project_id uuid NOT NULL,
+                kind varchar(16) NOT NULL,
+                issue_number integer,
+                title varchar(300) NOT NULL,
+                spec text NOT NULL DEFAULT '',
+                status varchar(16) NOT NULL DEFAULT 'planned',
+                depends_on_id uuid,
+                rank bigint NOT NULL,
+                runner_auth_session_id uuid,
+                runner_player_id uuid,
+                started_at timestamp with time zone,
+                finished_at timestamp with time zone,
+                created_at timestamp with time zone NOT NULL,
+                updated_at timestamp with time zone NOT NULL,
+                CONSTRAINT pk_work_items PRIMARY KEY (id),
+                CONSTRAINT fk_work_items_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_items_depends_on FOREIGN KEY (depends_on_id) REFERENCES work_items(id) ON DELETE SET NULL,
+                CONSTRAINT uq_work_items_issue UNIQUE (project_id, issue_number),
+                CONSTRAINT ck_work_items_kind CHECK (kind IN ('feature', 'defect', 'debt')),
+                CONSTRAINT ck_work_items_issue CHECK ((kind = 'feature') = (issue_number IS NULL)),
+                CONSTRAINT ck_work_items_status CHECK (status IN ('planned', 'running', 'paused', 'done'))
+              );
+              CREATE INDEX ix_work_items_project ON work_items (project_id);
+              CREATE INDEX ix_work_items_running ON work_items (status) WHERE status = 'running';
+
+              CREATE TABLE work_tasks (
+                id uuid,
+                item_id uuid NOT NULL,
+                key varchar(64) NOT NULL,
+                title varchar(300) NOT NULL,
+                category varchar(16) NOT NULL,
+                description text NOT NULL DEFAULT '',
+                acceptance text NOT NULL DEFAULT '',
+                provider varchar(32),
+                connection_id varchar(64),
+                model varchar(128),
+                effort varchar(32),
+                alternatives text NOT NULL DEFAULT '[]',
+                auto_merge boolean NOT NULL DEFAULT true,
+                tests boolean NOT NULL DEFAULT false,
+                qa_of_id uuid,
+                fix_of_id uuid,
+                status varchar(16) NOT NULL DEFAULT 'planned',
+                session_id uuid,
+                attempts integer NOT NULL DEFAULT 0,
+                report text,
+                position integer NOT NULL,
+                started_at timestamp with time zone,
+                finished_at timestamp with time zone,
+                created_at timestamp with time zone NOT NULL,
+                updated_at timestamp with time zone NOT NULL,
+                CONSTRAINT pk_work_tasks PRIMARY KEY (id),
+                CONSTRAINT fk_work_tasks_item FOREIGN KEY (item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_tasks_qa_of FOREIGN KEY (qa_of_id) REFERENCES work_tasks(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_tasks_fix_of FOREIGN KEY (fix_of_id) REFERENCES work_tasks(id) ON DELETE SET NULL,
+                CONSTRAINT uq_work_tasks_key UNIQUE (item_id, key),
+                CONSTRAINT ck_work_tasks_category CHECK (category IN ('ux', 'dev', 'qa', 'infra', 'docs')),
+                CONSTRAINT ck_work_tasks_status CHECK (status IN ('planned', 'queued', 'running', 'merging', 'review', 'attention', 'done'))
+              );
+              CREATE INDEX ix_work_tasks_item ON work_tasks (item_id);
+
+              CREATE TABLE work_task_dependencies (
+                task_id uuid NOT NULL,
+                depends_on_id uuid NOT NULL,
+                CONSTRAINT pk_work_task_dependencies PRIMARY KEY (task_id, depends_on_id),
+                CONSTRAINT fk_work_task_dependencies_task FOREIGN KEY (task_id) REFERENCES work_tasks(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_task_dependencies_depends_on FOREIGN KEY (depends_on_id) REFERENCES work_tasks(id) ON DELETE CASCADE,
+                CONSTRAINT ck_work_task_dependencies_self CHECK (task_id <> depends_on_id)
+              );
+
+              CREATE TABLE work_settings (
+                project_id uuid,
+                quota_limit integer NOT NULL DEFAULT 85,
+                max_attempts integer NOT NULL DEFAULT 3,
+                max_qa_rounds integer NOT NULL DEFAULT 3,
+                max_resolutions integer NOT NULL DEFAULT 2,
+                CONSTRAINT pk_work_settings PRIMARY KEY (project_id),
+                CONSTRAINT fk_work_settings_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                CONSTRAINT ck_work_settings_quota CHECK (quota_limit BETWEEN 10 AND 100),
+                CONSTRAINT ck_work_settings_attempts CHECK (max_attempts BETWEEN 1 AND 10),
+                CONSTRAINT ck_work_settings_qa_rounds CHECK (max_qa_rounds BETWEEN 0 AND 10),
+                CONSTRAINT ck_work_settings_resolutions CHECK (max_resolutions BETWEEN 0 AND 5)
+              );
+      rollback:
+        - dropTable:
+            tableName: work_settings
+        - dropTable:
+            tableName: work_task_dependencies
+        - dropTable:
+            tableName: work_tasks
+        - dropTable:
+            tableName: work_items

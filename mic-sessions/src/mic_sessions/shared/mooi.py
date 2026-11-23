@@ -305,17 +305,54 @@ async def write_development_environment(caller: Caller, project_id: UUID, values
     return [str(name) for name in (payload or {}).get("environment") or []]
 
 
-# --- to-dos: the project's docs/TODOS.md, read and committed on its default branch -------------
+# --- work: the project's software factory (features, defects and debt) -------------------------
 
 
-async def fetch_todos(caller: Caller, project_id: UUID) -> dict:
-    return await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/todos",
+async def fetch_work(caller: Caller, project_id: UUID) -> dict:
+    return await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/work",
                       _service_headers(caller), "Project not found")
 
 
-async def write_todos(caller: Caller, project_id: UUID, todos: dict) -> dict:
-    """Commits the whole list against the revision the caller read; a stale one answers 409."""
-    return await _send("PUT", f"/me/projects/{project_id}/todos", caller, "Project not found", todos) or {}
+async def fetch_issues(caller: Caller, project_id: UUID) -> dict:
+    """Defects and debt as GitHub has them; the grant is renewed first, since this feature only reads it."""
+    await fetch_github_token(caller)
+    return await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/work/issues",
+                      _service_headers(caller), "Project not found")
+
+
+async def send_work(caller: Caller, method: str, project_id: UUID, path: str, payload: dict | None = None,
+                    *, github: bool = False) -> dict | None:
+    """One change to the project's work (`path` below `/work`); `github` renews the grant first."""
+    if github:
+        await fetch_github_token(caller)
+    return await _send(method, f"/me/projects/{project_id}/work{path}", caller, "Not found", payload)
+
+
+async def fetch_running_work() -> list[dict]:
+    """Service-only: every started item of every player, for the runner."""
+    return list(((await _send("GET", "/internal/work/running", None, "Not found")) or {}).get("items") or [])
+
+
+async def report_task(task_id: UUID, progress: dict) -> dict:
+    """Service-only: the runner's account of one task; answers the item with its owner."""
+    return await _send("PUT", f"/internal/work/tasks/{task_id}", None, "Task not found", progress) or {}
+
+
+async def report_defect(qa_task_id: UUID, title: str, description: str) -> dict:
+    return await _send("POST", f"/internal/work/tasks/{qa_task_id}/fix", None, "Task not found",
+                       {"title": title, "description": description}) or {}
+
+
+async def set_item_status(item_id: UUID, status: str) -> dict:
+    return await _send("PUT", f"/internal/work/items/{item_id}/status", None, "Item not found",
+                       {"status": status}) or {}
+
+
+async def fetch_agent_connections(caller: Caller) -> list[dict]:
+    """The player's provider accounts, as the account page lists them (no secrets)."""
+    body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/agents/connections",
+                      _bearer(caller), "Account not found")
+    return list(body.get("connections") or [])
 
 
 # --- backups: configuration and durable records ------------------------------------------------
