@@ -20,12 +20,13 @@ interface MergeDialogProps {
 }
 
 const MAX_TITLE = 200;
+const COMMIT_TITLE = /^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?:\s+\S.*$/;
 
 /** Asks for the one mandatory input of a merge: the title of the single commit pushed to the target. */
 export const MergeDialog = ({ targetBranch, branch, changes, merging, error, suggestedMessage, onCancel, onCommit,
   merged, onCloseSession, closeBusy, branchDeleteWarning }: MergeDialogProps) => {
   const [title, setTitle] = useState(suggestedMessage ?? '');
-  const valid = title.trim().length > 0;
+  const valid = title.trim().length <= MAX_TITLE && COMMIT_TITLE.test(title.trim());
   const submit = () => {
     if (valid && !merging) onCommit(title.trim());
   };
@@ -45,8 +46,11 @@ export const MergeDialog = ({ targetBranch, branch, changes, merging, error, sug
           <span className="text-xs font-semibold text-ink-muted">Commit title <span className="text-danger">*</span></span>
           <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={MAX_TITLE} autoCapitalize="none"
             onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); submit(); } }}
-            disabled={merging} required autoFocus placeholder="e.g. feat: add project search"
+            disabled={merging} required autoFocus placeholder="e.g. feat(projects): add project search"
             className="h-12 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:opacity-60" />
+          <span className="text-xs font-normal leading-relaxed text-ink-subtle">
+            Use Conventional Commits: type(scope): description, such as fix: handle empty input.
+          </span>
           {suggestedMessage ? <span className="text-xs font-normal leading-relaxed text-ink-subtle">
             Suggested from this session. Review or replace it before committing.
           </span> : null}

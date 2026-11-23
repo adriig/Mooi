@@ -673,6 +673,22 @@ class MergeRequest(BaseModel):
     message: str = Field(min_length=1, max_length=200)
 
 
+_COMMIT_TITLE_PATTERN = re.compile(
+    r"^[a-z][a-z0-9-]*(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?:\s+\S.*$"
+)
+
+
+def _validate_commit_title(message: str) -> str:
+    """Require a single Conventional Commit header for every commit published by Mooi."""
+    title = message.strip()
+    if len(title) > 200 or not _COMMIT_TITLE_PATTERN.fullmatch(title):
+        raise ApiException.bad_request(
+            "Use Conventional Commits format: <type>(<optional-scope>): <description> "
+            "(for example, feat(sessions): add session search)"
+        )
+    return title
+
+
 class MergePayload(BaseModel):
     state: MergeState
     targetBranch: str
@@ -2406,6 +2422,10 @@ async def _current_suggested_commit(session: Session, preferences: dict) -> str 
     if (not preferences.get("enabled") or suggestion is None
             or suggestion.language != preferences.get("language")):
         return None
+    if (len(suggestion.message) > 200
+            or not _COMMIT_TITLE_PATTERN.fullmatch(suggestion.message.strip())):
+        session.suggested_commit = None
+        return None
     try:
         async with session.changes_lock:
             revision = await workspaces.revision(session.workspace)
@@ -2434,7 +2454,8 @@ Files expected to conflict:
 3. Run `git merge --no-ff --no-commit {target}`.
 4. Resolve every conflict preserving the features of both branches, making whatever technical and functional decisions are needed so both keep working. When both sides implement the same feature, keep the most complete version using the cleanest, most maintainable and scalable approach.
 5. Make sure no conflict markers remain and the project still builds and its checks pass where practical, then commit the merge.
-6. Finish with a short summary of the decisions you took."""
+6. Use Conventional Commit format (`<type>(<optional-scope>): <description>`) for every commit title.
+7. Finish with a short summary of the decisions you took."""
 
 
 async def _reset_conversation(session: Session, caller: Caller) -> AgentRuntime:
@@ -2491,9 +2512,7 @@ async def merge_session(
     """Squashes the session's work onto the default branch as one commit and pushes it. Conflicts
     that appeared since the check are answered, not raised: the client offers resolution instead."""
     session = get_registry().get_for(caller, session_id)
-    message = body.message.strip()
-    if not message:
-        raise ApiException.bad_request("The commit title cannot be blank")
+    message = _validate_commit_title(body.message)
     token, identity = await asyncio.gather(mooi.fetch_github_token(caller), mooi.fetch_github_identity(caller))
     async with session.operation_lock:
         _require_mergeable(session)
@@ -2637,6 +2656,7 @@ At the end of every turn in which you changed repository files, after all edits 
 - Read `GET {root}/suggested-commit/agent` immediately before writing. If `enabled` is false, do nothing.
 - Write `PUT {root}/suggested-commit/agent` with JSON `{{"message": "<title>", "language": "<language returned by GET>"}}`.
 - Base the title on both the user's request and the work actually present in the session. Describe the session's complete unmerged change, not merely the last command. Use one concise line (maximum 200 characters), follow the repository's commit style when one is evident, and write in English for `en` or Spanish for `es`.
+- Format every commit title as a Conventional Commit: `<type>(<optional-scope>): <description>` (for example, `feat(sessions): add session search` or `fix: handle empty input`). Use a lowercase type and keep the description concise.
 - Keep this operation in the current turn. If no repository file changed in the turn, keep the existing suggestion.
 
 ## Shared Docker host
@@ -2787,9 +2807,7 @@ async def agent_update_suggested_commit(
         if not summary.files:
             raise ApiException.conflict("There are no unmerged changes to describe")
         revision = await workspaces.revision(session.workspace)
-    message = body.message.strip()
-    if not message:
-        raise ApiException.bad_request("The suggested commit message cannot be blank")
+    message = _validate_commit_title(body.message)
     session.suggested_commit = SuggestedCommit(message, body.language, revision)
     record(session, "commit.suggestion.updated", {"message": message, "language": body.language})
 
@@ -2982,7 +3000,7 @@ Scripts read configuration only from variables named `MOOI_PRODUCTION_<NAME>` an
 
 ## Repository changes
 Add repository files only when the target needs them: a setup made only of platform files and variables is fine (for example a platform deployed through its CLI), and a production Compose definition always belongs in the repository. They hold variable references, never values. Create or edit them in the working directory: the user sees them in the Changes tab. Never change application behaviour for it.
-Before committing, ask the user whether to commit and push them to `{branch}`, listing every changed file (use your question tool when available, otherwise ask and wait for the reply). Only after an explicit yes, publish them with the commit endpoint; never run `git commit` or `git push` yourself. If the user declines, revert those files; never fall back to embedding Compose in Platform files.
+Before committing, ask the user whether to commit and push them to `{branch}`, listing every changed file (use your question tool when available, otherwise ask and wait for the reply). Only after an explicit yes, publish them with the commit endpoint; never run `git commit` or `git push` yourself. Format the commit title as a Conventional Commit (`<type>(<optional-scope>): <description>`, e.g. `fix(deploy): correct health check`). If the user declines, revert those files; never fall back to embedding Compose in Platform files.
 
 ## Releases
 Only releases reach production, and the platform chooses and creates them. A test deploys:
@@ -3390,9 +3408,7 @@ async def agent_commit_repository(session_id: UUID, request: Request, body: Merg
 async def _commit_platform_repository(session: Session, caller: Caller, body: MergeRequest) -> MergePayload:
     """One commit of a platform chat's repository changes onto the default branch, pushed as a
     fast-forward and never forced."""
-    message = body.message.strip()
-    if not message:
-        raise ApiException.bad_request("The commit title cannot be blank")
+    message = _validate_commit_title(body.message)
     if session.workspace == _UNSET_PATH:
         raise ApiException.conflict("The workspace is still being prepared")
     token, identity = await asyncio.gather(mooi.fetch_github_token(caller), mooi.fetch_github_identity(caller))
@@ -3904,7 +3920,7 @@ Save each document with the platform API as soon as you write or change it, one 
 The platform provides `MOOI_BACKUP_ID` (date, time and release of the backup plus a unique suffix: use it as the backup's name), `MOOI_BACKUP_CREATED_AT`, `MOOI_BACKUP_RELEASE_TAG`, `MOOI_BACKUP_TARGET` (restore.sh) and the backup release's `MOOI_PRODUCTION_RELEASE_TAG`, `MOOI_PRODUCTION_RELEASE_SHA` and `MOOI_PRODUCTION_RELEASE_URL`. Backup settings use variables named `MOOI_BACKUP_<NAME>` (storage location, bucket credentials, encryption key...). The scripts also receive the project's development variables `MOOI_DEVELOPMENT_<NAME>`, which production inherits from the project's sessions. Every `MOOI_BACKUP_`, `MOOI_PRODUCTION_` or `MOOI_DEVELOPMENT_` variable the scripts mention without a shell default (`${{NAME:-default}}`) is required. Ask the user for each missing backup value and never invent credentials; save the values they give you with the environment endpoint. A missing `MOOI_PRODUCTION_` value belongs to the deployment: ask the user to set it in Deployments; a missing `MOOI_DEVELOPMENT_` value belongs to the project's sessions: ask the user to set it from any session. Read the stored values with the environment endpoint whenever you need them, and tell the user a value only when they ask for it.
 
 ## Repository changes
-Backups should almost never need repository changes. Only when they truly do, edit files in the working directory (the user sees them in the Changes tab), ask the user whether to commit and push them to `{branch}` listing every changed file, and only after an explicit yes publish them with the commit endpoint; never run `git commit` or `git push` yourself. Backups run from the release deployed in production, so committed changes only apply once the user deploys a new release from Deployments: tell them.
+Backups should almost never need repository changes. Only when they truly do, edit files in the working directory (the user sees them in the Changes tab), ask the user whether to commit and push them to `{branch}` listing every changed file, and only after an explicit yes publish them with the commit endpoint; never run `git commit` or `git push` yourself. Format the commit title as a Conventional Commit (`<type>(<optional-scope>): <description>`, e.g. `fix(backup): correct retention policy`). Backups run from the release deployed in production, so committed changes only apply once the user deploys a new release from Deployments: tell them.
 
 ## Platform API
 Use Python urllib with an inline JSON body, never a temporary file, and send the header `X-Mooi-Agent-Token: {session.agent_token}`:
