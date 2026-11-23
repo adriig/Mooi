@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from dotenv import dotenv_values
 
@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     git_timeout_seconds: int = Field(default=180, gt=0)
 
     # Sessions
-    max_sessions: int = Field(default=8, gt=0)
+    # Host capacity: live agent sessions across every account. 0 (the default) sizes it from the memory
+    # the service may use, `session_memory_mb` per session, never below `_MIN_HOST_SESSIONS`.
+    max_sessions: int = Field(default=0, ge=0)
+    session_memory_mb: int = Field(default=768, gt=0)
     event_log_limit: int = Field(default=5000, gt=0)
     event_log_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     sse_heartbeat_seconds: int = Field(default=15, gt=0)
@@ -171,6 +174,34 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_workspace_root(cls, value: Path) -> Path:
         return value.resolve()
+
+    @model_validator(mode="after")
+    def _resolve_max_sessions(self) -> Settings:
+        if self.max_sessions == 0:
+            usable = max(_available_memory() - _SERVICE_MEMORY_RESERVE, 0)
+            self.max_sessions = max(_MIN_HOST_SESSIONS, usable // (self.session_memory_mb * 1024 * 1024))
+        return self
+
+
+_MIN_HOST_SESSIONS = 8
+_SERVICE_MEMORY_RESERVE = 1024 * 1024 * 1024
+
+
+def _available_memory() -> int:
+    """Bytes this process may use: physical memory, narrowed by a cgroup (v2 or v1) limit when set."""
+    try:
+        memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        memory = 0
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            limit = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if limit.isdigit() and (memory == 0 or int(limit) < memory):
+            memory = int(limit)
+        break
+    return memory
 
 
 @lru_cache

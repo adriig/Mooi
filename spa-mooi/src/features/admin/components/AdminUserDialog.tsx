@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent, useState, type ReactNode } from 'react';
 import { Ban, LogOut, MonitorSmartphone, ShieldCheck, Square, SquareX } from 'lucide-react';
 import {
   closeAdminSession, closePlayerSessions, fetchPlayerSignIns, setPlayerBanned, signOutPlayer, setPlayerSessionLimit,
-  fetchPlayerSessionLimit,
+  fetchPlayerSessionLimit, fetchSessionCapacity,
 } from '@/features/admin/api/adminApi';
 import { deviceLabel } from '@/features/admin/lib/adminActivity';
 import type { AdminPlayer } from '@/features/admin/types/AdminPlayer';
@@ -55,6 +55,8 @@ export const AdminUserDialog = ({ player, devices, lastSeenAt, sessions, self, o
   const [error, setError] = useState<string | null>(null);
   const [confirmBan, setConfirmBan] = useState(false);
   const [limit, setLimit] = useState(String(player.maxSessions));
+  const [capacity, setCapacity] = useState<number | null>(null);
+  const overCapacity = capacity !== null && Number(limit) > capacity;
   useEffect(() => setLimit(String(player.maxSessions)), [player.maxSessions]);
   const receiveLimit = useEffectEvent((maxSessions: number) => {
     if (busy === null && maxSessions !== player.maxSessions) onChange({ maxSessions });
@@ -72,6 +74,13 @@ export const AdminUserDialog = ({ player, devices, lastSeenAt, sessions, self, o
     void refresh();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [player.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchSessionCapacity().then((value) => { if (!cancelled) setCapacity(value); })
+      .catch(() => { /* Without it the pod still caps the limit when sessions start. */ });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -167,15 +176,19 @@ export const AdminUserDialog = ({ player, devices, lastSeenAt, sessions, self, o
           }}>
             <label className="flex flex-col gap-1 text-sm text-ink-muted">
               Maximum open sessions
-              <input type="number" min="1" max="2147483647" step="1" required value={limit}
+              <input type="number" min="1" max={capacity ?? 2147483647} step="1" required value={limit}
                 onChange={(event) => setLimit(event.target.value)} disabled={busy !== null}
                 className="w-40 rounded-control border border-line bg-surface-2 px-3 py-2 text-ink" />
             </label>
-            <Button type="submit" variant="secondary" disabled={busy !== null || Number(limit) === player.maxSessions}>
+            <Button type="submit" variant="secondary" disabled={busy !== null || overCapacity || Number(limit) === player.maxSessions}>
               {busy === 'limit' ? 'Saving…' : 'Save limit'}
             </Button>
           </form>
-          <p className="mt-2 text-xs text-ink-subtle">Applies across all projects and agent accounts, including production and backup chats. Lowering the limit keeps existing sessions open. Platform capacity also applies.</p>
+          <p className="mt-2 text-xs text-ink-subtle">Applies across all projects and agent accounts, including production and backup chats. Lowering the limit keeps existing sessions open.{' '}
+            {capacity === null ? 'Platform capacity caps it.' : `Platform capacity caps it at ${capacity} sessions.`}</p>
+          {capacity !== null && player.maxSessions > capacity && (
+            <p className="mt-1 text-xs text-warning">The saved limit ({player.maxSessions}) is above platform capacity; {capacity} applies.</p>
+          )}
         </Section>
         <Section title={`Live sessions · ${sessions.length}`}>
           {sessions.length === 0 ? <p className="text-sm text-ink-subtle">No live session right now.</p> : (

@@ -1777,6 +1777,12 @@ async def admin_agent_providers(caller: Annotated[Caller, Depends(current_admin)
     ]}
 
 
+@router.get("/admin/capacity")
+async def admin_capacity(caller: Annotated[Caller, Depends(current_admin)]) -> dict[str, int]:
+    """This pod's session capacity: the ceiling of every account's session limit."""
+    return {"maxSessions": get_settings().max_sessions}
+
+
 @router.delete("/admin/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_close_session(session_id: UUID, caller: Annotated[Caller, Depends(current_admin)]) -> None:
     """Closes any player's chat exactly as its owner would; always `204`, like the owner's own close."""

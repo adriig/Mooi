@@ -120,9 +120,11 @@ async def fetch_project(caller: Caller, project_id: UUID) -> Project:
 
 
 async def fetch_session_limit(caller: Caller) -> int:
-    body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/session-limit",
+    """The account's effective limit: its configured one, never above this pod's capacity."""
+    settings = get_settings()
+    body = await _get(get_http_client(), f"{settings.mooi_api_base_url}/me/session-limit",
                       _bearer(caller), "Account not found")
-    return int(body["maxSessions"])
+    return min(int(body["maxSessions"]), settings.max_sessions)
 
 
 async def delete_merged_branch_by_default(caller: Caller) -> bool:

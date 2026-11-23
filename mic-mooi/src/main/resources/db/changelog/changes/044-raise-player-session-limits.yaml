@@ -1,0 +1,22 @@
+databaseChangeLog:
+  - changeSet:
+      id: 044-raise-player-session-limits
+      author: mooi
+      changes:
+        - addDefaultValue:
+            tableName: players
+            columnName: max_sessions
+            defaultValueNumeric: 8
+        # Accounts still on the previous default of four move to the new one; other limits stay as set.
+        - update:
+            tableName: players
+            columns:
+              - column:
+                  name: max_sessions
+                  valueNumeric: 8
+            where: max_sessions = 4
+      rollback:
+        - addDefaultValue:
+            tableName: players
+            columnName: max_sessions
+            defaultValueNumeric: 4

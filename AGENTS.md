@@ -216,9 +216,11 @@ Each project plans and builds its work as a software factory: agents design it, 
   - **Agents**: minimal per-provider session defaults (adapter, model, thinking effort) preselected for
     every user; saved on change.
   - **Account session limits**: administrators configure a positive maximum of open agent sessions per
-    user account (default: four), shared across projects, providers and development, production and
+    user account (default: eight), shared across projects, providers and development, production and
     backup chats. Changes apply to new creations immediately; lowering a limit keeps existing sessions
-    open. The host capacity limit still applies independently.
+    open. The sessions pod's capacity (all accounts together) caps every account's limit: sized by
+    default from the memory the pod may use (a per-session memory budget, never below eight), or fixed
+    by operators; the console shows it and accepts no account limit above it.
   - Other platform settings as they come.
 
 ## Other capabilities

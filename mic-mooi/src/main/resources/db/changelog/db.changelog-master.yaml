@@ -85,3 +85,5 @@ databaseChangeLog:
       file: db/changelog/changes/042-software-factory.yaml
   - include:
       file: db/changelog/changes/043-agent-model-favorites.yaml
+  - include:
+      file: db/changelog/changes/044-raise-player-session-limits.yaml

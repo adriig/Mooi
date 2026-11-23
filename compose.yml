@@ -75,8 +75,9 @@ services:
       CORS_ORIGIN: ${MOOI_DEVELOPMENT_PUBLIC_ORIGIN}
       # The service home is a volume (created owned by the image's `mooi` user); workspaces live in it.
       WORKSPACE_ROOT: /home/mooi/workspaces
-      MAX_SESSIONS: "4"
-      MAX_SESSIONS_PER_PLAYER: "2"
+      # 0 sizes the pod's session capacity from the memory it may use (SESSION_MEMORY_MB per session).
+      MAX_SESSIONS: "0"
+      SESSION_MEMORY_MB: "768"
       MAX_DEPLOYMENTS: "1"
       LOG_LEVEL: INFO
     volumes:

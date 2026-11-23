@@ -22,6 +22,13 @@ export const setPlayerSessionLimit = async (playerId: string, maxSessions: numbe
   return ((await response.json()) as { maxSessions: number }).maxSessions;
 };
 
+/** The sessions pod's capacity, which caps every account's session limit. */
+export const fetchSessionCapacity = async (): Promise<number> => {
+  const response = await sessionsFetch('/admin/capacity');
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the session capacity.'));
+  return ((await response.json()) as { maxSessions: number }).maxSessions;
+};
+
 export const ADMIN_PAGE_SIZE = 50;
 
 export const fetchAdminPlayers = async (query: string, offset: number): Promise<{ players: AdminPlayer[]; total: number }> => {
