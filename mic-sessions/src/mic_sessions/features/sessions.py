@@ -2598,14 +2598,15 @@ async def reconcile_deployments() -> set[UUID] | None:
     return preserved
 
 
-async def _reserve_deployment(session_id: UUID) -> None:
+async def _reserve_deployment(session_id: UUID, capacity: int) -> None:
     async with _deployment_capacity_lock:
         if _deployment_recovery_blocked:
             raise ApiException.conflict("Restore deployment records and restart the service before deploying")
         if session_id in _deployment_slots:
             raise ApiException.conflict("Previous deployment resources require cleanup")
-        if len(_deployment_slots) >= get_settings().max_deployments:
-            raise ApiException(status.HTTP_429_TOO_MANY_REQUESTS, "Deployment capacity is full; stop an active deployment")
+        if len(_deployment_slots) >= capacity:
+            raise ApiException(status.HTTP_429_TOO_MANY_REQUESTS,
+                               "Preview deployment capacity is full; stop an active preview")
         _deployment_slots.add(session_id)
 
 
@@ -4426,6 +4427,8 @@ async def _admit_deployment_start(
             LOG.warning("Session %s could not read its workspace revision for preview update",
                         session.id, exc_info=True)
             return session.deployment
+    else:
+        capacity = await mooi.fetch_preview_deployment_limit()
     async with session.operation_lock:
         if session.closing:
             if automatic:
@@ -4451,7 +4454,7 @@ async def _admit_deployment_start(
                 return session.deployment
             raise ApiException.conflict("The chat must be ready with no pending requests before deploying")
         if not automatic:
-            await _reserve_deployment(session.id)
+            await _reserve_deployment(session.id, capacity)
         operation_id = uuid4()
         snapshot = DeploymentSnapshot(
             state="starting", operationId=operation_id,

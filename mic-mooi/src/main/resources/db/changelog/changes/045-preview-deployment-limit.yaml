@@ -1,0 +1,38 @@
+databaseChangeLog:
+  - changeSet:
+      id: 045-preview-deployment-limit
+      author: mooi
+      changes:
+        - createTable:
+            tableName: platform_settings
+            columns:
+              - column:
+                  name: id
+                  type: smallint
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: max_preview_deployments
+                  type: integer
+                  defaultValueNumeric: 4
+                  constraints:
+                    nullable: false
+        - sql:
+            sql: >
+              ALTER TABLE platform_settings
+              ADD CONSTRAINT ck_platform_settings_singleton CHECK (id = 1),
+              ADD CONSTRAINT ck_platform_settings_preview_deployments
+              CHECK (max_preview_deployments BETWEEN 1 AND 100)
+        - insert:
+            tableName: platform_settings
+            columns:
+              - column:
+                  name: id
+                  valueNumeric: 1
+              - column:
+                  name: max_preview_deployments
+                  valueNumeric: 4
+      rollback:
+        - dropTable:
+            tableName: platform_settings

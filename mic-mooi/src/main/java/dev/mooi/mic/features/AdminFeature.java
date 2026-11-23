@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 
 import dev.mooi.mic.shared.Auth;
@@ -28,9 +29,9 @@ import lombok.RequiredArgsConstructor;
  *
  * <p>The directory uses one paged query per page, joining what other features own
  * (sign-ins, projects, agent accounts, GitHub links) by {@code player_id} through their own indexes.
- * Account session limits are managed here; suspending or signing a player out changes identity, so it belongs to
- * {@link AuthFeature}, and what a player is doing right now (presence, live agent sessions) is
- * memory-resident in {@code mic-sessions}, which streams it to administrators.
+ * Account session limits and platform-wide preview capacity are managed here; suspending or signing a
+ * player out changes identity, so it belongs to {@link AuthFeature}, and what a player is doing right
+ * now (presence, live agent sessions) is memory-resident in {@code mic-sessions}, which streams it to administrators.
  *
  * <p>Self-contained by architecture: API, application logic and contracts live in this single file
  * and may only import transversal aspects from {@code shared}.
@@ -72,6 +73,26 @@ public class AdminFeature {
     @Auth.RequireRole(Auth.Role.ADMIN)
     public SessionLimitPayload playerSessionLimit(@PathVariable UUID playerId) {
         return adminService.sessionLimit(playerId);
+    }
+
+    @GetMapping("/admin/settings/preview-deployments")
+    @Auth.RequireRole(Auth.Role.ADMIN)
+    public PreviewDeploymentLimitPayload previewDeploymentLimit() {
+        return adminService.previewDeploymentLimit();
+    }
+
+    @PutMapping("/admin/settings/preview-deployments")
+    @Auth.RequireRole(Auth.Role.ADMIN)
+    public PreviewDeploymentLimitPayload setPreviewDeploymentLimit(
+            @Valid @RequestBody PreviewDeploymentLimitPayload body) {
+        return adminService.setPreviewDeploymentLimit(body.maxPreviewDeployments());
+    }
+
+    /** Internal read used by mic-sessions when admitting a new preview. */
+    @GetMapping("/internal/settings/preview-deployments")
+    @Auth.ServiceOnly
+    public PreviewDeploymentLimitPayload internalPreviewDeploymentLimit() {
+        return adminService.previewDeploymentLimit();
     }
 
     // --- application ---
@@ -164,6 +185,18 @@ public class AdminFeature {
             return new SessionLimitPayload(maxSessions);
         }
 
+        public PreviewDeploymentLimitPayload previewDeploymentLimit() {
+            int limit = jdbc.sql("SELECT max_preview_deployments FROM platform_settings WHERE id = 1")
+                    .query((row, index) -> row.getInt("max_preview_deployments")).single();
+            return new PreviewDeploymentLimitPayload(limit);
+        }
+
+        public PreviewDeploymentLimitPayload setPreviewDeploymentLimit(int maxPreviewDeployments) {
+            jdbc.sql("UPDATE platform_settings SET max_preview_deployments = :limit WHERE id = 1")
+                    .param("limit", maxPreviewDeployments).update();
+            return new PreviewDeploymentLimitPayload(maxPreviewDeployments);
+        }
+
         /** A contains-match on name or email; wildcards typed by the administrator match literally. */
         private static String pattern(String query) {
             String needle = query == null ? "" : query.strip().toLowerCase(Locale.ROOT);
@@ -183,6 +216,8 @@ public class AdminFeature {
     }
 
     public record SessionLimitPayload(@Min(1) int maxSessions) { }
+
+    public record PreviewDeploymentLimitPayload(@Min(1) @Max(100) int maxPreviewDeployments) { }
 
     public record PlayersPayload(List<PlayerPayload> players, long total) {
     }

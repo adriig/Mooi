@@ -127,6 +127,13 @@ async def fetch_session_limit(caller: Caller) -> int:
     return min(int(body["maxSessions"]), settings.max_sessions)
 
 
+async def fetch_preview_deployment_limit() -> int:
+    body = await _get(get_http_client(),
+                      f"{get_settings().mooi_api_base_url}/internal/settings/preview-deployments",
+                      _service_headers(None), "Preview settings not found")
+    return int(body["maxPreviewDeployments"])
+
+
 async def delete_merged_branch_by_default(caller: Caller) -> bool:
     body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me",
                       _bearer(caller), "Account not found")

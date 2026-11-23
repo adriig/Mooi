@@ -1,12 +1,14 @@
 import { useSearchParams } from 'react-router-dom';
-import { Bot, Users } from 'lucide-react';
+import { Bot, Settings2, Users } from 'lucide-react';
 import { AdminUsersPanel } from '@/features/admin/components/AdminUsersPanel';
+import { AdminPlatformSettings } from '@/features/admin/components/AdminPlatformSettings';
 import { AdminAgentDefaults } from '@/features/agents/components/AdminAgentDefaults';
 import { Tabs } from '@/shared/components/Tabs';
 
 const USERS_TAB = 'users';
 const AGENTS_TAB = 'agents';
-const TABS = new Set([USERS_TAB, AGENTS_TAB]);
+const SETTINGS_TAB = 'settings';
+const TABS = new Set([USERS_TAB, AGENTS_TAB, SETTINGS_TAB]);
 
 /**
  * The platform console. The active section lives in `?tab=` so a reload lands back on it; each
@@ -22,7 +24,7 @@ export const AdminPage = () => {
       <header>
         <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Platform</p>
         <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">Admin</h1>
-        <p className="mt-1.5 text-sm text-ink-muted">Follow who uses the platform live and set its defaults.</p>
+        <p className="mt-1.5 text-sm text-ink-muted">Follow platform activity and manage its defaults and settings.</p>
       </header>
 
       <Tabs
@@ -33,10 +35,12 @@ export const AdminPage = () => {
         items={[
           { id: USERS_TAB, label: 'Users', icon: Users },
           { id: AGENTS_TAB, label: 'Agents', icon: Bot },
+          { id: SETTINGS_TAB, label: 'Settings', icon: Settings2 },
         ]}
       />
 
-      {tab === AGENTS_TAB ? <AdminAgentDefaults /> : <AdminUsersPanel />}
+      {tab === AGENTS_TAB ? <AdminAgentDefaults />
+        : tab === SETTINGS_TAB ? <AdminPlatformSettings /> : <AdminUsersPanel />}
     </div>
   );
 };

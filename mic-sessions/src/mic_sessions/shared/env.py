@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     deployment_monitor_interval_seconds: int = Field(default=15, gt=0)
     deployment_log_tail_lines: int = Field(default=40, gt=0)
     deployment_log_lines: int = Field(default=2000, gt=0)
+    # Production and backup operation capacity; preview capacity is stored as a platform admin setting.
     max_deployments: int = Field(default=4, gt=0)
     backup_timeout_seconds: int = Field(default=3600, gt=0)
     # Previews are reachable only through Mooi's embedded reverse proxy, under `/preview/<id>/` of the

@@ -8,6 +8,20 @@ import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 // Identity (directory, sign-ins, bans) lives in mic-mooi; live chats live in mic-sessions.
 const playerPath = (playerId: string) => `/admin/players/${encodeURIComponent(playerId)}`;
 
+export const fetchPreviewDeploymentLimit = async (): Promise<number> => {
+  const response = await authenticatedFetch('/admin/settings/preview-deployments');
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load preview settings.'));
+  return ((await response.json()) as { maxPreviewDeployments: number }).maxPreviewDeployments;
+};
+
+export const setPreviewDeploymentLimit = async (maxPreviewDeployments: number): Promise<number> => {
+  const response = await authenticatedFetch('/admin/settings/preview-deployments', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxPreviewDeployments }),
+  });
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not save preview settings.'));
+  return ((await response.json()) as { maxPreviewDeployments: number }).maxPreviewDeployments;
+};
+
 export const fetchPlayerSessionLimit = async (playerId: string): Promise<number> => {
   const response = await authenticatedFetch(`${playerPath(playerId)}/session-limit`);
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the session limit.'));
