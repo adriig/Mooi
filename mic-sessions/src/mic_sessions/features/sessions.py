@@ -389,10 +389,15 @@ class StartProductionRequest(BaseModel):
     expectedSha: str | None = Field(default=None, pattern=_COMMIT_SHA_PATTERN)
 
 
+class ReleaseCommit(BaseModel):
+    sha: str
+    title: str
+
+
 class ReleasePreview(BaseModel):
-    """What a deployment would bring compared with production. `commits` are the SHAs reachable from
-    `targetSha` and not from `baseSha` (newest first); before any deployment, the target's history.
-    Squash merges make every work task's merge one of them."""
+    """What a deployment would bring compared with production. `commits` are the SHAs and titles
+    reachable from `targetSha` and not from `baseSha` (newest first); before any deployment, the
+    target's history. Squash merges make every work task's merge one of them."""
 
     tag: str | None
     create: bool
@@ -400,7 +405,7 @@ class ReleasePreview(BaseModel):
     baseTag: str | None
     baseSha: str | None
     comparison: Literal["initial", "identical", "ahead", "behind", "diverged"]
-    commits: list[str]
+    commits: list[ReleaseCommit]
     # The comparison holds more commits than the preview could list (very long histories).
     truncated: bool = False
 
@@ -512,12 +517,19 @@ async def _github_api_or_missing(caller: Caller, project: mooi.Project, path: st
         raise
 
 
-async def _commit_history(caller: Caller, project: mooi.Project, sha: str) -> tuple[list[str], bool]:
+def _release_commit(commit: dict[str, Any]) -> ReleaseCommit:
+    message = (commit.get("commit") or {}).get("message") or ""
+    lines = message.splitlines()
+    title = lines[0].strip() if lines else ""
+    return ReleaseCommit(sha=commit["sha"], title=title or commit["sha"][:12])
+
+
+async def _commit_history(caller: Caller, project: mooi.Project, sha: str) -> tuple[list[ReleaseCommit], bool]:
     """The newest commits reachable from `sha`, a bounded number of pages."""
-    commits: list[str] = []
+    commits: list[ReleaseCommit] = []
     for page in range(1, _RELEASE_PREVIEW_PAGES + 1):
         data = await _github_api(caller, project.full_name, "GET", f"commits?sha={sha}&per_page=100&page={page}")
-        commits += [item["sha"] for item in data]
+        commits += [_release_commit(item) for item in data]
         if len(data) < 100:
             return commits, False
     return commits, True
@@ -525,13 +537,13 @@ async def _commit_history(caller: Caller, project: mooi.Project, sha: str) -> tu
 
 async def _compare_commits(caller: Caller, project: mooi.Project, preview: ReleasePreview) -> ReleasePreview:
     """Commits the target has and the base lacks (GitHub's three-dot comparison), newest first."""
-    commits: list[str] = []
+    commits: list[ReleaseCommit] = []
     comparison, total = "identical", 0
     for page in range(1, _RELEASE_PREVIEW_PAGES + 1):
         data = await _github_api(caller, project.full_name, "GET",
                                  f"compare/{preview.baseSha}...{preview.targetSha}?per_page=100&page={page}")
         comparison, total = data.get("status") or "diverged", int(data.get("ahead_by") or 0)
-        page_commits = [item["sha"] for item in data.get("commits") or []]
+        page_commits = [_release_commit(item) for item in data.get("commits") or []]
         commits += page_commits
         if len(commits) >= total or len(page_commits) < 100:
             break

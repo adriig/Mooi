@@ -133,30 +133,36 @@ export const ProductionReleaseDialog = ({
   const warningKey = mode === 'create' && workCurrent && !checkingWork && incompleteFeatures.length > 0
     ? JSON.stringify([projectId, candidateTag, incompleteFeatures.map(({ id, title }) => [id, title]).sort()]) : null;
 
-  const included = useMemo(() => {
+  const groupedCommits = useMemo(() => {
     if (!preview || !workItems) return [];
-    const commits = new Set(preview.commits.map((sha) => sha.toLowerCase()));
+    const commitsBySha = new Map(preview.commits.map((commit) => [commit.sha.toLowerCase(), commit]));
     const uniquelyMatchesLegacyReport = (report: string | null): string | null => {
       if (!report) return null;
       const match = shortShaPattern.exec(report.trim());
       if (!match) return null;
       const prefix = match[1].toLowerCase();
-      const matches = [...commits].filter((sha) => sha.startsWith(prefix));
+      const matches = [...commitsBySha.keys()].filter((sha) => sha.startsWith(prefix));
       return matches.length === 1 ? matches[0] : null;
     };
-    return workItems.filter((item) => item.tasks.some((task) => {
-      if (task.mergeSha && shaPattern.test(task.mergeSha)) return commits.has(task.mergeSha.toLowerCase());
-      // Older completed tasks only get included when their exact merge report identifies one and
-      // only one commit in the server's comparison. Never infer from titles, dates, or other text.
-      return !task.mergeSha && task.status === 'done' && commits.has(uniquelyMatchesLegacyReport(task.report) ?? '');
-    }));
+    return [
+      { kind: 'feature' as const, title: 'Feature' },
+      { kind: 'defect' as const, title: 'Defect' },
+      { kind: 'debt' as const, title: 'Debt' },
+    ].map((group) => {
+      const includedShas = new Set<string>();
+      workItems.filter((item) => item.kind === group.kind).forEach((item) => item.tasks.forEach((task) => {
+        let sha: string | null = null;
+        if (task.mergeSha && shaPattern.test(task.mergeSha)) sha = task.mergeSha.toLowerCase();
+        // Older completed tasks only match when their report identifies one and only one commit.
+        else if (!task.mergeSha && task.status === 'done') sha = uniquelyMatchesLegacyReport(task.report);
+        if (sha && commitsBySha.has(sha)) includedShas.add(sha);
+      }));
+      return {
+        ...group,
+        commits: preview.commits.filter((commit) => includedShas.has(commit.sha.toLowerCase())),
+      };
+    });
   }, [preview, workItems]);
-
-  const groupedItems = [
-    { kind: 'feature' as const, title: 'Features' },
-    { kind: 'defect' as const, title: 'Defects' },
-    { kind: 'debt' as const, title: 'Debt' },
-  ].map((group) => ({ ...group, items: included.filter((item) => item.kind === group.kind) }));
 
   const refresh = () => {
     onClearError();
@@ -258,15 +264,19 @@ export const ProductionReleaseDialog = ({
               : 'Only items with merge commits entering this release are listed.'}
         </p>
         <p className="mt-1 font-mono text-[11px] text-ink-subtle">Target commit {preview.targetSha.slice(0, 12)}</p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          {groupedItems.map(({ kind, title, items }) => <section key={kind} aria-label={title}
-            className="min-w-0 rounded-control border border-line bg-surface px-3 py-3">
-            <h4 className="text-xs font-bold text-ink">{title}<span className="ml-1.5 font-medium text-ink-subtle">({items.length})</span></h4>
-            {items.length ? <ul className="mt-2 max-h-36 space-y-1.5 overflow-y-auto text-sm text-ink">
-              {items.map((item) => <li key={item.id} className="break-words">{item.title}</li>)}
-            </ul> : <p className="mt-2 text-xs text-ink-subtle">None</p>}
-          </section>)}
-        </div>
+        <ul aria-label="Work items in this release" className="mt-3 max-h-[min(18rem,35dvh)] divide-y divide-line overflow-y-auto overscroll-contain rounded-control border border-line bg-surface">
+          {groupedCommits.flatMap(({ kind, title, commits }) => commits.map((commit) => (
+            <li key={`${kind}-${commit.sha}`} className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-sm">
+              <span className={cn('shrink-0 font-semibold',
+                kind === 'feature' ? 'text-brand-strong' : kind === 'defect' ? 'text-danger' : 'text-accent')}>
+                {title}
+              </span>
+              <span className="min-w-0 break-words text-ink">{commit.title}</span>
+            </li>
+          )))}
+          {groupedCommits.every(({ commits }) => commits.length === 0)
+            ? <li className="px-3 py-3 text-sm text-ink-subtle">No matching work items.</li> : null}
+        </ul>
       </> : null}
     </section> : null}
 
