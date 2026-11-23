@@ -26,8 +26,8 @@ const COPY: Record<string, AgentProviderCopy> = {
   opencode: {
     signIn: {
       action: 'Connect OpenCode',
-      instructions: 'OpenCode connects with an API key.',
-      codeHint: 'Create a personal or service-account key in OpenCode Console.',
+      instructions: 'Sign in with your OpenCode account, OpenCode Go included, using the code OpenCode shows.',
+      codeHint: 'Models follow your account: with OpenCode Go you get the models your subscription enables. Or connect with an API key from OpenCode Console.',
     },
     pasted: {
       label: 'OpenCode API key',

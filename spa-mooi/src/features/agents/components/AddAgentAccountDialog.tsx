@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, KeyRound } from 'lucide-react';
 import { AuthorizationCodePairing } from '@/features/agents/components/AuthorizationCodePairing';
 import { CodexPairing } from '@/features/agents/components/CodexPairing';
+import { OpenCodePairing } from '@/features/agents/components/OpenCodePairing';
 import { AntigravityPairing } from '@/features/agents/components/AntigravityPairing';
 import { agentProviderCopy } from '@/features/agents/lib/agentProviderCopy';
 import type { AgentProvider } from '@/features/agents/types/AgentProvider';
@@ -37,12 +38,16 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
   const [providerId, setProviderId] = useState('');
   const [token, setToken] = useState('');
   const [pairing, setPairing] = useState(false);
+  // OpenCode offers both: an API key (the original flow) or an OpenCode account sign-in.
+  const [accessMode, setAccessMode] = useState<'api_key' | 'account'>('api_key');
   const provider = providers.find((entry) => entry.id === providerId);
   const copy = provider ? agentProviderCopy(provider.id, provider.label) : null;
   const validTitle = title.trim().length > 0;
   const isCodex = provider?.modes.includes('device_oauth');
   const isAntigravity = provider?.modes.includes('agent_oauth');
-  const signsIn = !!provider && !pastes(provider);
+  const choosesMode = !!provider && provider.modes.includes('account') && provider.modes.includes('api_key');
+  const isOpenCodeAccount = choosesMode && accessMode === 'account';
+  const signsIn = !!provider && (!pastes(provider) || isOpenCodeAccount);
 
   const connect = () => {
     if (!provider || !validTitle) return;
@@ -75,12 +80,25 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
         <span className="text-xs font-semibold text-ink-muted">Provider <span className="text-danger">*</span></span>
         <div className="mt-2 grid gap-2 sm:grid-cols-3">
           {providers.map((entry) => <button key={entry.id} type="button" disabled={pairing}
-            onClick={() => { setProviderId(entry.id); setToken(''); }}
+            onClick={() => { setProviderId(entry.id); setToken(''); setAccessMode('api_key'); }}
             aria-pressed={entry.id === providerId} className={optionClass(entry.id === providerId)}>
             {entry.label}{entry.id === providerId && <Check className="size-4 text-brand" />}
           </button>)}
         </div>
       </div>
+      {provider && copy && choosesMode && <div>
+        <span className="text-xs font-semibold text-ink-muted">Connect with</span>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Connection type">
+          {([['api_key', 'API key'], ['account', 'OpenCode account']] as const).map(([id, text]) => <button key={id}
+            type="button" role="radio" aria-checked={accessMode === id} disabled={pairing}
+            onClick={() => { setAccessMode(id); setToken(''); }} className={optionClass(accessMode === id)}>
+            {text}{accessMode === id && <Check className="size-4 text-brand" />}
+          </button>)}
+        </div>
+        <p className="mt-2 text-xs text-ink-subtle">{accessMode === 'account'
+          ? 'Sign in with your OpenCode account, OpenCode Go included. You will see the models your account or subscription enables.'
+          : 'Paste an API key from OpenCode Console. Models are those the key can use.'}</p>
+      </div>}
       {provider && copy && !signsIn && <label className="flex flex-col gap-2">
         <span className="text-xs font-semibold text-ink-muted">{copy.pasted.label}</span>
         <span className="flex h-12 items-center gap-2 rounded-control border border-line bg-surface-2 px-3 focus-within:border-brand">
@@ -96,7 +114,8 @@ export const AddAgentAccountDialog = ({ providers, busy, actionError, onClose, o
       {pairing && isCodex && <CodexPairing name={title.trim()} onConnected={() => { onConnected(); onClose(); }} />}
       {pairing && provider && copy && isAntigravity && <AntigravityPairing name={title.trim()}
         copy={copy.signIn} onConnected={() => { onConnected(); onClose(); }} />}
-      {pairing && provider && copy && !isCodex && !isAntigravity && <AuthorizationCodePairing provider={provider.id} name={title.trim()}
+      {pairing && isOpenCodeAccount && <OpenCodePairing name={title.trim()} onConnected={() => { onConnected(); onClose(); }} />}
+      {pairing && provider && copy && !isCodex && !isAntigravity && !isOpenCodeAccount && <AuthorizationCodePairing provider={provider.id} name={title.trim()}
         copy={copy.signIn} onConnected={() => { onConnected(); onClose(); }} />}
       {actionError && <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-4 py-2.5 text-sm text-danger">{actionError}</p>}
     </div>

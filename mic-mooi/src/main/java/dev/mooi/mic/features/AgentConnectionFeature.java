@@ -48,7 +48,7 @@ import lombok.Setter;
  * Feature: agent-provider credentials linked to a player.
  *
  * <p>A connection hands an agent-provider credential (a Claude OAuth access token, a Codex
- * {@code auth.json} or an Antigravity credential bundle) to {@code mic-sessions} on request; the browser
+ * {@code auth.json}, an Antigravity credential bundle, an OpenCode API key or an OpenCode account sign-in) to {@code mic-sessions} on request; the browser
  * never holds it. Claude is linked by the Claude Code sign-in (OAuth2 + PKCE, the code pasted back from
  * Anthropic's page), whose short-lived token this feature renews: it is the only holder of the refresh
  * token, so concurrent sessions of one account never race to rotate it. Tokens pasted from {@code claude
@@ -165,6 +165,15 @@ public class AgentConnectionFeature {
     public AgentConnectionPayload connectAntigravity(@Valid @RequestBody AgentOwnedConnectRequest request,
                                                      Auth.Principal principal) {
         return agentConnectionService.connectAgentOwned(principal.player().id(), "antigravity", request);
+    }
+
+    /** The sign-in {@code opencode auth login} produced in a temporary profile of {@code mic-sessions}, for the caller. */
+    @PostMapping("/me/agents/opencode/account-connection")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public AgentConnectionPayload connectOpenCodeAccount(@Valid @RequestBody AgentOwnedConnectRequest request,
+                                                         Auth.Principal principal) {
+        return agentConnectionService.connectAgentOwned(principal.player().id(), "opencode", request);
     }
 
     @PutMapping("/me/agents/{provider}/credential")
@@ -420,6 +429,9 @@ public class AgentConnectionFeature {
         }
 
         private static boolean validAgentOwned(Agents.Mode mode, String token) {
+            if (mode == Agents.Mode.ACCOUNT) {
+                return Agents.OpenCodeAccount.isValid(token);
+            }
             return mode == Agents.Mode.AGENT_OAUTH ? Agents.AgentOAuthBundle.isValid(token)
                     : token != null && !token.isBlank() && token.length() <= MAX_DEVICE_OAUTH_LENGTH;
         }

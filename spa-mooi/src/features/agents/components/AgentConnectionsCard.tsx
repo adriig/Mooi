@@ -3,6 +3,7 @@ import { Bot, LogIn, Pencil, Plus, RefreshCw, Star, TriangleAlert, Unlink } from
 import { AddAgentAccountDialog } from '@/features/agents/components/AddAgentAccountDialog';
 import { AgentAccountUsage } from '@/features/agents/components/AgentAccountUsage';
 import { AuthorizationCodePairing } from '@/features/agents/components/AuthorizationCodePairing';
+import { OpenCodePairing } from '@/features/agents/components/OpenCodePairing';
 import { CodexPairing } from '@/features/agents/components/CodexPairing';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { agentProviderCopy } from '@/features/agents/lib/agentProviderCopy';
@@ -25,6 +26,8 @@ const usesLegacyToken = (connection: AgentConnection, providers: AgentProvider[]
  * or a deprecated setup token.
  */
 const canSignInAgain = (connection: AgentConnection, providers: AgentProvider[]) => {
+  // An OpenCode account can always be signed in again; the same connection keeps its title and default.
+  if (connection.mode === 'account') return true;
   const provider = providers.find((entry) => entry.id === connection.provider);
   const signsIn = Boolean(provider && (provider.oauthEnabled || provider.modes.includes('device_oauth')));
   return signsIn && (connection.stale || usesLegacyToken(connection, providers));
@@ -71,7 +74,7 @@ export const AgentConnectionsCard = () => {
     {status === 'ready' && connections.length === 0 && <div className="mt-5 rounded-xl border border-dashed border-line px-5 py-8 text-center">
       <span className="mx-auto flex size-10 items-center justify-center rounded-xl bg-surface-2 text-ink-muted"><Bot className="size-5" /></span>
       <p className="mt-3 text-sm font-semibold text-ink">No agent accounts yet</p>
-      <p className="mt-1 text-xs text-ink-muted">Add a Claude, Codex or Antigravity account to start a session.</p>
+      <p className="mt-1 text-xs text-ink-muted">Add a Claude, Codex, Antigravity or OpenCode account to start a session.</p>
     </div>}
 
     {connections.length > 0 && <ul className="mt-5 divide-y divide-line rounded-xl border border-line px-4 sm:px-5">
@@ -129,6 +132,9 @@ export const AgentConnectionsCard = () => {
       description="The account is repaired in place: its title and default selection are kept.">
       {signingIn && (signingIn.mode === 'device_oauth'
         ? <CodexPairing name={accountTitle(signingIn)} connectionId={signingIn.id}
+          onConnected={() => { setSigningIn(null); reload(); }} />
+        : signingIn.mode === 'account'
+        ? <OpenCodePairing name={accountTitle(signingIn)} connectionId={signingIn.id}
           onConnected={() => { setSigningIn(null); reload(); }} />
         : <AuthorizationCodePairing provider={signingIn.provider} name={signingIn.name ?? ''}
           copy={agentProviderCopy(signingIn.provider, signingIn.label).signIn} connectionId={signingIn.id}

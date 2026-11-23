@@ -105,7 +105,9 @@ public class Agents {
         SETUP_TOKEN("setup_token"),
         DEVICE_OAUTH("device_oauth"),
         AGENT_OAUTH("agent_oauth"),
-        API_KEY("api_key");
+        API_KEY("api_key"),
+        /** An OpenCode account (Go included) signed in by the OpenCode CLI's device flow: its {@code auth export} JSON. */
+        ACCOUNT("account");
 
         private final String wire;
 
@@ -122,7 +124,7 @@ public class Agents {
          * stores the copy the session writes back.
          */
         public boolean agentOwned() {
-            return this == DEVICE_OAUTH || this == AGENT_OAUTH;
+            return this == DEVICE_OAUTH || this == AGENT_OAUTH || this == ACCOUNT;
         }
 
         public static Mode fromWire(String value) {
@@ -209,6 +211,33 @@ public class Agents {
 
         private static boolean isBase64(String value) {
             return value.length() % 4 == 0 && BASE64.matcher(value).matches();
+        }
+    }
+
+    /**
+     * The OpenCode account credential ({@link Mode#ACCOUNT}): what {@code opencode auth export opencode} prints
+     * after the CLI's device sign-in, a non-empty JSON array of objects. Stored exactly as received and never
+     * interpreted; only its shape is checked.
+     */
+    public static final class OpenCodeAccount {
+
+        public static final int MAX_LENGTH = 64 * 1024;
+
+        private OpenCodeAccount() {
+        }
+
+        public static boolean isValid(String token) {
+            if (token == null || token.isEmpty() || token.length() > MAX_LENGTH) {
+                return false;
+            }
+            JsonNode node;
+            try {
+                node = JsonMapper.shared().readTree(token);
+            } catch (JacksonException exception) {
+                return false;
+            }
+            return node != null && node.isArray() && !node.isEmpty()
+                    && node.valueStream().allMatch(JsonNode::isObject);
         }
     }
 
@@ -342,7 +371,7 @@ public class Agents {
                     null, null, null);
             Provider antigravity = new Provider("antigravity", "Antigravity", List.of(Mode.AGENT_OAUTH), false, null,
                     null, null, null, null, null);
-            Provider opencode = new Provider("opencode", "OpenCode", List.of(Mode.API_KEY), false, null, null, null,
+            Provider opencode = new Provider("opencode", "OpenCode", List.of(Mode.ACCOUNT, Mode.API_KEY), false, null, null, null,
                     null, null, null);
             this.providers = Map.of(claude.id(), claude, codex.id(), codex, antigravity.id(), antigravity,
                     opencode.id(), opencode);

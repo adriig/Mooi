@@ -15,12 +15,12 @@ from fastapi import APIRouter, Depends, Query
 from fastapi import Path as PathParameter
 from pydantic import BaseModel, Field
 
-from mic_sessions.shared import antigravity
+from mic_sessions.shared import antigravity, opencode
 from mic_sessions.shared.agents import PROVIDERS
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.codex import Client
 from mic_sessions.shared.env import get_settings
-from mic_sessions.shared.mooi import fetch_agent_credential, link_antigravity, link_codex, renewed
+from mic_sessions.shared.mooi import fetch_agent_credential, link_antigravity, link_codex, link_opencode, renewed
 from mic_sessions.shared.web import ApiException
 
 LOG = logging.getLogger("sessions")
@@ -297,6 +297,124 @@ async def cancel_google(key: str, caller: Annotated[Caller, Depends(current_call
     await _discard_google(key)
 
 
+# --- OpenCode account: the CLI's own device sign-in; the player authorizes on opencode.ai ----------------
+
+_OPENCODE_ACCOUNT_LABEL = "OpenCode account"
+
+
+@dataclass
+class OpenCodeAttempt:
+    owner: str
+    name: str
+    connection_id: str | None
+    login: opencode.Login
+    task: asyncio.Task | None = None
+    # pending -> authorized -> saving -> connected, or failed / expired. The credential waits only in memory.
+    state: str = "pending"
+    token: str | None = field(default=None, repr=False)
+    connection: dict | None = None
+
+
+_opencode_attempts: dict[str, OpenCodeAttempt] = {}
+
+
+async def _opencode_wait(attempt: OpenCodeAttempt) -> None:
+    try:
+        attempt.token = await attempt.login.wait()
+        attempt.state = "authorized"
+    except asyncio.CancelledError:
+        raise
+    except opencode.OpenCodeError as error:
+        LOG.info("OpenCode sign-in failed: %s", error.cause)
+        attempt.state = "expired" if "expired" in error.cause else "failed"
+    except Exception:
+        LOG.info("OpenCode sign-in failed", exc_info=True)
+        attempt.state = "failed"
+    finally:
+        await attempt.login.close()
+
+
+async def _drop_opencode(key: str) -> None:
+    attempt = _opencode_attempts.pop(key, None)
+    if attempt is None:
+        return
+    if attempt.task and not attempt.task.done():
+        attempt.task.cancel()
+        await asyncio.gather(attempt.task, return_exceptions=True)
+    attempt.token = None
+    await attempt.login.close()
+
+
+@router.post("/agents/opencode/authorization")
+async def start_opencode(caller: Annotated[Caller, Depends(current_caller)],
+                         name: Annotated[str, Query(min_length=1, max_length=100)],
+                         connection_id: Annotated[str | None, Query(alias="connectionId", max_length=64)] = None):
+    """Starts the OpenCode CLI's device sign-in in a private temporary profile and answers the URL and code
+    the player authorizes on opencode.ai; the SPA then polls `…/{attemptId}`. One attempt per player. With
+    `connectionId` the sign-in repairs that account instead of adding one."""
+    name = name.strip()
+    if not name:
+        raise ApiException.bad_request("An account title is required")
+    owner = str(caller.player_id)
+    for key, existing in list(_opencode_attempts.items()):
+        if existing.owner == owner or existing.state in ("failed", "expired", "connected"):
+            await _drop_opencode(key)
+    if len(_opencode_attempts) >= _ATTEMPT_LIMIT:
+        raise ApiException(429, "Too many sign-in attempts. Try again later.")
+    key = uuid4().hex
+    attempt = OpenCodeAttempt(owner, name, connection_id, opencode.Login(get_settings().agent_opencode_cli))
+    _opencode_attempts[key] = attempt
+    try:
+        url, code = await attempt.login.start()
+    except opencode.OpenCodeError as error:
+        LOG.info("OpenCode sign-in could not start: %s", error.cause)
+        await _drop_opencode(key)
+        raise ApiException(502, "Could not start the OpenCode sign-in. Try again.") from None
+    except BaseException:
+        await _drop_opencode(key)
+        raise
+    attempt.task = asyncio.create_task(_opencode_wait(attempt))
+    return {"attemptId": key, "verificationUrl": url, "userCode": code, "expiresIn": opencode.LOGIN_SECONDS}
+
+
+def _owned_opencode(key: str, caller: Caller) -> OpenCodeAttempt:
+    attempt = _opencode_attempts.get(key)
+    if attempt is None or attempt.owner != str(caller.player_id):
+        raise ApiException.not_found("Sign-in attempt not found")
+    return attempt
+
+
+@router.get("/agents/opencode/authorization/{key}")
+async def status_opencode(key: str, caller: Annotated[Caller, Depends(current_caller)]):
+    """The attempt's state. Once the player authorized, this authenticated poll links the sign-in to
+    `mic-mooi` as the caller and answers the connection (no secret in it)."""
+    attempt = _owned_opencode(key, caller)
+    if attempt.state == "authorized" and attempt.token:
+        # Claim before awaiting so overlapping polls cannot commit twice.
+        attempt.state = "saving"
+        token, attempt.token = attempt.token, None
+        try:
+            attempt.connection = await link_opencode(await renewed(caller), token, _OPENCODE_ACCOUNT_LABEL,
+                                                     attempt.name, attempt.connection_id)
+            attempt.state = "connected"
+        except Exception:
+            LOG.info("OpenCode sign-in could not be saved", exc_info=True)
+            attempt.state = "failed"
+    body: dict = {"status": attempt.state}
+    if attempt.state == "connected":
+        body["connection"] = attempt.connection
+        await _drop_opencode(key)
+    elif attempt.state in ("failed", "expired"):
+        await _drop_opencode(key)
+    return body
+
+
+@router.delete("/agents/opencode/authorization/{key}", status_code=204)
+async def cancel_opencode(key: str, caller: Annotated[Caller, Depends(current_caller)]):
+    _owned_opencode(key, caller)
+    await _drop_opencode(key)
+
+
 # --- Plan limits: what an account has left, read for the account page without a session -------------
 
 # One read per account at a time: concurrent views wait for it and then share its cached result.
@@ -336,5 +454,7 @@ async def close_all():
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     _attempts.clear()
+    for key in list(_opencode_attempts):
+        await _drop_opencode(key)
     google = [taken for key in list(_google_attempts) if (taken := _take_google(key))]
     await asyncio.gather(*(attempt.login.close() for attempt in google), return_exceptions=True)

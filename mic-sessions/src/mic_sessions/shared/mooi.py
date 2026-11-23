@@ -487,7 +487,7 @@ async def fetch_agent_credential(caller: Caller, connection_id: str) -> Credenti
         session_effort=body.get("sessionEffort"),
         session_adapter=body.get("sessionAdapter"),
         # CLI-owned sign-ins the session renews itself and writes back (Codex `auth.json`, the agy bundle).
-        save=save if body["provider"] in ("codex", "antigravity") else None,
+        save=save if body["provider"] in ("codex", "antigravity") or body["mode"] == "account" else None,
         expire=expire if body["provider"] == "codex" else None,
         expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
     )
@@ -502,6 +502,22 @@ async def link_codex(caller: Caller, token: str, account_label: str | None, name
         json={"token": token, "accountLabel": account_label, "name": name, "connectionId": connection_id},
     )
     _raise_for_status(response, "Could not save the Codex connection")
+
+
+async def link_opencode(caller: Caller, token: str, account_label: str | None, name: str,
+                        connection_id: str | None = None) -> dict:
+    """Links an OpenCode account sign-in (the CLI's own `auth export` JSON) as an `account` connection, or
+    signs `connection_id` in again, and answers `mic-mooi`'s connection payload (no secret in it)."""
+    try:
+        response = await get_http_client().post(
+            f"{get_settings().mooi_api_base_url}/me/agents/opencode/account-connection",
+            headers=_service_headers(caller),
+            json={"token": token, "accountLabel": account_label, "name": name, "connectionId": connection_id},
+        )
+    except httpx.HTTPError:
+        raise ApiException.bad_gateway() from None
+    _raise_for_status(response, "Could not save the OpenCode connection")
+    return response.json()
 
 
 async def link_antigravity(caller: Caller, token: str, account_label: str | None, name: str) -> dict:

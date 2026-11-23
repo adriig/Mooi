@@ -3812,7 +3812,7 @@ def _opencode_failure(error: BaseException) -> str:
         return "OpenCode account spend limit is exhausted. Change it in OpenCode Console and try again."
     if ("api key" in detail or "401" in detail or "403" in detail or "credential" in detail
             or "authentication required" in detail or "provider authentication" in detail):
-        return "OpenCode rejected the API key. Replace it in your agent accounts."
+        return "OpenCode rejected the account credentials. Connect the account again in your agent accounts."
     if "limit" in detail or "quota" in detail or "429" in detail:
         return "OpenCode reports that this account reached its usage limit. Try again later or switch model."
     return "OpenCode could not complete the turn. Check the account and try again."
@@ -3833,7 +3833,7 @@ def _opencode_tool(update: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]
 
 
 class OpenCodeAcpAgentRuntime:
-    """Official OpenCode CLI through ACP, isolated per Mooi session and API-key account."""
+    """Official OpenCode CLI through ACP, isolated per Mooi session, for API-key and OpenCode (Go) accounts."""
 
     capabilities: ClassVar[AgentCapabilities] = OPENCODE_CAPABILITIES
     _catalog: ClassVar[ContextVar[dict[str, Any] | None]] = ContextVar("opencode_catalog", default=None)
@@ -3912,7 +3912,12 @@ class OpenCodeAcpAgentRuntime:
     async def start(self) -> None:
         await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
         self._home = Path(tempfile.mkdtemp(prefix="opencode-", dir=self._workspace.parent))
-        await asyncio.to_thread(opencode.prepare_home, self._home)
+        await asyncio.to_thread(opencode.prepare_home, self._home, self._credential.mode)
+        try:
+            await opencode.install_account(self._home, self._binary(), self._credential)
+        except opencode.OpenCodeError as error:
+            LOG.warning("Could not install the OpenCode account sign-in: %s", error.cause)
+            raise ApiException(502, _opencode_failure(error)) from None
         await self._connect()
         await self._emit("session.usage", {"context": None})
 
@@ -4127,8 +4132,21 @@ class OpenCodeAcpAgentRuntime:
             await self._acp.close()
             self._acp = None
         if self._home is not None:
+            await self._write_back_account()
             await asyncio.to_thread(shutil.rmtree, self._home, True)
             self._home = None
+
+    async def _write_back_account(self) -> None:
+        """An account sign-in the CLI renewed in the private profile is saved before the profile is removed."""
+        if self._credential.mode != opencode.ACCOUNT_MODE or self._home is None or self._credential.save is None:
+            return
+        token = await opencode.export_account(self._home, self._binary(), self._credential)
+        if token is None or token == self._credential.token:
+            return
+        try:
+            await self._credential.save(token)
+        except Exception:
+            LOG.warning("The renewed OpenCode account sign-in could not be saved", exc_info=True)
 
     def trace_sources(self) -> Sequence[TraceSource]:
         return [TraceSource("opencode", opencode.trace_path(self._home))] if self._home is not None else []
@@ -4248,7 +4266,7 @@ PROVIDERS: dict[str, ProviderDescriptor] = {
     "antigravity": ProviderDescriptor("antigravity", "Antigravity", (
         AdapterDescriptor("cli", "Antigravity CLI", AntigravityCliAgentRuntime),
     ), usage=_antigravity_account_usage),
-    # Billed per use through an OpenCode Console API key: no plan limits to read.
+    # An OpenCode Console API key or account (Go included): no plan limits to read.
     "opencode": ProviderDescriptor("opencode", "OpenCode", (
         AdapterDescriptor("acp", "OpenCode CLI", OpenCodeAcpAgentRuntime),
     )),
