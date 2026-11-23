@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-/** The `lg` breakpoint (64rem) the trace layout switches on: inspector pane beside the timeline. */
+/** The `lg` breakpoint (64rem) where panes sit side by side: trace inspector, docked preview. */
 const WIDE_QUERY = '(min-width: 64rem)';
 
 /** Whether the viewport is at least `lg` wide, kept current as the window resizes or rotates. */

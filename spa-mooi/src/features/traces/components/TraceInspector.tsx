@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, CircleCheck, CircleDashed, CircleSlash, CircleX
 import { TraceDetailSection } from '@/features/traces/components/TraceDetailSection';
 import { useSwipeGestures, type SwipeAxis } from '@/features/traces/hooks/useSwipeGestures';
 import { useTraceSpanDetail } from '@/features/traces/hooks/useTraceSpanDetail';
-import { useWideLayout } from '@/features/traces/hooks/useWideLayout';
+import { useWideLayout } from '@/shared/hooks/useWideLayout';
 import { formatSpanDuration } from '@/features/traces/lib/formatSpanDuration';
 import { formatSpanOffset } from '@/features/traces/lib/formatSpanOffset';
 import { formatTokens } from '@/features/traces/lib/formatTokens';

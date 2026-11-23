@@ -166,7 +166,8 @@ Each project plans and builds its work as a software factory: agents design it, 
   no performance loss), on an isolated network.
 - Many instances at once (one per feature/session): free ports and volumes are detected to avoid overlap.
 - Preview embedded in Mooi with mobile and desktop views. Web applications only; other project types can
-  still be iterated without previews.
+  still be iterated without previews. On wide screens the preview can be docked on the right, beside the
+  session's other tabs, in a resizable split remembered on the device.
 - Exposed only through Mooi's secure reverse proxy; no other access path.
 - **First deploy**: a dedicated setup prompt goes to the chat to prepare the project. Resulting setup must be
   compatible with Mooi dev sessions, local runs without Mooi and production deployments. Deploy runs
