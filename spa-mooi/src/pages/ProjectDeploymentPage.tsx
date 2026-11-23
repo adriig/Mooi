@@ -79,6 +79,7 @@ export const ProjectDeploymentPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [agentIntent, setAgentIntent] = useState<ProductionAgentIntent | null>(null);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  const [releaseInitialTag, setReleaseInitialTag] = useState<string | null>(null);
   const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [detail, setDetail] = useState<ProductionDeployment | null>(null);
@@ -131,7 +132,17 @@ export const ProjectDeploymentPage = () => {
   const requestDeploy = () => {
     setActionError(null);
     if (missing > 0) setEnvironmentOpen(true);
-    else setReleaseOpen(true);
+    else {
+      setReleaseInitialTag(null);
+      setReleaseOpen(true);
+    }
+  };
+
+  const requestRedeploy = (tag: string) => {
+    setActionError(null);
+    setReleaseInitialTag(tag);
+    setDetail(null);
+    setReleaseOpen(true);
   };
 
   const deploy = async (choice: ReleaseChoice) => {
@@ -170,7 +181,7 @@ export const ProjectDeploymentPage = () => {
           latest={latest} health={health} history={history} deploying={deploying}
           onSetup={() => openAgent('setup')} onDeploy={requestDeploy} onOpenChat={() => openTab('chat')}
           onOpenConsole={() => openTab('console')} onFix={fixFailure} onEnvironment={() => setEnvironmentOpen(true)}
-          onOpenDeployment={setDetail} onRedeploy={(deployment) => void deploy({ tag: deployment.releaseTag, create: false })} /> : null}
+          onOpenDeployment={setDetail} onRedeploy={(deployment) => requestRedeploy(deployment.releaseTag)} /> : null}
 
         {tab === 'environment' ? <div className="h-full overflow-y-auto">
           <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-8 lg:px-10 lg:py-8">
@@ -217,8 +228,9 @@ export const ProjectDeploymentPage = () => {
           files.reload();
           openTab('chat');
         })} /> : null}
-      {releaseOpen ? <ProductionReleaseDialog key={project.id} projectId={project.id} defaultBranch={project.defaultBranch} busy={deploying}
-        error={actionError} onClose={() => { setReleaseOpen(false); setActionError(null); }} onSelect={(choice) => void deploy(choice)} /> : null}
+      {releaseOpen ? <ProductionReleaseDialog key={project.id} projectId={project.id} defaultBranch={project.defaultBranch}
+        initialReleaseTag={releaseInitialTag} busy={deploying} error={actionError} onClearError={() => setActionError(null)}
+        onClose={() => { setReleaseOpen(false); setActionError(null); }} onSelect={(choice) => void deploy(choice)} /> : null}
       {environmentOpen && overview ? <PlatformEnvironmentDialog prefix="MOOI_PRODUCTION_" variables={overview.environment}
         description="Stored encrypted in the platform and passed to deploy.sh and status.sh together with the development values."
         save={(values) => updateProductionEnvironment(project.id, values)}
@@ -236,7 +248,7 @@ export const ProjectDeploymentPage = () => {
         }} /> : null}
       {detail ? <ProductionDeploymentDetailDialog key={detail.operationId} deployment={detail} projectName={project.name}
         onClose={() => setDetail(null)}
-        onRedeploy={configured && stage !== 'deploying' ? () => void deploy({ tag: detail.releaseTag, create: false }) : undefined}
+        onRedeploy={configured && stage !== 'deploying' ? () => requestRedeploy(detail.releaseTag) : undefined}
         onFix={() => { setDetail(null); fixFailure(); }}
         onDelete={async () => {
           await deleteProductionDeployment(project.id, detail.operationId);

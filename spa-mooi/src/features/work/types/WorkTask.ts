@@ -23,6 +23,8 @@ export interface WorkTask {
   sessionId: string | null;
   attempts: number;
   report: string | null;
+  /** The commit that merged this task into the default branch, when available. */
+  mergeSha?: string | null;
   dependsOn: string[];
   startedAt: string | null;
   finishedAt: string | null;

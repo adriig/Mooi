@@ -8,6 +8,7 @@ import type { ProductionHealth } from '@/features/production/types/ProductionHea
 import type { ProductionOverview } from '@/features/production/types/ProductionOverview';
 import type { ProductionSnapshot } from '@/features/production/types/ProductionSnapshot';
 import type { ReleaseChoice } from '@/features/production/types/ReleaseChoice';
+import type { ReleasePreview } from '@/features/production/types/ReleasePreview';
 import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 /** Project-scoped production endpoints of mic-sessions: none of them needs a chat. */
@@ -52,6 +53,13 @@ export const fetchProductionFileDiff = async (projectId: string, path: string): 
 export const fetchProductionReleases = async (projectId: string): Promise<GithubRelease[]> =>
   (await read<{ releases: GithubRelease[] }>(await sessionsFetch(`${productionPath(projectId)}/releases`),
     'Could not load GitHub releases.')).releases;
+
+export const fetchProductionReleasePreview = async (projectId: string, choice: Pick<ReleaseChoice, 'tag' | 'create'>): Promise<ReleasePreview> => {
+  const query = new URLSearchParams({ create: String(choice.create) });
+  if (!choice.create) query.set('tag', choice.tag);
+  return read(await sessionsFetch(`${productionPath(projectId)}/releases/preview?${query}`),
+    'Could not compare this release with production.');
+};
 
 export const startProductionDeployment = async (projectId: string, choice: ReleaseChoice): Promise<ProductionSnapshot> =>
   read(await sessionsFetch(`${productionPath(projectId)}/deployments`, {
