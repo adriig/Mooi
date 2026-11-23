@@ -1,4 +1,6 @@
 import type { SessionDisplayStatus } from '@/features/sessions/types/SessionDisplayStatus';
+import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
+import type { WorkTaskStatus } from '@/features/work/types/WorkTaskStatus';
 import type { Tone } from '@/shared/types/Tone';
 
 const tones: Record<SessionDisplayStatus, Tone> = {
@@ -9,6 +11,7 @@ const tones: Record<SessionDisplayStatus, Tone> = {
   compacting: 'info',
   deploying: 'accent',
   deployed: 'accent',
+  blocked: 'danger',
   failed: 'danger',
   closed: 'neutral',
 };
@@ -21,6 +24,7 @@ const labels: Record<SessionDisplayStatus, string> = {
   compacting: 'Compacting',
   deploying: 'Deploying',
   deployed: 'Deployed',
+  blocked: 'Blocked',
   failed: 'Failed',
   closed: 'Closed',
 };
@@ -33,6 +37,7 @@ const pulsing: Record<SessionDisplayStatus, boolean> = {
   compacting: true,
   deploying: true,
   deployed: false,
+  blocked: false,
   failed: false,
   closed: false,
 };
@@ -42,3 +47,7 @@ export const sessionStatusTone = (status: SessionDisplayStatus): Tone => tones[s
 export const sessionStatusLabel = (status: SessionDisplayStatus): string => labels[status];
 
 export const sessionStatusPulses = (status: SessionDisplayStatus): boolean => pulsing[status];
+
+export const recentSessionDisplayStatus = (status: SessionStatus, taskStatus?: WorkTaskStatus): SessionDisplayStatus => (
+  status === 'waiting' || taskStatus === 'attention' || taskStatus === 'review' ? 'blocked' : status
+);

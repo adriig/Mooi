@@ -1,9 +1,9 @@
 import { Link, useLocation } from 'react-router-dom';
-import { CircleCheck } from 'lucide-react';
+import { CircleAlert } from 'lucide-react';
 import { sessionChatLabel } from '@/features/sessions/lib/sessionChatLabel';
 import { sessionChatPath } from '@/features/sessions/lib/sessionChatPath';
 import { sessionKindIcon } from '@/features/sessions/lib/sessionKindIcon';
-import { sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/features/sessions/lib/sessionStatusTone';
+import { recentSessionDisplayStatus, sessionStatusLabel, sessionStatusPulses, sessionStatusTone } from '@/features/sessions/lib/sessionStatusTone';
 import type { Session } from '@/features/sessions/types/Session';
 import { TASK_CATEGORIES, taskStyle } from '@/features/work/lib/taskCategories';
 import type { WorkTask } from '@/features/work/types/WorkTask';
@@ -26,8 +26,9 @@ export const AppRecentSession = ({ session, task, onNavigate }: AppRecentSession
   const Icon = session.kind === 'session' ? taskCategory.icon : sessionKindIcon(session.kind);
   const iconLabel = session.kind === 'session' ? taskCategory.label : session.kind;
   const label = sessionChatLabel(session);
-  const blocked = session.status === 'waiting';
-  const status = blocked ? 'Blocked' : sessionStatusLabel(session.status);
+  const displayStatus = recentSessionDisplayStatus(session.status, task?.status);
+  const blocked = displayStatus === 'blocked';
+  const status = sessionStatusLabel(displayStatus);
 
   return (
     <li>
@@ -51,8 +52,8 @@ export const AppRecentSession = ({ session, task, onNavigate }: AppRecentSession
           <span className={cn('mt-0.5 flex items-center gap-1.5 text-[11px] font-medium',
             blocked ? 'text-danger' : 'text-ink-subtle')}>
             {blocked
-              ? <CircleCheck className="size-3.5 shrink-0" aria-hidden />
-              : <StatusDot tone={sessionStatusTone(session.status)} pulse={sessionStatusPulses(session.status)} />}
+              ? <CircleAlert className="size-3.5 shrink-0" aria-hidden />
+              : <StatusDot tone={sessionStatusTone(displayStatus)} pulse={sessionStatusPulses(displayStatus)} />}
             <span className="truncate">{status}</span>
           </span>
         </span>
