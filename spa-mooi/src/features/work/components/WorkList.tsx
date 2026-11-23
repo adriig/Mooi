@@ -75,7 +75,7 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <SegmentedControl value={kind} onChange={(id) => setKind(id as WorkKindFilter)} className="w-full lg:w-auto"
           items={[{ id: 'all', label: 'All' }, ...(['feature', 'defect', 'debt'] as const).map((id) => (
-            { id, label: WORK_KINDS[id].plural, icon: id === 'debt' ? undefined : WORK_KINDS[id].icon }))]} />
+            { id, label: WORK_KINDS[id].plural, icon: WORK_KINDS[id].icon }))]} />
         <div className="flex items-center gap-2">
           <WorkFilters value={filter} counts={counts} onChange={setFilter} />
           <WorkSettingsButton projectId={projectId} />
