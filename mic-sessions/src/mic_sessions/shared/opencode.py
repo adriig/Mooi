@@ -47,6 +47,19 @@ class OpenCodeError(RuntimeError):
         self.code = code
 
 
+def _rpc_error_detail(error: Mapping[str, Any]) -> str:
+    """Keep structured ACP error context so callers can classify provider failures."""
+    message = str(error.get("message") or "").strip()
+    data = error.get("data")
+    if data is None:
+        return message
+    try:
+        context = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        context = str(data)
+    return f"{message}: {context}" if message else context
+
+
 def executable(configured: str) -> str:
     path = shutil.which(configured)
     if path is None:
@@ -274,7 +287,7 @@ class Acp:
             error = frame.get("error")
             if isinstance(error, dict):
                 future.set_exception(OpenCodeError("the OpenCode CLI rejected a request",
-                                                   str(error.get("message") or ""), error.get("code")))
+                                                   _rpc_error_detail(error), error.get("code")))
             else:
                 future.set_result(frame.get("result"))
         elif "id" in frame:

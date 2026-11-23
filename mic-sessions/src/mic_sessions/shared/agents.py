@@ -3808,6 +3808,8 @@ class _OpenCodeStream:
 
 def _opencode_failure(error: BaseException) -> str:
     detail = error.detail.lower() if isinstance(error, opencode.OpenCodeError) else ""
+    if "account.limitexceeded" in detail or "spend limit" in detail or "spending limit" in detail:
+        return "OpenCode account spend limit is exhausted. Change it in OpenCode Console and try again."
     if ("api key" in detail or "401" in detail or "403" in detail or "credential" in detail
             or "authentication required" in detail or "provider authentication" in detail):
         return "OpenCode rejected the API key. Replace it in your agent accounts."
@@ -3893,6 +3895,7 @@ class OpenCodeAcpAgentRuntime:
         self._closing = False
         self._interrupted = False
         self._sent_instructions = False
+        self._provider_error: str | None = None
         self._recovery_lock = asyncio.Lock()
 
     async def _publish(self, event: AgentEvent) -> None:
@@ -3963,6 +3966,7 @@ class OpenCodeAcpAgentRuntime:
         if content:
             prompt.append({"type": "text", "text": content})
         self._interrupted = False
+        self._provider_error = None
         self._task = asyncio.create_task(self._run(self._require_acp(), prompt))
         await asyncio.sleep(0)
 
@@ -3988,10 +3992,14 @@ class OpenCodeAcpAgentRuntime:
             elif not acp.alive and not self._closing:
                 recovering = True
             else:
-                await self._publish(agent_error(_opencode_failure(error)))
-        except Exception:
+                detail = ": ".join(part for part in (error.detail, self._provider_error) if part)
+                await self._publish(agent_error(_opencode_failure(
+                    opencode.OpenCodeError(error.cause, detail, error.code))))
+        except Exception as error:
             LOG.exception("The OpenCode turn failed")
-            await self._publish(agent_error("OpenCode could not complete the turn. Check the account and try again."))
+            failure = (opencode.OpenCodeError("the OpenCode turn failed", self._provider_error)
+                       if self._provider_error else error)
+            await self._publish(agent_error(_opencode_failure(failure)))
         finally:
             await self._stream.close()
             for identity in list(self._open_tools):
@@ -4031,6 +4039,12 @@ class OpenCodeAcpAgentRuntime:
             used, size = update.get("used"), update.get("size")
             if isinstance(used, int) and isinstance(size, int) and size > 0:
                 await self._emit("session.usage", {"context": {"used": used, "size": size}})
+        elif kind == "session_info_update":
+            metadata = update.get("_meta") if isinstance(update.get("_meta"), Mapping) else {}
+            retry = metadata.get("opencode/retry")
+            provider_error = retry.get("error") if isinstance(retry, Mapping) else None
+            if isinstance(provider_error, Mapping):
+                self._provider_error = json.dumps(provider_error, ensure_ascii=False, separators=(",", ":"))
 
     async def _on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method != "session/request_permission":
