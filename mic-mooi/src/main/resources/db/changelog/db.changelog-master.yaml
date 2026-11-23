@@ -91,3 +91,5 @@ databaseChangeLog:
       file: db/changelog/changes/045-preview-deployment-limit.yaml
   - include:
       file: db/changelog/changes/046-close-issue-pending-tasks.yaml
+  - include:
+      file: db/changelog/changes/047-work-task-merge-sha.yaml

@@ -58,6 +58,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -589,6 +590,11 @@ public class ProjectWorkFeature {
             task.setSessionId(progress.sessionId());
             task.setAttempts(progress.attempts());
             task.setReport(progress.report());
+            // Only a successful development merge supplies this; later progress must never clear it.
+            if (progress.status() == TaskStatus.done && task.getQaOfId() == null
+                    && task.getMergeSha() == null && progress.mergeSha() != null) {
+                task.setMergeSha(progress.mergeSha());
+            }
             if (progress.assignment() != null) {
                 assign(task, progress.assignment());
             }
@@ -941,7 +947,7 @@ public class ProjectWorkFeature {
                                             task.getEffort()),
                                     readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
                                     task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
-                                    task.getAttempts(), task.getReport(), List.copyOf(task.getDependsOn()),
+                                    task.getAttempts(), task.getReport(), task.getMergeSha(), List.copyOf(task.getDependsOn()),
                                     task.getStartedAt(), task.getFinishedAt()))
                             .toList());
         }
@@ -1265,6 +1271,10 @@ public class ProjectWorkFeature {
         @Column(name = "report", columnDefinition = "text")
         private String report;
 
+        /** Full commit from a successful development merge; absent for QA and other completion paths. */
+        @Column(name = "merge_sha", length = 40)
+        private String mergeSha;
+
         @Column(name = "position", nullable = false)
         private int position;
 
@@ -1473,7 +1483,8 @@ public class ProjectWorkFeature {
     }
 
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
-                               @Size(max = 50_000) String report, @Valid Assignment assignment) {
+                               @Size(max = 50_000) String report, @Valid Assignment assignment,
+                               @Pattern(regexp = "[0-9a-f]{40}") String mergeSha) {
     }
 
     public record FixDraft(@NotBlank @Size(max = 280) String title, @Size(max = 50_000) String description) {
@@ -1485,7 +1496,7 @@ public class ProjectWorkFeature {
     public record TaskPayload(UUID id, String key, String title, TaskCategory category, String description,
                               String acceptance, Assignment assignment, List<Assignment> alternatives,
                               boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
-                              UUID sessionId, int attempts, String report, List<UUID> dependsOn,
+                              UUID sessionId, int attempts, String report, String mergeSha, List<UUID> dependsOn,
                               OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
 

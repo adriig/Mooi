@@ -662,7 +662,8 @@ async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -
 
 
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
-                  attempts: int | None = None, report: str | None = None, assignment: Json | None = None) -> Json:
+                  attempts: int | None = None, report: str | None = None, assignment: Json | None = None,
+                  merge_sha: str | None = None) -> Json:
     """Saves a task's progress in mic-mooi and announces its item."""
     if isinstance(run_or_task, TaskRun):
         task_id, player_hint = run_or_task.task_id, run_or_task.player_id
@@ -673,7 +674,7 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
         task_id, player_hint = UUID(run_or_task["id"]), None
         attempts = run_or_task.get("attempts", 0) if attempts is None else attempts
     body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
-            "report": report[:50_000] if report else None, "assignment": assignment}
+            "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha}
     answer = await mooi.report_task(task_id, body)
     player_id = UUID(answer["playerId"]) if answer.get("playerId") else player_hint
     if player_id is not None:
@@ -951,7 +952,8 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
     elif type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_FAILED:
         _background(_set_status(run, "attention", "Its session failed: reconnect it from the session page"))
     elif type_ == EVENT_MERGE_COMPLETED:
-        _background(_finish(run, f"Merged as {str(data.get('commit') or '')[:10]}"))
+        commit = data.get("commit")
+        _background(_finish(run, f"Merged as {str(commit or '')[:10]}", merge_sha=commit))
 
 
 sessions.session_listeners.append(_on_session_event)
@@ -1040,16 +1042,16 @@ async def _merge(run: TaskRun) -> None:
     # A merged result is finished by the `merge.completed` event.
 
 
-async def _finish(run: TaskRun, report: str, *, locked: bool = False) -> None:
+async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha: str | None = None) -> None:
     """The task is done: saved as such, its session closed, and the runner looks for what it unblocked."""
     if not locked:
         async with _lock:
-            await _finish(run, report, locked=True)
+            await _finish(run, report, locked=True, merge_sha=merge_sha)
         wake()
         return
     if _runs.get(run.session_id) is not run:
         return
-    item = await _report(run, "done", report=report)
+    item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None)
     await _close(run)
     if run.issue_number and item.get("status") == "done":
         # A merge titled by the player may not name the issue: closing it here is idempotent.

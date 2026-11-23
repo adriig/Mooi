@@ -1,0 +1,11 @@
+databaseChangeLog:
+  - changeSet:
+      id: 047-work-task-merge-sha
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_tasks
+            columns:
+              - column:
+                  name: merge_sha
+                  type: varchar(40)
