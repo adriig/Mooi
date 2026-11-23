@@ -4137,14 +4137,42 @@ class AdapterDescriptor:
         return self.runtime_class.capabilities
 
 
+async def _claude_account_usage(credential: Credential, refresh: bool) -> dict[str, Any]:
+    from mic_sessions.shared import claude_usage
+    return await claude_usage.quota(credential.connection_id, credential.token, refresh=refresh)
+
+
+async def _codex_account_usage(credential: Credential, refresh: bool) -> dict[str, Any]:
+    from mic_sessions.shared import codex
+    try:
+        return await codex.account_quota(credential, refresh=refresh)
+    except ValueError as error:
+        raise ApiException.bad_request(str(error)) from None
+
+
+async def _antigravity_account_usage(credential: Credential, refresh: bool) -> dict[str, Any]:
+    """Every bucket `agy -p=/usage` reports, from a throwaway home holding the account's sign-in."""
+    with tempfile.TemporaryDirectory(prefix="mooi-agy-usage-") as scratch:
+        home = Path(scratch)
+        try:
+            await asyncio.to_thread(antigravity.prepare_home, home, credential, browser=False, hooks=False)
+            return await antigravity.usage(get_settings().agent_antigravity_cli, home, key=credential.connection_id,
+                                           env=antigravity.environment(home), refresh=refresh)
+        finally:
+            await _antigravity_write_back(home, credential)
+
+
 @dataclass(frozen=True)
 class ProviderDescriptor:
     """A provider and its adapters; the first adapter is the default. Accounts, model defaults and
-    usage belong to the provider, so every adapter of one provider shares them."""
+    usage belong to the provider, so every adapter of one provider shares them. `usage` reads an
+    account's plan limits without a session (`{window: {"percent", "window", "resetsAt", "updatedAt"}}`);
+    None for a provider billed per use, which has no plan limits."""
 
     id: str
     label: str
     adapters: tuple[AdapterDescriptor, ...]
+    usage: Callable[[Credential, bool], Awaitable[dict[str, Any]]] | None = None
 
     def adapter(self, adapter_id: str | None = None) -> AdapterDescriptor:
         if not adapter_id:
@@ -4196,15 +4224,17 @@ class ProviderDescriptor:
 
 
 PROVIDERS: dict[str, ProviderDescriptor] = {
-    "codex": ProviderDescriptor("codex", "Codex", (AdapterDescriptor("sdk", "Codex SDK", CodexAgentRuntime),)),
+    "codex": ProviderDescriptor("codex", "Codex", (AdapterDescriptor("sdk", "Codex SDK", CodexAgentRuntime),),
+                                usage=_codex_account_usage),
     "claude": ProviderDescriptor("claude", "Claude", (
         AdapterDescriptor("sdk", "Claude SDK", ClaudeAgentRuntime),
         AdapterDescriptor("cli", "Claude CLI", ClaudeCliAgentRuntime),
-    )),
+    ), usage=_claude_account_usage),
     # Google ships no agent SDK: the one adapter drives the pinned Antigravity CLI (`agy`) natively.
     "antigravity": ProviderDescriptor("antigravity", "Antigravity", (
         AdapterDescriptor("cli", "Antigravity CLI", AntigravityCliAgentRuntime),
-    )),
+    ), usage=_antigravity_account_usage),
+    # Billed per use through an OpenCode Console API key: no plan limits to read.
     "opencode": ProviderDescriptor("opencode", "OpenCode", (
         AdapterDescriptor("acp", "OpenCode CLI", OpenCodeAcpAgentRuntime),
     )),

@@ -12,13 +12,15 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
+from fastapi import Path as PathParameter
 from pydantic import BaseModel, Field
 
 from mic_sessions.shared import antigravity
+from mic_sessions.shared.agents import PROVIDERS
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.codex import Client
 from mic_sessions.shared.env import get_settings
-from mic_sessions.shared.mooi import link_antigravity, link_codex, renewed
+from mic_sessions.shared.mooi import fetch_agent_credential, link_antigravity, link_codex, renewed
 from mic_sessions.shared.web import ApiException
 
 LOG = logging.getLogger("sessions")
@@ -293,6 +295,39 @@ async def submit_google(key: str, body: GoogleCode, caller: Annotated[Caller, De
 async def cancel_google(key: str, caller: Annotated[Caller, Depends(current_caller)]):
     _owned_google(key, caller)
     await _discard_google(key)
+
+
+# --- Plan limits: what an account has left, read for the account page without a session -------------
+
+# One read per account at a time: concurrent views wait for it and then share its cached result.
+_usage_locks: dict[str, asyncio.Lock] = {}
+
+
+@router.get("/agents/connections/{connection_id}/usage")
+async def account_usage(connection_id: Annotated[str, PathParameter(max_length=64)],
+                        caller: Annotated[Caller, Depends(current_caller)],
+                        refresh: bool = False):
+    """The account's plan windows (5-hour, weekly, per model group…) as each provider reports them, in
+    the shape sessions stream as `session.usage`. `limits` is false for a provider billed per use.
+    The credential is fetched as the caller, so `mic-mooi` answers only for the caller's own account."""
+    credential = await fetch_agent_credential(caller, connection_id)
+    descriptor = PROVIDERS.get(credential.provider)
+    if descriptor is None or descriptor.usage is None:
+        return {"provider": credential.provider, "limits": False, "windows": {}}
+    if len(_usage_locks) >= 256:
+        for key, lock in list(_usage_locks.items()):
+            if not lock.locked():
+                _usage_locks.pop(key, None)
+    async with _usage_locks.setdefault(connection_id, asyncio.Lock()):
+        try:
+            async with asyncio.timeout(90):
+                windows = await descriptor.usage(credential, refresh)
+        except ApiException:
+            raise
+        except Exception:
+            LOG.info("Plan limits of a %s account are unavailable", credential.provider, exc_info=True)
+            windows = {}
+    return {"provider": credential.provider, "limits": True, "windows": windows or {}}
 
 
 async def close_all():

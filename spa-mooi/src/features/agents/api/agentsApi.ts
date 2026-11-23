@@ -1,3 +1,4 @@
+import type { AccountUsage } from '@/features/agents/types/AccountUsage';
 import type { AdminAgentProvider } from '@/features/agents/types/AdminAgentProvider';
 import type { EngineDefaults } from '@/features/agents/types/EngineDefaults';
 import { sessionsFetch } from '@/features/sessions/lib/sessionsFetch';
@@ -127,6 +128,13 @@ export const fetchAdminAgentProviders = async (): Promise<AdminAgentProvider[]> 
   const response = await sessionsFetch('/admin/agents/providers');
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the agent providers.'));
   return ((await response.json()) as { providers: AdminAgentProvider[] }).providers;
+};
+
+/** The account's plan limits; `refresh` asks the provider again instead of a reading under a minute old. */
+export const fetchAccountUsage = async (id: string, refresh = false): Promise<AccountUsage> => {
+  const response = await sessionsFetch(`/agents/connections/${encodeURIComponent(id)}/usage${refresh ? '?refresh=true' : ''}`);
+  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not read the limits of this account.'));
+  return (await response.json()) as AccountUsage;
 };
 
 export const selectDefaultAccount =async (connectionId: string | null): Promise<AgentConnection[]> => {

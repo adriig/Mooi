@@ -73,6 +73,9 @@ from it. Where they differ, this context wins over the current implementation (s
   revision it read, so a concurrent agent edit is reported, never overwritten. Desktop shows tree and editor
   side by side, phones show them one after the other.
 - KPIs per session and provider account: context size, session limits, weekly limits, other usage metrics.
+  The account page shows every provider account's plan limits at a glance, with no session open: what is
+  left in each window (5-hour, weekly, per model group) and when it resets, kept live by open sessions;
+  providers billed per use say they have no plan limits.
 - Model and thinking-effort selection per session.
 - Each development session maintains an editable **Suggested commit message** based on what the user
   requested and what the agent actually changed. It is refreshed after productive turns and pre-fills

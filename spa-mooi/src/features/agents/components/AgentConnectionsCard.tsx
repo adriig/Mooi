@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Bot, LogIn, Pencil, Plus, RefreshCw, Star, TriangleAlert, Unlink } from 'lucide-react';
 import { AddAgentAccountDialog } from '@/features/agents/components/AddAgentAccountDialog';
+import { AgentAccountUsage } from '@/features/agents/components/AgentAccountUsage';
 import { AuthorizationCodePairing } from '@/features/agents/components/AuthorizationCodePairing';
 import { CodexPairing } from '@/features/agents/components/CodexPairing';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
@@ -50,7 +51,7 @@ export const AgentConnectionsCard = () => {
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h2 className="text-sm font-semibold tracking-[-0.015em] text-ink">Agent accounts</h2>
-        <p className="mt-1 text-xs text-ink-subtle">Set the account preselected for new agent sessions.</p>
+        <p className="mt-1 text-xs text-ink-subtle">What each plan has left and when it resets. Set the account preselected for new agent sessions.</p>
       </div>
       <Button variant="secondary" size="sm" disabled={busy || providers.length === 0}
         onClick={() => { clearActionError(); setAdding(true); }}>
@@ -74,7 +75,7 @@ export const AgentConnectionsCard = () => {
     </div>}
 
     {connections.length > 0 && <ul className="mt-5 divide-y divide-line rounded-xl border border-line px-4 sm:px-5">
-      {connections.map((connection) => <li key={connection.id} className="flex items-center gap-3 py-4">
+      {connections.map((connection) => <li key={connection.id} className="flex items-start gap-3 py-4">
         <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink-muted"><Bot className="size-5" /></span>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-ink">{accountTitle(connection)}</p>
@@ -91,6 +92,7 @@ export const AgentConnectionsCard = () => {
             Linked with a setup token, a deprecated method: it expires and cannot be renewed. Sign in again
             with {connection.label} to keep this account renewed automatically.
           </p>}
+          {!connection.stale && <AgentAccountUsage connectionId={connection.id} />}
           {canSignInAgain(connection, providers) && <Button variant="secondary" size="sm" className="mt-2" disabled={busy}
             onClick={() => { clearActionError(); setSigningIn(connection); }}>
             <LogIn className="size-4" /> Sign in again

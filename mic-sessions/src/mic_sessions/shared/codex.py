@@ -231,6 +231,8 @@ class Account:
 
 _accounts: dict[str, Account] = {}
 _catalogs: dict[str, tuple[float, dict[str, Any]]] = {}
+# The latest limits read per account, by any session or by the account page: (monotonic time, windows).
+_quotas: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _context_windows(home: Path) -> dict[str, int]:
@@ -424,4 +426,22 @@ async def quota(account: Account, client: Client, *, refresh: bool = False) -> d
                "resetsAt": window.resets_at, "updatedAt": time.time()}
         for name, window in windows
     }
+    if account.credential.connection_id:
+        if len(_quotas) >= 1024:
+            _quotas.pop(next(iter(_quotas)))
+        _quotas[account.credential.connection_id] = (time.monotonic(), account.quota_snapshot)
     return account.quota_snapshot
+
+
+async def account_quota(credential: Credential, *, refresh: bool = False) -> dict[str, Any]:
+    """The account's limits for the account page: what a session read in the last minute, else a
+    one-off app-server reads them (no turn, no model call)."""
+    cached = _quotas.get(credential.connection_id or "")
+    if not refresh and cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    account = acquire(credential)
+    try:
+        async with asyncio.timeout(30), connected(account, account.home) as client:
+            return await quota(account, client, refresh=True) or {}
+    finally:
+        release(account)
