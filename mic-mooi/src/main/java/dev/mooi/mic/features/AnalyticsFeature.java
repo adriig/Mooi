@@ -184,7 +184,7 @@ public class AnalyticsFeature {
     @PostMapping("/me/projects/{projectId}/analytics/geo/runs")
     @Auth.Authenticated
     public GeoRunPayload queueGeoRun(@PathVariable UUID projectId, Auth.Principal principal) {
-        return service.queueGeoRun(projectId, principal.player().id());
+        return service.queueGeoRun(projectId, principal.player().id(), principal.sessionId());
     }
 
     @GetMapping("/me/projects/{projectId}/analytics/geo/runs")
@@ -212,13 +212,21 @@ public class AnalyticsFeature {
     @PostMapping("/internal/analytics/geo/runs/claim")
     @Auth.ServiceOnly
     public List<GeoClaim> claimGeoRuns(@Valid @RequestBody(required = false) GeoClaimRequest body) {
-        return service.claimGeoRuns(body == null || body.limit() == null ? 10 : body.limit());
+        return service.claimGeoRuns(body == null || body.limit() == null ? 10 : body.limit(),
+                body == null || body.active() == null ? List.of() : body.active());
     }
 
     @PutMapping("/internal/analytics/geo/runs/{runId}/status")
     @Auth.ServiceOnly
     public GeoRunPayload setGeoRunStatus(@PathVariable UUID runId, @Valid @RequestBody GeoRunStatusChange body) {
-        return service.setGeoRunStatus(runId, body.status());
+        return service.setGeoRunStatus(runId, body.status(), body.reason());
+    }
+
+    /** A weekly run the runner could not start (no eligible account): dropped and its schedule retried later. */
+    @PostMapping("/internal/analytics/geo/runs/{runId}/postpone")
+    @Auth.ServiceOnly
+    public GeoSettingsPayload postponeGeoRun(@PathVariable UUID runId, @Valid @RequestBody GeoRunPostpone body) {
+        return service.postponeGeoRun(runId, Duration.ofMinutes(body.minutes()));
     }
 
     @PostMapping("/internal/analytics/geo/runs/{runId}/results")
@@ -371,18 +379,24 @@ public class AnalyticsFeature {
     public record GeoPromptUpdate(@Size(min = 1, max = 500) String text, Boolean enabled,
                                   @Min(0) Integer position) { }
     public record GeoPromptPayload(UUID id, String text, boolean enabled, int position) { }
+    /** {@code reason} explains a failed run: {@code quota} (no account below the quota limit),
+     *  {@code signin} (no live sign-in to run as), {@code interrupted} or {@code error}. */
     public record GeoRunPayload(UUID id, String trigger, String status, Instant createdAt,
-                                Instant startedAt, Instant finishedAt) { }
+                                Instant startedAt, Instant finishedAt, String reason) { }
     public record GeoResultPayload(UUID id, UUID promptId, String provider, String model,
                                    boolean mentioned, boolean cited, Integer position,
                                    List<String> citedUrls, List<String> competitorsMentioned,
                                    String excerpt, String error) { }
     public record GeoRunDetail(GeoRunPayload run, List<GeoResultPayload> results) { }
-    public record GeoClaimRequest(@Min(1) @Max(100) Integer limit) { }
-    public record GeoClaim(UUID runId, UUID siteId, UUID projectId, String trigger,
-                           List<String> brandTerms, List<GeoCompetitor> competitors,
-                           List<GeoPromptPayload> prompts) { }
-    public record GeoRunStatusChange(@NotBlank String status) { }
+    /** {@code active}: the runs the runner is still executing; any other running run is abandoned. */
+    public record GeoClaimRequest(@Min(1) @Max(100) Integer limit, @Size(max = 1000) List<@NotNull UUID> active) { }
+    /** {@code authSessionId}: the sign-in the runner acts as (the one that queued a manual run, else the
+     *  player's most recently used one); null when the player has none left. */
+    public record GeoClaim(UUID runId, UUID siteId, UUID projectId, UUID playerId, UUID authSessionId,
+                           String trigger, List<String> brandTerms, List<GeoCompetitor> competitors,
+                           List<String> ownDomains, List<GeoPromptPayload> prompts) { }
+    public record GeoRunStatusChange(@NotBlank String status, @Size(max = 32) String reason) { }
+    public record GeoRunPostpone(@NotNull @Min(1) @Max(10080) Integer minutes) { }
     public record GeoResultInput(@NotNull UUID promptId, @NotBlank @Size(max = 80) String provider,
                                  @NotBlank @Size(max = 255) String model, boolean mentioned, boolean cited,
                                  @Min(1) Integer position, @Size(max = 50) List<@Size(max = 2048) String> citedUrls,
@@ -404,6 +418,7 @@ public class AnalyticsFeature {
         private static final int RATE_LIMIT_PER_MINUTE = 60;
         private static final long SESSION_IDLE_MILLIS = 30 * 60 * 1000L;
         private static final String TRACKER_PATH = "/api/mooi/public/analytics/t.js";
+        private static final Duration GEO_CLAIM_GRACE = Duration.ofMinutes(5);
 
         private final AnalyticsSiteRepository sites;
         private final AnalyticsEventRepository events;
@@ -690,7 +705,7 @@ public class AnalyticsFeature {
         }
 
         @Transactional
-        public GeoRunPayload queueGeoRun(UUID projectId, UUID playerId) {
+        public GeoRunPayload queueGeoRun(UUID projectId, UUID playerId, UUID authSessionId) {
             AnalyticsSite site = lockedOwnedSite(projectId, playerId);
             if (geoRuns.existsBySiteIdAndStatusIn(site.getId(), List.of("queued", "running"))) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "An AI visibility run is already active");
@@ -700,6 +715,7 @@ public class AnalyticsFeature {
             run.setSiteId(site.getId());
             run.setTrigger("manual");
             run.setStatus("queued");
+            run.setAuthSessionId(authSessionId);
             run.setCreatedAt(Instant.now());
             return runPayload(geoRuns.save(run));
         }
@@ -775,11 +791,12 @@ public class AnalyticsFeature {
         }
 
         @Transactional
-        public List<GeoClaim> claimGeoRuns(int limit) {
+        public List<GeoClaim> claimGeoRuns(int limit, List<UUID> active) {
             if (limit < 1 || limit > 100) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Claim limit must be from 1 to 100");
             }
             Instant now = Instant.now();
+            abandonGeoRuns(java.util.Set.copyOf(active), now);
             @SuppressWarnings("unchecked")
             List<UUID> manualIds = entityManager.createNativeQuery(
                     "select id from analytics_geo_runs where trigger = 'manual' and status = 'queued' "
@@ -821,8 +838,79 @@ public class AnalyticsFeature {
             return claimed;
         }
 
+        /** The runner keeps its runs in memory: a running run it no longer reports as active (it restarted
+         *  mid-run) would hold the site's single active slot forever, so it fails as interrupted. */
+        private void abandonGeoRuns(java.util.Set<UUID> active, Instant now) {
+            List<GeoRun> running = entityManager.createQuery(
+                            "select r from AnalyticsGeoRun r where r.status = 'running' and r.startedAt < :cutoff",
+                            GeoRun.class)
+                    .setParameter("cutoff", now.minus(GEO_CLAIM_GRACE))
+                    .setLockMode(LockModeType.PESSIMISTIC_WRITE).getResultList();
+            for (GeoRun run : running) {
+                if (active.contains(run.getId())) continue;
+                run.setStatus("failed");
+                run.setReason("interrupted");
+                run.setFinishedAt(now);
+            }
+        }
+
+        /** A weekly run that could not start is dropped (it holds no results) and its site is due again
+         *  after {@code delay} instead of a week later. */
         @Transactional
-        public GeoRunPayload setGeoRunStatus(UUID runId, String status) {
+        public GeoSettingsPayload postponeGeoRun(UUID runId, Duration delay) {
+            GeoRun run = lockedRun(runId);
+            if (!"weekly".equals(run.getTrigger()) || !"running".equals(run.getStatus())
+                    || geoResults.existsByRunId(runId)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Only a weekly run that has not started can be postponed");
+            }
+            GeoSettings schedule = entityManager.find(GeoSettings.class, run.getSiteId(), LockModeType.PESSIMISTIC_WRITE);
+            geoRuns.delete(run);
+            if (schedule == null) {
+                return new GeoSettingsPayload(List.of(), List.of(), false, null);
+            }
+            if (schedule.isWeeklyEnabled()) {
+                schedule.setNextRunAt(Instant.now().plus(delay));
+            }
+            return new GeoSettingsPayload(readStringList(schedule.getBrandTerms()),
+                    readCompetitors(schedule.getCompetitors()), schedule.isWeeklyEnabled(), schedule.getNextRunAt());
+        }
+
+        /** The sign-in a run acts as: the one that queued it while it lasts, else the player's latest one. */
+        private UUID runnerAuthSession(GeoRun run, UUID playerId) {
+            if (run.getAuthSessionId() != null) {
+                @SuppressWarnings("unchecked")
+                List<UUID> live = entityManager.createNativeQuery(
+                                "select id from auth_sessions where id = :id and player_id = :player and revoked_at is null")
+                        .setParameter("id", run.getAuthSessionId()).setParameter("player", playerId).getResultList();
+                if (!live.isEmpty()) return live.getFirst();
+            }
+            @SuppressWarnings("unchecked")
+            List<UUID> latest = entityManager.createNativeQuery(
+                            "select id from auth_sessions where player_id = :player and revoked_at is null "
+                                    + "order by last_used_at desc limit 1")
+                    .setParameter("player", playerId).getResultList();
+            return latest.isEmpty() ? null : latest.getFirst();
+        }
+
+        private List<String> ownDomains(AnalyticsSite site) {
+            List<String> configured = readOrigins(site.getAllowedOrigins());
+            List<String> origins = configured.isEmpty() ? productionOrigins(site.getProjectId()) : configured;
+            LinkedHashSet<String> domains = new LinkedHashSet<>();
+            for (String origin : origins) {
+                try {
+                    String host = URI.create(origin).getHost();
+                    if (host == null || host.isBlank()) continue;
+                    host = host.toLowerCase(Locale.ROOT);
+                    domains.add(host.startsWith("www.") ? host.substring(4) : host);
+                } catch (IllegalArgumentException ignored) {
+                    // An unparsable origin names no domain.
+                }
+            }
+            return List.copyOf(domains);
+        }
+
+        @Transactional
+        public GeoRunPayload setGeoRunStatus(UUID runId, String status, String reason) {
             if (!List.of("running", "finished", "failed").contains(status)) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Run status must be running, finished, or failed");
             }
@@ -843,6 +931,9 @@ public class AnalyticsFeature {
                 }
                 run.setStatus(status);
                 run.setFinishedAt(now);
+                if ("failed".equals(status)) {
+                    run.setReason(reason == null || reason.isBlank() ? "error" : reason.strip());
+                }
             }
             return runPayload(run);
         }
@@ -968,7 +1059,7 @@ public class AnalyticsFeature {
 
         private GeoRunPayload runPayload(GeoRun row) {
             return new GeoRunPayload(row.getId(), row.getTrigger(), row.getStatus(), row.getCreatedAt(),
-                    row.getStartedAt(), row.getFinishedAt());
+                    row.getStartedAt(), row.getFinishedAt(), row.getReason());
         }
 
         private GeoResultPayload resultPayload(GeoResult row) {
@@ -989,8 +1080,9 @@ public class AnalyticsFeature {
             List<GeoCompetitor> competitors = settings == null ? List.of() : readCompetitors(settings.getCompetitors());
             List<GeoPromptPayload> prompts = geoPrompts.findBySiteIdOrderByPositionAscIdAsc(run.getSiteId()).stream()
                     .filter(GeoPrompt::isEnabled).map(this::promptPayload).toList();
-            return new GeoClaim(run.getId(), site.getId(), site.getProjectId(), run.getTrigger(),
-                    terms, competitors, prompts);
+            return new GeoClaim(run.getId(), site.getId(), site.getProjectId(), site.getPlayerId(),
+                    runnerAuthSession(run, site.getPlayerId()), run.getTrigger(), terms, competitors,
+                    ownDomains(site), prompts);
         }
 
         private static String engineKey(String provider, String model) {
@@ -2374,6 +2466,8 @@ public class AnalyticsFeature {
         @Column(name = "created_at", nullable = false) private Instant createdAt;
         @Column(name = "started_at") private Instant startedAt;
         @Column(name = "finished_at") private Instant finishedAt;
+        @Column(name = "reason", length = 32) private String reason;
+        @Column(name = "auth_session_id") private UUID authSessionId;
     }
 
     @Getter @Setter @NoArgsConstructor
@@ -2455,6 +2549,7 @@ public class AnalyticsFeature {
         List<GeoResult> findByRunIdIn(java.util.Collection<UUID> runIds);
         java.util.Optional<GeoResult> findByRunIdAndPromptIdAndProviderAndModel(
                 UUID runId, UUID promptId, String provider, String model);
+        boolean existsByRunId(UUID runId);
     }
 
     private static final String TRACKER = AnalyticsService.TRACKER;

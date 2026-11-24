@@ -1,7 +1,8 @@
 """ASGI entrypoint: assembles the app from the transversal aspects and features.
 
 The sessions feature owns its own router; `session_count` is registered here for `/health` to read.
-`_lifespan` starts the sessions feature's reconciler and the software factory's runner on boot and closes every live session
+`_lifespan` starts the sessions feature's reconciler, the software factory's runner and the AI visibility
+runner on boot and closes every live session
 (workspace + runtime) on graceful shutdown — the feature exports `start_reconciler()`/`close_all()`;
 this module only calls them. The preview gateway wraps the whole API: requests for a preview
 path go to the embedded reverse proxy before any API middleware runs.
@@ -14,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from mic_sessions.features import agent_connections, analytics, factory, health, sessions
+from mic_sessions.features import agent_connections, analytics, factory, geo, health, sessions
 from mic_sessions.shared import previews, web, workspaces
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared.logging import CorrelationIdMiddleware, configure_logging
@@ -31,9 +32,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await web.open_http_client()
     sessions.start_reconciler()
     factory.start_runner()
+    geo.start_runner()
     try:
         yield
     finally:
+        await geo.close_runner()
         await factory.close_runner()
         await agent_connections.close_all()
         await sessions.close_all()

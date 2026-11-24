@@ -21,7 +21,9 @@ Adding a provider:
    conversation, and a long-lived stream recovers itself before it reports `failed`.
 6. `trace_sources()` names where the provider's native session log lives (`traces.TraceSource`), so
    the Trace tab reads it; it is cheap and may return `[]` before the conversation exists.
-7. Register a `ProviderDescriptor` in `PROVIDERS`.
+7. The `answer` classmethod runs one standalone headless turn outside any session (AI visibility runs):
+   web search and fetch only where the vendor has them, every other tool off, nothing kept.
+8. Register a `ProviderDescriptor` in `PROVIDERS`.
 
 A provider may have several adapters (`AdapterDescriptor`): implementations of the same contract
 with a different integration technology, e.g. Claude through its SDK or through its CLI. Each one
@@ -128,6 +130,22 @@ def _aside_prompt(question: str) -> str:
         "say so briefly and suggest how to find it. Do not continue the main task.\n\n"
         f"<side_question>\n{question}\n</side_question>"
     )
+
+
+# A headless one-shot answer (`ProviderDescriptor.answer`): the only tools it may use, where the adapter
+# has them, and the neutral guidance it runs with. The prompt itself always travels verbatim.
+_RESEARCH_TOOLS = ("WebSearch", "WebFetch")
+_ANSWER_INSTRUCTIONS = (
+    "Answer the user's question directly and helpfully, as a general-purpose assistant would. Search the "
+    "web when current information helps, and give the full URL of every source you rely on. You cannot run "
+    "commands or read or change files."
+)
+
+
+def _answer_text(parts: Sequence[str], final: str | None = None) -> str:
+    """The answer of a one-shot turn: the provider's final text when it reports one, else every message."""
+    text = final.strip() if isinstance(final, str) else ""
+    return text or "\n\n".join(part.strip() for part in parts if part and part.strip())
 
 
 class AgentEvent(TypedDict):
@@ -392,6 +410,13 @@ class AgentRuntime(Protocol):
     def aside(self, question: str) -> AsyncIterator[str]:
         """Answer a side question from the conversation so far, in chunks, without touching it: no
         tools, no changes and nothing recorded. Runs beside a turn; only with the `asides` capability."""
+
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """One standalone headless turn outside any session: `prompt` verbatim, web search and fetch
+        only where the adapter has them, every other tool (files, shell, MCP) off, run in the empty
+        private directory `scratch`, which the caller removes. Nothing is resumed, shown or kept."""
+        ...
 
 
 CLAUDE_CAPABILITIES = AgentCapabilities(
@@ -935,6 +960,38 @@ class ClaudeAgentRuntime:
             self._clients.discard(client)
             if fork_id is not None:
                 await self._transcript_store.forget(fork_id)
+
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """A throwaway client whose only tools are web search and fetch: no project settings, plugins,
+        skills or MCP servers, and a private config directory inside `scratch`."""
+        workspace, config_dir = scratch / "workspace", scratch / "claude"
+        for directory in (workspace, config_dir):
+            directory.mkdir(mode=0o700)
+        client = ClaudeSDKClient(options=ClaudeAgentOptions(
+            cwd=str(workspace),
+            env=_claude_cli_credential_env(credential, str(config_dir)),
+            tools=list(_RESEARCH_TOOLS), allowed_tools=list(_RESEARCH_TOOLS), permission_mode="dontAsk",
+            setting_sources=[], plugins=[], mcp_servers={},
+            system_prompt=_ANSWER_INSTRUCTIONS, model=config.model, effort=config.effort,
+            max_buffer_size=get_settings().agent_claude_max_message_bytes,
+        ))
+        parts: list[str] = []
+        final: str | None = None
+        try:
+            await client.connect()
+            await client.query(prompt)
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage) and not message.parent_tool_use_id:
+                    parts.append("".join(block.text for block in message.content if isinstance(block, TextBlock)))
+                elif isinstance(message, ResultMessage):
+                    if message.is_error:
+                        raise RuntimeError(f"Claude could not answer ({message.subtype})")
+                    final = message.result
+        finally:
+            with suppress(Exception):
+                await client.disconnect()
+        return _answer_text(parts, final)
 
     async def close(self) -> None:
         if self._pump is not None:
@@ -1808,6 +1865,42 @@ class ClaudeCliAgentRuntime:
         await previous.close()
         self._clis.discard(previous)
 
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """A throwaway CLI process whose only tools are web search and fetch: no settings, MCP servers or
+        saved transcript, and a private config directory inside `scratch`."""
+        workspace, config_dir = scratch / "workspace", scratch / "claude"
+        for directory in (workspace, config_dir):
+            directory.mkdir(mode=0o700)
+        tools = ",".join(_RESEARCH_TOOLS)
+        arguments = [
+            claude_cli.executable(get_settings().agent_claude_cli), *_CLAUDE_CLI_STREAM,
+            "--setting-sources=", "--strict-mcp-config", "--no-session-persistence",
+            f"--tools={tools}", f"--allowedTools={tools}", "--permission-mode=dontAsk",
+            "--system-prompt", _ANSWER_INSTRUCTIONS, f"--model={config.model}",
+        ]
+        if config.effort:
+            arguments.append(f"--effort={config.effort}")
+        cli = claude_cli.ClaudeCli(arguments, cwd=workspace,
+                                   env=claude_cli.environment(_claude_cli_credential_env(credential, str(config_dir))))
+        parts: list[str] = []
+        try:
+            await cli.start(timeout=60)
+            await cli.send_user(prompt)
+            async for message in cli.messages():
+                if message.get("type") == "assistant" and not message.get("parent_tool_use_id"):
+                    content = (message.get("message") or {}).get("content") or []
+                    parts.append("".join(str(block.get("text") or "") for block in content
+                                         if isinstance(block, dict) and block.get("type") == "text"))
+                elif message.get("type") == "result":
+                    if message.get("is_error"):
+                        raise RuntimeError(f"Claude could not answer ({message.get('subtype')})")
+                    result = message.get("result")
+                    return _answer_text(parts, result if isinstance(result, str) else None)
+        finally:
+            await cli.close()
+        raise RuntimeError("Claude ended without an answer")
+
     def _require_cli(self) -> claude_cli.ClaudeCli:
         if self._cli is None:
             raise ApiException.conflict("The agent runtime is not running")
@@ -2492,6 +2585,33 @@ class CodexAgentRuntime:
                         yield payload["delta"]
                     elif method == "turn/completed" and payload["turn"]["status"] != "completed":
                         raise RuntimeError("Codex could not answer the side question")
+
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """An ephemeral thread on its own app-server: live web search, no shell tool, a read-only sandbox
+        on the empty `scratch` and no request handler, so any other action is declined."""
+        from mic_sessions.shared import codex
+        params = {"cwd": str(scratch), "model": config.model, "approvalPolicy": "never", "sandbox": "read-only",
+                  "ephemeral": True, "developerInstructions": _ANSWER_INSTRUCTIONS,
+                  "config": {"web_search": "live", "features.shell_tool": False}}
+        account = codex.acquire(credential)
+        parts: list[str] = []
+        try:
+            async with codex.connected(account, scratch) as client:
+                thread = await client.call("thread_start", params)
+                turn = await client.call("turn_start", thread.thread.id, [{"type": "text", "text": prompt}],
+                                         {"model": config.model, "effort": config.effort})
+                async for method, payload in client.notifications(turn.turn.id):
+                    data: dict[str, Any] = payload if isinstance(payload, dict) else {}
+                    item = data.get("item") if isinstance(data.get("item"), dict) else None
+                    if method == "item/completed" and isinstance(item, dict) and item.get("type") == "agentMessage":
+                        parts.append(str(item.get("text") or ""))
+                    elif method == "turn/completed" and isinstance(ended := data.get("turn"), dict) \
+                            and ended.get("status") != "completed":
+                        raise RuntimeError("Codex could not answer")
+        finally:
+            codex.release(account)
+        return _answer_text(parts)
 
     async def recover(self):
         """A broken connection already ended its turn: drop it so the next turn reconnects and resumes
@@ -3204,6 +3324,37 @@ class AntigravityCliAgentRuntime:
     async def aside(self, question: str) -> AsyncIterator[str]:
         raise ApiException.conflict("Side questions are not available for Antigravity sessions")
         yield ""  # pragma: no cover - makes this an async generator like the protocol's
+
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """A throwaway home with no hook, no MCP server and a single allow rule, `read_url(*)`: headless agy
+        soft-denies every other action (files, commands) and searches the web without one. A sign-in agy
+        renewed there is saved before the caller removes it."""
+        home, workspace = scratch / "home", scratch / "workspace"
+        workspace.mkdir(mode=0o700)
+        stream: antigravity.Stream | None = None
+        parts: dict[int, list[str]] = {}
+        try:
+            await asyncio.to_thread(antigravity.prepare_home, home, credential, instructions=_ANSWER_INSTRUCTIONS,
+                                    browser=False, hooks=False, allow=("read_url(*)",))
+            stream = antigravity.Stream(get_settings().agent_antigravity_cli, home, cwd=workspace,
+                                        env=antigravity.environment(home), model=config.model, effort=config.effort)
+            await stream.start()
+            await stream.ready()
+            async for frame in stream.turn(prompt):
+                step, result = frame.get("step_update"), frame.get("result")
+                if isinstance(step, dict) and step.get("step_type") == "agent_response":
+                    delta, index = step.get("text_delta"), step.get("step_index")
+                    if isinstance(delta, str) and isinstance(index, int):
+                        parts.setdefault(index, []).append(delta)
+                elif isinstance(result, dict) and result.get("status") != "SUCCESS":
+                    raise RuntimeError(_antigravity_message(str(result.get("error") or "")))
+        finally:
+            if stream is not None:
+                await stream.close()
+            if home.exists():
+                await _antigravity_write_back(home, credential)
+        return _answer_text(["".join(parts[index]) for index in sorted(parts)])
 
     def trace_sources(self) -> Sequence[TraceSource]:
         """Mooi's frame record in the private home; agy's own logs and brain transcripts sit beside it
@@ -4159,6 +4310,62 @@ class OpenCodeAcpAgentRuntime:
         raise ApiException.conflict("Side questions are not available for OpenCode sessions")
         yield ""
 
+    @classmethod
+    async def answer(cls, credential: Credential, config: AgentConfig, prompt: str, scratch: Path) -> str:
+        """A throwaway profile whose rules deny every tool but web fetch and search, one ACP session on the
+        empty workspace (the guidance as its `AGENTS.md`) and every permission request refused. An account
+        sign-in the CLI renewed there is saved before the caller removes it."""
+        home, workspace = scratch / "home", scratch / "workspace"
+        workspace.mkdir(mode=0o700)
+        (workspace / "AGENTS.md").write_text(_ANSWER_INSTRUCTIONS + "\n", encoding="utf-8")
+        binary = opencode.executable(get_settings().agent_opencode_cli)
+        await asyncio.to_thread(opencode.prepare_home, home, credential.mode,
+                                permission={"*": "deny", "webfetch": "allow", "websearch": "allow"})
+        chunks: list[str] = []
+
+        async def collect(params: dict[str, Any]) -> None:
+            update = params.get("update")
+            if isinstance(update, dict) and update.get("sessionUpdate") == "agent_message_chunk":
+                content = update.get("content")
+                chunks.append(str(content.get("text") or "") if isinstance(content, dict) else "")
+
+        async def refuse(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {"outcome": {"outcome": "cancelled"}}
+
+        acp = opencode.Acp([binary, "acp"], cwd=workspace, env=opencode.environment(home, credential),
+                           trace=opencode.trace_path(home), updates=collect, requests=refuse,
+                           secrets=(credential.token,))
+        try:
+            await opencode.install_account(home, binary, credential)
+            await acp.start()
+            session = await acp.request("session/new", {"cwd": str(workspace), "mcpServers": []}) or {}
+            session_id = str(session["sessionId"])
+            if (opencode.model_option(session) or {}).get("currentValue") != config.model:
+                await acp.request("session/set_config_option",
+                                  {"sessionId": session_id, "configId": "model", "value": config.model})
+            await acp.request("session/prompt", {"sessionId": session_id,
+                                                 "prompt": [{"type": "text", "text": prompt}]}, timeout=None)
+        except opencode.OpenCodeError as error:
+            raise RuntimeError(_opencode_failure(error)) from None
+        finally:
+            await acp.close()
+            if credential.mode == opencode.ACCOUNT_MODE and credential.save is not None:
+                with suppress(Exception):
+                    token = await opencode.export_account(home, binary, credential)
+                    if token is not None and token != credential.token:
+                        await credential.save(token)
+        return _answer_text(["".join(chunks)])
+
+
+@dataclass(frozen=True)
+class OneShotAnswer:
+    """What `ProviderDescriptor.answer` returns: the answer text and what produced it."""
+
+    text: str
+    provider: str
+    adapter: str
+    model: str
+
 
 @dataclass(frozen=True)
 class AdapterDescriptor:
@@ -4227,9 +4434,12 @@ class ProviderDescriptor:
         """Loads the catalog of the requested adapter, or of the platform's default one, and returns
         the adapter it prepared. The credential carries the platform defaults, so resolving the default
         costs nothing beyond the fetch the catalog needs anyway."""
-        requested = self.adapter(adapter) if adapter else None
         from mic_sessions.shared.mooi import fetch_agent_credential
-        credential = await fetch_agent_credential(caller, connection_id)
+        return await self._prepare(await fetch_agent_credential(caller, connection_id), refresh, adapter)
+
+    async def _prepare(self, credential: Credential, refresh: bool = False,
+                       adapter: str | None = None) -> AdapterDescriptor:
+        requested = self.adapter(adapter) if adapter else None
         if credential.provider != self.id:
             raise ApiException.bad_request("The selected account belongs to another provider")
         prepared = requested or self.default_adapter(credential.session_adapter)
@@ -4249,6 +4459,21 @@ class ProviderDescriptor:
             runtime_class._catalog.set({**catalog, "providerDefaultModel": catalog["defaultModel"],
                                         "defaultModel": selected, "defaultEffort": preferred_effort})
         return prepared
+
+    async def answer(self, caller, connection_id: str, prompt: str, *, model: str | None = None,
+                     effort: str | None = None, timeout: float = 120) -> OneShotAnswer:
+        """One headless turn on the account, through the adapter its sessions default to (see
+        `AgentRuntime.answer`): no session, no workspace and no trace outlive it. `model` and `effort`
+        default to the account's session defaults; past `timeout` seconds every process is stopped."""
+        from mic_sessions.shared.mooi import fetch_agent_credential
+        credential = await fetch_agent_credential(caller, connection_id)
+        # Preparation and configuration must share a task: account catalogs use ContextVars.
+        prepared = await self._prepare(credential)
+        config = prepared.runtime_class.configure(model, effort)
+        with tempfile.TemporaryDirectory(prefix="mooi-answer-") as scratch:
+            async with asyncio.timeout(timeout):
+                text = await prepared.runtime_class.answer(credential, config, prompt, Path(scratch))
+        return OneShotAnswer(text=text, provider=self.id, adapter=prepared.id, model=config.model)
 
     def configuration(self, adapter: str | None = None) -> dict[str, Any]:
         selected = self.adapter(adapter)

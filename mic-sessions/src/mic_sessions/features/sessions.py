@@ -35,7 +35,7 @@ import tempfile
 import time
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Sequence
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -1038,19 +1038,22 @@ def new_session(
 class SessionRegistry:
     """The process-wide table of live sessions. Reads need no lock (no `await` runs between a dict
     read and its use, so nothing else can interleave); mutations do, to keep the two limits in
-    `add` correct under concurrent creations."""
+    `add` correct under concurrent creations. Headless turns (an AI visibility prompt) open no
+    session yet hold a slot of both limits while they run (`headless`)."""
 
     def __init__(self) -> None:
         self._sessions: dict[UUID, Session] = {}
+        self._headless: dict[UUID, int] = {}
         self._lock = asyncio.Lock()
 
     def check_limits(self, player_id: UUID, max_sessions: int) -> None:
         """Checks host capacity and the account's current limit while `add` holds the lock."""
         settings = get_settings()
-        if len(self._sessions) >= settings.max_sessions:
+        if self.count() >= settings.max_sessions:
             raise ApiException.conflict(
                 f"Mooi is running its maximum of {settings.max_sessions} chats right now. Try again shortly")
-        owned = sum(1 for session in self._sessions.values() if session.player_id == player_id)
+        owned = (sum(1 for session in self._sessions.values() if session.player_id == player_id)
+                 + self._headless.get(player_id, 0))
         if owned >= max_sessions:
             raise ApiException.conflict(f"You have reached your account's session limit ({max_sessions})")
 
@@ -1091,8 +1094,31 @@ class SessionRegistry:
             _announce_removed(session)
         return session
 
+    @asynccontextmanager
+    async def headless(self, caller: Caller) -> AsyncIterator[None]:
+        """Holds one slot of the host's and the player's session limits for a turn that opens no
+        visible session; raises the same conflict as `add` when either limit is reached."""
+        max_sessions = await mooi.fetch_session_limit(caller)
+        player_id = caller.player_id
+        async with self._lock:
+            self.check_limits(player_id, max_sessions)
+            self._headless[player_id] = self._headless.get(player_id, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._headless.get(player_id, 1) - 1
+            if remaining > 0:
+                self._headless[player_id] = remaining
+            else:
+                self._headless.pop(player_id, None)
+
+    def owned(self, player_id: UUID) -> int:
+        """The player's slots in use: live sessions and headless turns."""
+        return len(self.list_for(player_id, None)) + self._headless.get(player_id, 0)
+
     def count(self) -> int:
-        return len(self._sessions)
+        """Every slot in use on this host: live sessions and headless turns."""
+        return len(self._sessions) + sum(self._headless.values())
 
     def all(self) -> list[Session]:
         return list(self._sessions.values())

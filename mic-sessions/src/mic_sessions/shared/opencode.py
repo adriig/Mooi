@@ -81,8 +81,9 @@ def executable(configured: str) -> str:
     return path
 
 
-def prepare_home(home: Path, mode: str = API_KEY_MODE) -> None:
-    """Create an isolated OpenCode profile with non-interactive full-access permissions."""
+def prepare_home(home: Path, mode: str = API_KEY_MODE, *, permission: Mapping[str, str] | None = None) -> None:
+    """Create an isolated OpenCode profile with non-interactive full-access permissions, or the narrower
+    `permission` rules given (OpenCode removes the tools a rule denies)."""
     for path in (home, home / ".config" / "opencode", home / ".local" / "share", home / ".cache", home / ".mooi"):
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(path, 0o700)
@@ -91,7 +92,8 @@ def prepare_home(home: Path, mode: str = API_KEY_MODE) -> None:
     # A personal key may list and call models but cannot read the account configuration endpoint, so that
     # implicit connection is marked signed out and every ACP prompt is rejected. An explicit provider key
     # keeps the credential on the inference path only. Both Console and Go use the same user-created key.
-    settings: dict[str, Any] = {"$schema": "https://opencode.ai/config.json", "permission": {"*": "allow"}}
+    settings: dict[str, Any] = {"$schema": "https://opencode.ai/config.json",
+                                "permission": dict(permission) if permission is not None else {"*": "allow"}}
     if mode == API_KEY_MODE:
         provider = {"options": {"apiKey": f"{{env:{_CREDENTIAL_ENV}}}"}}
         settings["provider"] = {"opencode": provider, "opencode-go": provider}

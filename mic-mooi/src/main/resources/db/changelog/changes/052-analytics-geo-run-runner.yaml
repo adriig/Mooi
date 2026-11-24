@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 052-analytics-geo-run-runner
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: analytics_geo_runs
+            columns:
+              - column:
+                  name: reason
+                  type: varchar(32)
+              - column:
+                  name: auth_session_id
+                  type: uuid

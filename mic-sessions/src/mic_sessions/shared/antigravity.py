@@ -220,12 +220,13 @@ def hook_script(home: Path) -> Path:
 
 
 def prepare_home(home: Path, credential: Credential, *, instructions: str = "", browser: bool = True,
-                 hooks: bool = True) -> None:
+                 hooks: bool = True, allow: Sequence[str] = ALLOW_RULES) -> None:
     """Writes the private agy home (directories 0700, files 0600). Safe to call again on the same home:
     agy's own state (conversations, transcripts, the renewed sign-in) is kept, Mooi's files rewritten.
 
-    - `.mooi/settings.json`: the allow rules for `--settings`, so headless soft-deny never applies (the
-      hook decides), plus `read_file(<attachments>)` for images outside the workspace. No
+    - `.mooi/settings.json`: the allow rules for `--settings` (`allow`, every action class by default),
+      so headless soft-deny never applies (the hook decides), plus `read_file(<attachments>)` for images
+      outside the workspace. A narrower `allow` leaves the other actions soft-denied. No
       `modelProvider` override: only agy's own Google sign-in is used.
     - `.gemini/GEMINI.md`: Mooi's instructions as a global rule (never in the repository).
     - `.gemini/config/hooks.json` + `.mooi/pretooluse_hook.py`: the blocking `PreToolUse` hook on every
@@ -236,8 +237,8 @@ def prepare_home(home: Path, credential: Credential, *, instructions: str = "", 
     for directory in (DATA_DIR, CONFIG_DIR, MOOI_DIR):
         _private_directory(home / directory)
     attachments = _private_directory(attachments_dir(home))
-    allow = [*ALLOW_RULES, f"read_file({attachments})"]
-    _write_private(settings_path(home), json.dumps({"permissions": {"allow": allow}}, indent=2))
+    rules = [*allow, f"read_file({attachments})"]
+    _write_private(settings_path(home), json.dumps({"permissions": {"allow": rules}}, indent=2))
     text = instructions.strip()
     if len(text.encode()) > _INSTRUCTIONS_LIMIT:
         LOG.warning("Antigravity instructions exceed the %s byte rule limit", _INSTRUCTIONS_LIMIT)

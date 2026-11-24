@@ -103,3 +103,5 @@ databaseChangeLog:
       file: db/changelog/changes/050-analytics-geo-visibility.yaml
   - include:
       file: db/changelog/changes/051-analytics-site-google-connection.yaml
+  - include:
+      file: db/changelog/changes/052-analytics-geo-run-runner.yaml

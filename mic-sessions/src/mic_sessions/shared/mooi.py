@@ -380,6 +380,33 @@ async def set_item_status(item_id: UUID, status: str) -> dict:
                        {"status": status}) or {}
 
 
+# --- analytics: AI visibility (GEO) runs, for the runner ----------------------------------------
+
+
+async def claim_geo_runs(active: list[UUID], limit: int = 5) -> list[dict]:
+    """Service-only: queued manual runs and due weekly ones, now `running` and owned by the caller.
+    `active` names the runs this process still executes; any other running run is failed as interrupted."""
+    body = await _send("POST", "/internal/analytics/geo/runs/claim", None, "Not found",
+                       {"limit": limit, "active": [str(run_id) for run_id in active]})
+    return list(body or [])  # type: ignore[arg-type]  # the endpoint answers a JSON array
+
+
+async def set_geo_run_status(run_id: UUID, status: str, reason: str | None = None) -> dict:
+    return await _send("PUT", f"/internal/analytics/geo/runs/{run_id}/status", None, "Run not found",
+                       {"status": status, "reason": reason}) or {}
+
+
+async def post_geo_results(run_id: UUID, results: list[dict]) -> dict:
+    return await _send("POST", f"/internal/analytics/geo/runs/{run_id}/results", None, "Run not found",
+                       {"results": results}) or {}
+
+
+async def postpone_geo_run(run_id: UUID, minutes: int) -> dict:
+    """Drops a weekly run that could not start; its site is due again in `minutes`."""
+    return await _send("POST", f"/internal/analytics/geo/runs/{run_id}/postpone", None, "Run not found",
+                       {"minutes": minutes}) or {}
+
+
 async def fetch_agent_connections(caller: Caller) -> list[dict]:
     """The player's provider accounts, as the account page lists them (no secrets)."""
     body = await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/agents/connections",

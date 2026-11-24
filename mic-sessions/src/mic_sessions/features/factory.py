@@ -799,7 +799,7 @@ async def _has_room(caller: Caller, player_id: UUID, limits: dict[UUID, int]) ->
         limits[player_id] = await mooi.fetch_session_limit(caller)
     registry = get_registry()
     return (registry.count() < get_settings().max_sessions
-            and len(registry.list_for(player_id, None)) < limits[player_id])
+            and registry.owned(player_id) < limits[player_id])
 
 
 def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Json) -> TaskRun:
