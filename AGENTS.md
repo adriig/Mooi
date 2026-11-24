@@ -136,10 +136,26 @@ Each project plans and builds its work as a software factory: agents design it, 
 - **Model assignment**: an assignment expert picks each task's provider, model and effort from the user's
   linked accounts and their remaining quota, with ordered fallbacks, so no account runs out of credits. The
   platform checks quota again when a task launches and falls back to the next alternative when needed.
-- **To-dos** entry in the main menu gathers features, defects and debt from every project on one page.
-  Opening an item shows its task breakdown and every task's settings. Status filters show their counts
-  in compact pills (`1.2K`) that never overflow. Projects are filtered by a dropdown with checkboxes
-  remembered per user on the current device; projects load only as they come into view.
+- **To-dos** entry in the main menu is one Kanban board of the features, defects and debt of every project
+  selected in a dropdown with checkboxes, remembered per user on the current device; the board loads the
+  selected projects and each card shows its project. Columns are derived from state, never dragged:
+  **DEFINED** (not started), **IN PROGRESS** (running or paused; cards flag tasks needing the user),
+  **PENDING TO DEPLOY** (all merged, not yet in a successful production deployment; projects without
+  production stay here) and **DEPLOYED**, newest first. DEPLOYED shows at most as many cards as the largest
+  other column (minimum 5), so it never grows the board, with a **Load more** button for further pages.
+  Headers show counts in compact pills (`1.2K`). Cards offer Start, Pause or Resume (Start only on DEFINED)
+  and show merge commits and, when deployed, the version. A kind filter (All, Features, Defects, Debt) and
+  creating defects and debt stay; status filters and factory settings are not on To-dos. Phones show one
+  column at a time, chosen with one tab per column. Opening an item shows its task breakdown, every task's
+  settings, merge commit and deployed version.
+- **Merge commit and deployed version**: a development or fix task records its merge commit; a task and
+  its item record the **deployed version**, the first production release containing it, set
+  deterministically (no agent) when a production deployment succeeds. A rollback keeps the first version and
+  flags the card "Not in current release <tag>". An item is deployed when its last development or fix task
+  is. Recomputation is idempotent and never fails or delays the deployment; errors are logged and the next
+  success reconciles. Legacy done items lacking merge commits, and closed defect/debt issues without a
+  Mooi item, show in DEPLOYED as "Unknown version" and are never backfilled. Changes stream live, so
+  boards on every device move cards when a deployment finishes.
 - **Board tab** (per project and feature): pick a feature and see its tasks as a left-to-right dependency
   graph of coloured nodes. Without opening a task, each node shows and changes auto-merge (robot icon),
   provider and model, and tests. Defects detected by QA appear as fix tasks in red, with a defect icon
@@ -163,7 +179,7 @@ Each project plans and builds its work as a software factory: agents design it, 
     creates no fix and consumes no correction round; it waits for attention. Legacy generic blocked reports
     remain supported;
   - a defect or debt item closes its GitHub issue when its work merges.
-- **Factory settings** (per project, from To-dos, the Board or the chat): the quota percent from which an
+- **Factory settings** (per project, from the Board or the chat): the quota percent from which an
   account is spared (default 85%), the sessions a task may lose before it waits for the user (3), the
   fix-and-check-again rounds after a failed QA (3; 0 hands every failure to the user) and the agentic merge
   attempts on conflicts (2; 0 leaves conflicts to the user).
