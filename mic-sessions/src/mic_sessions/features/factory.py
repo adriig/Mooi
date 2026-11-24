@@ -304,13 +304,31 @@ async def issue_item(project_id: UUID, number: int, caller: Annotated[Caller, De
 # --- session agents ------------------------------------------------------------------------------
 
 
+class TaskFinding(BaseModel):
+    """One bounded, reproducible defect found within the QA task's acceptance scope."""
+
+    id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=200)
+    priority: Literal["critical", "high", "medium", "low"]
+    criterion: str = Field(min_length=1, max_length=4_000)
+    reproduction: str = Field(min_length=1, max_length=6_000)
+    expected: str = Field(min_length=1, max_length=4_000)
+    observed: str = Field(min_length=1, max_length=4_000)
+    evidence: str = Field(default="", max_length=4_000)
+
+
 class TaskReport(BaseModel):
     """What a factory task's agent reports once its turn's work is over."""
 
     outcome: Literal["done", "blocked", "passed", "defect"]
-    summary: str = Field(min_length=1, max_length=20_000)
-    # A defect only: a short name for it; `summary` then holds steps, expected and actual behaviour.
+    summary: str = Field(default="", max_length=20_000)
+    # A defect only: short legacy name; `summary` then holds steps, expected and actual behaviour.
     title: str | None = Field(default=None, max_length=200)
+    # QA deliveries are stable across retries; older agents may omit this and use title/summary.
+    deliveryId: str | None = Field(default=None, min_length=1, max_length=100)
+    findings: list[TaskFinding] = Field(default_factory=list, max_length=20)
+    blockerCategory: Literal["access", "credentials", "infrastructure", "capacity"] | None = None
+    blockerCause: str | None = Field(default=None, max_length=4_000)
 
 
 @router.get("/sessions/{session_id}/work/agent")
@@ -420,8 +438,23 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
         raise ApiException.conflict("This session does not run a factory task")
     if run.qa != (report.outcome in ("passed", "defect")) and report.outcome != "blocked":
         raise ApiException.bad_request("A QA task reports passed or defect; a development task reports done")
-    if report.outcome == "defect" and not (report.title or "").strip():
-        raise ApiException.bad_request("Name the defect in `title`")
+    if report.outcome == "defect" and not report.findings and not (report.title or "").strip():
+        raise ApiException.bad_request("Provide findings or name the defect in `title`")
+    if len({finding.id for finding in report.findings}) != len(report.findings):
+        raise ApiException.bad_request("Finding ids must be unique within a delivery")
+    if report.outcome == "blocked" and not (report.blockerCause or report.summary).strip():
+        raise ApiException.bad_request("Explain the blocker in `blockerCause` or `summary`")
+    if report.outcome in ("done", "passed") and not report.summary.strip():
+        raise ApiException.bad_request("Provide a summary of the completed work")
+    if run.qa:
+        persisted = await mooi.report_task(run.task_id, {
+            "status": "running",
+            "sessionId": str(session_id),
+            "attempts": run.attempts,
+            "report": report.blockerCause or report.summary or report.title,
+            "qaReport": report.model_dump(exclude_none=True),
+        })
+        _publish_item(run.player_id, persisted.get("item"))
     run.outcome = report
 
 
@@ -490,9 +523,13 @@ def _task_section(run: TaskRun, root: str) -> str:
             "push or switch branches."
         )
     if run.qa:
-        outcomes = ('`{"outcome": "passed", "summary": "<what you checked>"}` when every acceptance criterion is met, '
-                    'or `{"outcome": "defect", "title": "<short name>", "summary": "<steps, expected and actual '
-                    'behaviour>"}` for the most important defect you found')
+        outcomes = ('`{"outcome":"passed","summary":"<independent checks and results>"}` only when every criterion '
+                    'passes, `{"outcome":"defect","deliveryId":"<stable id>","findings":[{"id":"<stable id>",'
+                    '"title":"...","priority":"critical|high|medium|low","criterion":"...","reproduction":"...",'
+                    '"expected":"...","observed":"...","evidence":"<redacted>"}]}` for all reproducible defects '
+                    'in scope (at most 20), or `{"outcome":"blocked","blockerCategory":"access|credentials|'
+                    'infrastructure|capacity","blockerCause":"<specific cause>"}` when independent validation '
+                    'cannot proceed')
     else:
         outcomes = '`{"outcome": "done", "summary": "<what you changed>"}` once the task is complete'
     return f"""## Software factory task
@@ -500,7 +537,8 @@ This session runs one task of the project's software factory, on its own; there 
 - Stay within the task. Other tasks run in their own sessions; the tasks this one depended on are already merged into the default branch.
 - Ask the user only when you truly cannot go on: the task then waits for their answer.
 {branch_guidance}
-- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead."""
+- QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
+- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
 
 sessions.instruction_sections.append(_work_section)
@@ -807,8 +845,13 @@ def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Js
                   project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
                   title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
                   attempts=task["attempts"],
-                  qa_rounds=sum(1 for other in item["tasks"] if other.get("fixOf") == task["id"]),
+                  qa_rounds=task.get("qaRounds", 0),
                   status=task["status"], phase="review" if task["status"] == "review" else "working", limits=limits)
+    if run.qa and isinstance(task.get("qaReport"), dict):
+        try:
+            run.outcome = TaskReport.model_validate(task["qaReport"])
+        except Exception:
+            LOG.warning("Could not restore saved QA report for task %s", run.task_id, exc_info=True)
     _runs[session.id] = run
     return run
 
@@ -1009,17 +1052,29 @@ async def _settle(run: TaskRun, session: Session) -> None:
             return
         await _report(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
         return
-    run.outcome, run.nudged = None, False
+    run.nudged = False
     if report.outcome == "blocked":
-        await _report(run, "attention", report=report.summary)
+        if run.qa:
+            answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
+            _publish_item(run.player_id, answer.get("item"))
+            run.outcome = None
+            await _close(run)
+        else:
+            run.outcome = None
+            await _report(run, "attention", report=report.summary)
     elif report.outcome == "passed":
-        await _finish(run, report.summary, locked=True)
+        if run.qa:
+            answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
+            _publish_item(run.player_id, answer.get("item"))
+            run.outcome = None
+            await _close(run)
+        else:
+            run.outcome = None
+            await _finish(run, report.summary, locked=True)
     elif report.outcome == "defect":
-        if run.qa_rounds >= run.limits["maxQaRounds"]:
-            await _report(run, "attention", report=f"Still failing after {run.qa_rounds} fixes: {report.summary}")
-            return
-        answer = await mooi.report_defect(run.task_id, (report.title or "defect").strip(), report.summary)
+        answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
         _publish_item(run.player_id, answer.get("item"))
+        run.outcome = None
         await _close(run)
     elif run.auto_merge:
         await _merge(run)

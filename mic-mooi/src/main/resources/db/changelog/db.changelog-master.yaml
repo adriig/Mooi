@@ -105,3 +105,5 @@ databaseChangeLog:
       file: db/changelog/changes/051-analytics-site-google-connection.yaml
   - include:
       file: db/changelog/changes/052-analytics-geo-run-runner.yaml
+  - include:
+      file: db/changelog/changes/053-work-qa-deliveries.yaml

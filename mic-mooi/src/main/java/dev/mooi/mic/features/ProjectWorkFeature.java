@@ -2,6 +2,7 @@ package dev.mooi.mic.features;
 
 import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -245,7 +246,7 @@ public class ProjectWorkFeature {
     @PostMapping("/internal/work/tasks/{taskId}/fix")
     @Auth.ServiceOnly
     public RunnerItem fix(@PathVariable UUID taskId, @Valid @RequestBody FixDraft draft) {
-        return work.fix(taskId, draft);
+        return work.reportDefect(taskId, draft);
     }
 
     @PutMapping("/internal/work/items/{itemId}/status")
@@ -269,6 +270,7 @@ public class ProjectWorkFeature {
         private final WorkProjectRepository projects;
         private final WorkItemRepository items;
         private final WorkTaskRepository tasks;
+        private final WorkQaDeliveryRepository qaDeliveries;
         private final WorkSettingsRepository settings;
         private final Clock clock;
         private final ObjectMapper json = JsonMapper.shared();
@@ -590,6 +592,12 @@ public class ProjectWorkFeature {
             task.setSessionId(progress.sessionId());
             task.setAttempts(progress.attempts());
             task.setReport(progress.report());
+            if (progress.status() == TaskStatus.running && task.getQaOfId() != null
+                    && !java.util.Objects.equals(task.getSessionId(), progress.sessionId())) {
+                task.setQaReport(null);
+            } else if (progress.qaReport() != null) {
+                task.setQaReport(json.writeValueAsString(progress.qaReport()));
+            }
             // Only a successful development merge supplies this; later progress must never clear it.
             if (progress.status() == TaskStatus.done && task.getQaOfId() == null
                     && task.getMergeSha() == null && progress.mergeSha() != null) {
@@ -608,7 +616,7 @@ public class ProjectWorkFeature {
         }
 
         @Transactional
-        public RunnerItem fix(UUID qaTaskId, FixDraft draft) {
+        public RunnerItem reportDefect(UUID qaTaskId, FixDraft draft) {
             WorkTask found = tasks.findById(qaTaskId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             WorkItem item = items.findLockedById(found.getItemId())
@@ -621,35 +629,130 @@ public class ProjectWorkFeature {
             if (qa.getQaOfId() == null) {
                 throw badRequest("Only a QA task reports defects");
             }
+            String serialized = json.writeValueAsString(draft);
+            QaOutcome outcome = draft.outcome() == null ? QaOutcome.defect : draft.outcome();
+            String deliveryId = draft.deliveryId() == null
+                    ? UUID.nameUUIDFromBytes((qaTaskId + "|" + outcome + "|" + serialized)
+                            .getBytes(StandardCharsets.UTF_8)).toString()
+                    : draft.deliveryId();
+            if (qaDeliveries.existsByQaTaskIdAndDeliveryId(qaTaskId, deliveryId)) {
+                return runnerItem(item, all);
+            }
             WorkTask tested = find(all, qa.getQaOfId());
-            WorkTask fix = new WorkTask();
-            fix.setId(UUID.randomUUID());
-            fix.setItemId(item.getId());
-            fix.setKey(uniqueKey("fix-" + tested.getKey(), keys(all)));
-            fix.setTitle(requireText("Fix: " + draft.title(), "title"));
-            fix.setCategory(TaskCategory.dev);
-            fix.setDescription(draft.description() == null ? "" : draft.description().strip());
-            fix.setAcceptance(qa.getAcceptance());
-            fix.setProvider(tested.getProvider());
-            fix.setConnectionId(tested.getConnectionId());
-            fix.setModel(tested.getModel());
-            fix.setEffort(tested.getEffort());
-            fix.setAlternatives(tested.getAlternatives());
-            fix.setAutoMerge(tested.isAutoMerge());
-            fix.setTests(false);
-            fix.setFixOfId(qa.getId());
-            fix.setStatus(TaskStatus.planned);
-            fix.setPosition(qa.getPosition());
-            fix.setDependsOn(new LinkedHashSet<>(Set.of(tested.getId())));
-            all.add(fix);
-            qa.getDependsOn().add(fix.getId());
-            qa.setStatus(TaskStatus.planned);
-            qa.setSessionId(null);
-            qa.setStartedAt(null);
-            qa.setFinishedAt(null);
+            String summary = draft.summary();
+            if (summary == null || summary.isBlank()) {
+                summary = draft.blockerCause() != null ? draft.blockerCause()
+                        : draft.description() != null ? draft.description()
+                        : draft.findings() == null ? "QA completed" : draft.findings().stream()
+                                .map(FindingDraft::title).filter(value -> value != null && !value.isBlank())
+                                .collect(Collectors.joining("; "));
+            }
+            summary = requireText(summary, "summary");
+            qa.setQaReport(serialized);
+            qa.setReport(outcome == QaOutcome.blocked
+                    ? "QA blocked (" + (draft.blockerCategory() == null ? "unspecified" : draft.blockerCategory())
+                            + "): " + (draft.blockerCause() == null ? summary : draft.blockerCause())
+                    : summary);
+            WorkQaDelivery delivery = new WorkQaDelivery();
+            delivery.setId(UUID.randomUUID());
+            delivery.setQaTaskId(qaTaskId);
+            delivery.setDeliveryId(deliveryId);
+            delivery.setOutcome(outcome);
+            delivery.setPayload(serialized);
+            qaDeliveries.save(delivery);
+
+            OffsetDateTime now = OffsetDateTime.now(clock);
+            if (outcome == QaOutcome.blocked) {
+                qa.setStatus(TaskStatus.attention);
+                qa.setSessionId(null);
+                qa.setFinishedAt(null);
+            } else if (outcome == QaOutcome.passed) {
+                qa.setStatus(TaskStatus.done);
+                qa.setSessionId(null);
+                qa.setFinishedAt(now);
+                if (all.stream().allMatch(task -> task.getStatus() == TaskStatus.done || task == qa)) {
+                    item.setStatus(ItemStatus.done);
+                    item.setFinishedAt(now);
+                }
+            } else {
+                int maxQaRounds = settings.findById(item.getProjectId()).map(WorkSettings::getMaxQaRounds)
+                        .orElse(WorkSettingsPayload.DEFAULTS.maxQaRounds());
+                if (qa.getQaRounds() >= maxQaRounds) {
+                    qa.setStatus(TaskStatus.attention);
+                    qa.setSessionId(null);
+                    qa.setFinishedAt(null);
+                    qa.setReport("QA still fails after " + qa.getQaRounds() + " correction rounds: " + summary);
+                } else {
+                    List<FindingDraft> findings = draft.findings() == null ? List.of() : draft.findings();
+                    if (findings.isEmpty()) {
+                        findings = List.of(new FindingDraft("legacy", requireText(draft.title(), "title"),
+                                FindingPriority.high, qa.getAcceptance().isBlank() ? summary : qa.getAcceptance(),
+                                draft.description() == null ? summary : draft.description(),
+                                qa.getAcceptance().isBlank() ? "The reported behaviour matches the acceptance criteria"
+                                        : qa.getAcceptance(),
+                                summary, ""));
+                    }
+                    if (findings.stream().map(FindingDraft::id).distinct().count() != findings.size()) {
+                        throw badRequest("Finding ids must be unique within a delivery");
+                    }
+                    if (all.size() + findings.size() > MAX_TASKS) {
+                        qa.setStatus(TaskStatus.attention);
+                        qa.setSessionId(null);
+                        qa.setFinishedAt(null);
+                        qa.setReport("QA found " + findings.size()
+                                + " in-scope defects, but the feature task limit prevents creating all fixes");
+                        tasks.saveAll(all);
+                        items.save(touch(item));
+                        return runnerItem(item, all);
+                    }
+                    Set<String> existingKeys = keys(all);
+                    for (FindingDraft finding : findings.stream()
+                            .sorted(Comparator.comparingInt(finding -> finding.priority().ordinal())).toList()) {
+                        String keySuffix = UUID.nameUUIDFromBytes((deliveryId + "|" + finding.id())
+                                .getBytes(StandardCharsets.UTF_8)).toString().replace("-", "").substring(0, 12);
+                        WorkTask fix = new WorkTask();
+                        fix.setId(UUID.randomUUID());
+                        fix.setItemId(item.getId());
+                        fix.setKey(uniqueKey(("fix-" + tested.getKey() + "-" + keySuffix).substring(0, 64), existingKeys));
+                        existingKeys.add(fix.getKey());
+                        fix.setTitle(requireText("Fix: " + finding.title(), "title"));
+                        fix.setCategory(TaskCategory.dev);
+                        fix.setDescription(findingDescription(finding));
+                        fix.setFindingId(finding.id());
+                        fix.setAcceptance(qa.getAcceptance());
+                        fix.setProvider(tested.getProvider());
+                        fix.setConnectionId(tested.getConnectionId());
+                        fix.setModel(tested.getModel());
+                        fix.setEffort(tested.getEffort());
+                        fix.setAlternatives(tested.getAlternatives());
+                        fix.setAutoMerge(tested.isAutoMerge());
+                        fix.setTests(false);
+                        fix.setFixOfId(qa.getId());
+                        fix.setStatus(TaskStatus.planned);
+                        fix.setPosition(qa.getPosition());
+                        fix.setDependsOn(new LinkedHashSet<>(Set.of(tested.getId())));
+                        all.add(fix);
+                        qa.getDependsOn().add(fix.getId());
+                    }
+                    qa.setQaRounds(qa.getQaRounds() + 1);
+                    qa.setStatus(TaskStatus.planned);
+                    qa.setSessionId(null);
+                    qa.setStartedAt(null);
+                    qa.setFinishedAt(null);
+                }
+            }
             tasks.saveAll(all);
             items.save(touch(item));
             return runnerItem(item, all);
+        }
+
+        private static String findingDescription(FindingDraft finding) {
+            return "QA finding (" + finding.priority() + ")\n\n"
+                    + "Acceptance criterion:\n" + finding.criterion() + "\n\n"
+                    + "Reproduction:\n" + finding.reproduction() + "\n\n"
+                    + "Expected:\n" + finding.expected() + "\n\n"
+                    + "Observed:\n" + finding.observed() + "\n\n"
+                    + "Redacted evidence:\n" + (finding.evidence() == null ? "" : finding.evidence());
         }
 
         @Transactional
@@ -926,6 +1029,15 @@ public class ProjectWorkFeature {
             }
         }
 
+        private Map<String, Object> readQaReport(String value) {
+            try {
+                return value == null || value.isBlank() ? null
+                        : json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            } catch (RuntimeException exception) {
+                return null;
+            }
+        }
+
         private WorkItem touch(WorkItem item) {
             item.setUpdatedAt(OffsetDateTime.now(clock));
             return item;
@@ -949,10 +1061,12 @@ public class ProjectWorkFeature {
                                     task.getDescription(), task.getAcceptance(),
                                     new Assignment(task.getProvider(), task.getConnectionId(), task.getModel(),
                                             task.getEffort()),
-                                    readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
-                                    task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
-                                    task.getAttempts(), task.getReport(), task.getMergeSha(), List.copyOf(task.getDependsOn()),
-                                    task.getStartedAt(), task.getFinishedAt()))
+                                     readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
+                                     task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
+                                     task.getAttempts(), task.getReport(), readQaReport(task.getQaReport()),
+                                     task.getFindingId(),
+                                     task.getQaRounds(), task.getMergeSha(), List.copyOf(task.getDependsOn()),
+                                     task.getStartedAt(), task.getFinishedAt()))
                             .toList());
         }
 
@@ -1275,6 +1389,17 @@ public class ProjectWorkFeature {
         @Column(name = "report", columnDefinition = "text")
         private String report;
 
+        /** Latest structured QA delivery, retained for the Board, To-dos and chat API. */
+        @Column(name = "qa_report", columnDefinition = "text")
+        private String qaReport;
+
+        /** Number of failed QA deliveries that actually created correction tasks. */
+        @Column(name = "qa_rounds", nullable = false)
+        private int qaRounds;
+
+        @Column(name = "finding_id", length = 100)
+        private String findingId;
+
         /** Full commit from a successful development merge; absent for QA and other completion paths. */
         @Column(name = "merge_sha", length = 40)
         private String mergeSha;
@@ -1292,6 +1417,36 @@ public class ProjectWorkFeature {
         @CollectionTable(name = "work_task_dependencies", joinColumns = @JoinColumn(name = "task_id"))
         @Column(name = "depends_on_id", nullable = false)
         private Set<UUID> dependsOn = new LinkedHashSet<>();
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "WorkQaDelivery")
+    @Table(name = "work_qa_deliveries")
+    public static class WorkQaDelivery {
+
+        @Id
+        @Column(name = "id", nullable = false, updatable = false)
+        private UUID id;
+
+        @Column(name = "qa_task_id", nullable = false, updatable = false)
+        private UUID qaTaskId;
+
+        @Column(name = "delivery_id", nullable = false, updatable = false, length = 100)
+        private String deliveryId;
+
+        @Enumerated(EnumType.STRING)
+        @Column(name = "outcome", nullable = false, updatable = false, length = 16)
+        private QaOutcome outcome;
+
+        @Column(name = "payload", nullable = false, updatable = false, columnDefinition = "text")
+        private String payload;
+    }
+
+    public interface WorkQaDeliveryRepository extends JpaRepository<WorkQaDelivery, UUID> {
+
+        boolean existsByQaTaskIdAndDeliveryId(UUID qaTaskId, String deliveryId);
     }
 
     public interface WorkItemRepository extends JpaRepository<WorkItem, UUID> {
@@ -1487,21 +1642,47 @@ public class ProjectWorkFeature {
     }
 
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
-                               @Size(max = 50_000) String report, @Valid Assignment assignment,
+                               @Size(max = 50_000) String report, Map<String, Object> qaReport,
+                               @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha) {
     }
 
-    public record FixDraft(@NotBlank @Size(max = 280) String title, @Size(max = 50_000) String description) {
+    public enum QaOutcome { passed, defect, blocked }
+
+    public enum QaBlockerCategory { access, credentials, infrastructure, capacity }
+
+    public enum FindingPriority { critical, high, medium, low }
+
+    public record FindingDraft(@NotBlank @Size(max = 100) String id,
+                              @NotBlank @Size(max = 200) String title,
+                              @NotNull FindingPriority priority,
+                              @NotBlank @Size(max = 4_000) String criterion,
+                              @NotBlank @Size(max = 6_000) String reproduction,
+                              @NotBlank @Size(max = 4_000) String expected,
+                              @NotBlank @Size(max = 4_000) String observed,
+                              @Size(max = 4_000) String evidence) {
+    }
+
+    /** Also accepts the former {title, description} single-defect report. */
+    public record FixDraft(@Size(max = 100) String deliveryId,
+                           QaOutcome outcome,
+                           @Size(max = 280) String title,
+                           @Size(max = 50_000) String description,
+                           @Size(max = 20_000) String summary,
+                           @Size(max = 20) List<@Valid @NotNull FindingDraft> findings,
+                           QaBlockerCategory blockerCategory,
+                           @Size(max = 4_000) String blockerCause) {
     }
 
     public record ItemStatusChange(@NotNull ItemStatus status) {
     }
 
     public record TaskPayload(UUID id, String key, String title, TaskCategory category, String description,
-                              String acceptance, Assignment assignment, List<Assignment> alternatives,
-                              boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
-                              UUID sessionId, int attempts, String report, String mergeSha, List<UUID> dependsOn,
-                              OffsetDateTime startedAt, OffsetDateTime finishedAt) {
+                               String acceptance, Assignment assignment, List<Assignment> alternatives,
+                               boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
+                               UUID sessionId, int attempts, String report, Map<String, Object> qaReport,
+                               String findingId, int qaRounds, String mergeSha, List<UUID> dependsOn,
+                               OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
 
     public record ItemPayload(UUID id, UUID projectId, ItemKind kind, Integer issueNumber, String title, String spec,

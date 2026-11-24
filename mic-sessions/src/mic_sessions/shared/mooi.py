@@ -370,9 +370,9 @@ async def report_task(task_id: UUID, progress: dict) -> dict:
     return await _send("PUT", f"/internal/work/tasks/{task_id}", None, "Task not found", progress) or {}
 
 
-async def report_defect(qa_task_id: UUID, title: str, description: str) -> dict:
+async def report_defect(qa_task_id: UUID, report: dict) -> dict:
     return await _send("POST", f"/internal/work/tasks/{qa_task_id}/fix", None, "Task not found",
-                       {"title": title, "description": description}) or {}
+                       report) or {}
 
 
 async def set_item_status(item_id: UUID, status: str) -> dict:
