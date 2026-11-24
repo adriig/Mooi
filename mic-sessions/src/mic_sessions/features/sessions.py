@@ -663,28 +663,6 @@ class SessionsResponse(BaseModel):
     sessions: list[SessionPayload]
 
 
-class WorkspacePayload(BaseModel):
-    sessionId: UUID
-    status: str
-    branch: str
-    baseBranch: str
-    path: str | None
-    baseCommit: str | None
-    headCommit: str | None
-    headBranch: str | None
-    dirtyFiles: int
-    sizeBytes: int
-    createdAt: datetime
-    deploymentState: str
-    previewUrl: str | None
-
-
-class WorkspacesResponse(BaseModel):
-    root: str
-    workspaces: list[WorkspacePayload]
-    totalBytes: int
-
-
 class DeploymentSetupRequest(BaseModel):
     instructions: str = Field(min_length=1, max_length=20_000)
 
@@ -1637,41 +1615,6 @@ async def session_provider(provider: str, connectionId: UUID,
     descriptor = describe(provider)
     prepared = await descriptor.prepare(caller, str(connectionId), refresh=refresh, adapter=adapter)
     return descriptor.configuration(prepared.id)
-
-
-@router.get("/sessions/workspaces")
-async def list_workspaces(
-    caller: Annotated[Caller, Depends(current_caller)], projectId: UUID
-) -> WorkspacesResponse:
-    """Overview of every clone the caller holds for one project, read live from disk."""
-    sessions = [session for session in get_registry().list_for(caller.player_id, projectId)
-                if session.kind == "session"]
-
-    async def describe_workspace(session: Session) -> WorkspacePayload:
-        cloned = session.workspace != _UNSET_PATH
-        inspection = await workspaces.inspect(session.workspace) if cloned else None
-        return WorkspacePayload(
-            sessionId=session.id,
-            status=session.status,
-            branch=session.branch,
-            baseBranch=session.base_branch,
-            path=str(session.workspace) if cloned else None,
-            baseCommit=session.base_commit or None,
-            headCommit=inspection.head_commit if inspection else None,
-            headBranch=inspection.head_branch if inspection else None,
-            dirtyFiles=inspection.dirty_files if inspection else 0,
-            sizeBytes=inspection.size_bytes if inspection else 0,
-            createdAt=session.created_at,
-            deploymentState=session.deployment.state,
-            previewUrl=session.deployment.previewUrl,
-        )
-
-    payloads = await asyncio.gather(*(describe_workspace(session) for session in sessions))
-    return WorkspacesResponse(
-        root=str(workspaces.get_workspaces().root / "sessions"),
-        workspaces=list(payloads),
-        totalBytes=sum(payload.sizeBytes for payload in payloads),
-    )
 
 
 @router.get("/sessions")

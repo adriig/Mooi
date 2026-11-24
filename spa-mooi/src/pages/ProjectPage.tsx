@@ -1,6 +1,6 @@
-import { lazy, Suspense, useMemo, useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Navigate, useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { Compass, FolderGit2, MessagesSquare, Network, Plus } from 'lucide-react';
+import { Compass, MessagesSquare, Network, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { analyticsPath, sessionPath } from '@/app/paths';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
@@ -13,10 +13,7 @@ import { useProjects } from '@/features/projects/hooks/useProjects';
 import { findProject } from '@/features/projects/lib/findProject';
 import { NewSessionDialog } from '@/features/sessions/components/NewSessionDialog';
 import { SessionList } from '@/features/sessions/components/SessionList';
-import { WorkspacesOverview } from '@/features/sessions/components/workspaces/WorkspacesOverview';
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
-import { useProjectWorkspaces } from '@/features/sessions/hooks/useProjectWorkspaces';
-import { useProjectWork } from '@/features/work/hooks/useProjectWork';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Button } from '@/shared/components/Button';
@@ -37,9 +34,8 @@ import { useLiveStore } from '@/stores/liveStore';
 // The graph library only loads with the Board.
 const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then((module) => ({ default: module.WorkBoard })));
 
-const WORKSPACES_TAB = 'workspaces';
 const BOARD_TAB = 'board';
-const TABS = new Set([WORKSPACES_TAB, BOARD_TAB]);
+const TABS = new Set([BOARD_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -62,15 +58,8 @@ export const ProjectPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
   const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
-  const projectWork = useProjectWork(project?.id ?? '', tab === WORKSPACES_TAB && Boolean(project));
   const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
   const features = work?.items?.filter((item) => item.kind === 'feature' && item.status !== 'done').length;
-  const sessionsRevision = useMemo(
-    () => sessions.map((session) => `${session.id}:${session.status}:${session.deployment.state}:${session.workspacePath ?? ''}`).join('|'),
-    [sessions],
-  );
-  const workspaces = useProjectWorkspaces(tab === WORKSPACES_TAB ? project?.id : undefined, sessionsRevision);
-
   const handleTabChange = (next: string) =>
     setSearchParams(TABS.has(next) ? { tab: next, ...(next === BOARD_TAB && searchParams.get('feature') ? { feature: searchParams.get('feature')! } : {}) } : {}, { replace: true });
 
@@ -143,12 +132,6 @@ export const ProjectPage = () => {
         className="-mb-2 border-b border-line"
         items={[
           { id: 'sessions', label: 'Sessions', icon: MessagesSquare, count: sessions.length },
-          {
-            id: WORKSPACES_TAB,
-            label: 'Workspaces',
-            icon: FolderGit2,
-            count: sessions.filter((session) => session.workspacePath).length,
-          },
           { id: BOARD_TAB, label: 'Board', icon: Network, count: features },
         ]}
       />
@@ -157,19 +140,6 @@ export const ProjectPage = () => {
         <Suspense fallback={<Card className="h-[60vh] animate-pulse-soft" />}>
           <WorkBoard projectId={project.id} connections={connections} />
         </Suspense>
-      ) : tab === WORKSPACES_TAB ? (
-        <WorkspacesOverview
-          projectId={project.id}
-          previewsEnabled={project.webApplication}
-          overview={workspaces.overview}
-          loading={workspaces.loading}
-          error={workspaces.error}
-          onReload={workspaces.reload}
-          pendingFeatures={projectWork.items?.filter((item) => item.kind === 'feature' && item.status !== 'done') ?? null}
-          featuresLoading={!projectWork.items && !projectWork.loadError}
-          featuresError={projectWork.loadError}
-          onReloadFeatures={projectWork.reload}
-        />
       ) : sessions.length > 0 ? (
         <SessionList sessions={sessions} onNewSession={() => setNewSessionOpen(true)} />
       ) : (

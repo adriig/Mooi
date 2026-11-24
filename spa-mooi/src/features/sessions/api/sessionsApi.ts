@@ -15,12 +15,10 @@ import type { QueuedMessage } from '@/features/sessions/types/QueuedMessage';
 import type { SendMessageResponse } from '@/features/sessions/types/SendMessageResponse';
 import type { Session } from '@/features/sessions/types/Session';
 import type { SessionsResponse } from '@/features/sessions/types/SessionsResponse';
-import type { WorkspaceOverview } from '@/features/sessions/types/WorkspaceOverview';
 import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const sessionsPath = (projectId?: string) =>
   projectId ? `/sessions?projectId=${encodeURIComponent(projectId)}` : '/sessions';
-const workspacesPath = (projectId: string) => `/sessions/workspaces?projectId=${encodeURIComponent(projectId)}`;
 const sessionPath = (sessionId: string) => `/sessions/${sessionId}`;
 const messagesPath = (sessionId: string) => `/sessions/${sessionId}/messages`;
 const queuePath = (sessionId: string) => `/sessions/${sessionId}/queue`;
@@ -301,12 +299,6 @@ export const stopDeployment = async (sessionId: string): Promise<DeploymentSnaps
   const response = await sessionsFetch(`${sessionPath(sessionId)}/deployment/stop`, { method: 'POST' });
   if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not stop the deployment.'));
   return (await response.json()) as DeploymentSnapshot;
-};
-
-export const fetchWorkspaces = async (projectId: string): Promise<WorkspaceOverview> => {
-  const response = await sessionsFetch(workspacesPath(projectId));
-  if (!response.ok) throw new Error(await apiErrorMessage(response, 'Could not load the workspaces.'));
-  return (await response.json()) as WorkspaceOverview;
 };
 
 export const checkMerge = async (sessionId: string): Promise<MergeResult> => {
