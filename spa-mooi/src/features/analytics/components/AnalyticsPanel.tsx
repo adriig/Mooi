@@ -39,7 +39,7 @@ const METRICS: { id: AnalyticsMetric; label: string }[] = [
 const GROUP_TITLE = 'text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase';
 
 /**
- * The Analytics tab of a web-application project: tracker setup, overview, traffic and clicks of its
+ * The Analytics page of a web-application project: tracker setup, overview, traffic and clicks of its
  * production app. The range lives in the URL (`range`, and `from`/`to` for a custom one).
  */
 export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {

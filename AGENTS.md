@@ -249,8 +249,9 @@ Each project plans and builds its work as a software factory: agents design it, 
 
 ## Analytics
 
-- Every web-application project has an **Analytics** tab for its production app only; private development
-  previews are never measured. The tab reports traffic, clicks and search positioning.
+- An **Analytics** entry in the main menu (Workspace section) opens the analytics of a web-application
+  project, picked from a project selector remembered on the device, for its production app only; private
+  development previews are never measured. It reports traffic, clicks and search positioning.
 - The built-in Mooi tracker is the default source. A small script installed in the production app sends
   page views and clicks using a per-project public site key. It is cookieless, respects
   `navigator.doNotTrack` and Global Privacy Control, and uses a daily-rotating salted visitor hash so
@@ -258,14 +259,14 @@ Each project plans and builds its work as a software factory: agents design it, 
 - Users may also connect Google Analytics 4 and Google Search Console through their linked Google account.
   These integrations use read-only OAuth scopes and encrypted tokens. Search Console reports queries and
   pages, impressions, clicks, click-through rate and average position.
-- The tab provides overview and traffic/click reports, live visitors, date ranges and source-specific
+- The page provides overview and traffic/click reports, live visitors, date ranges and source-specific
   sections for the Mooi tracker, GA4 and Search Console, with explicit empty and partial setup states.
 - **GEO** includes AI-referral traffic from tracker visits; AI visibility monitoring that runs tracked
   prompts through the user's already linked provider accounts, manually or on a weekly schedule, while
   respecting account quotas; and an on-demand SEO & GEO audit of production sites. Audits check AI crawler
   access and site discoverability, return scored findings with suggested fixes, and **Fix in a session**
   opens a development session with the finding's fix request.
-- Analytics setup, configuration and reports converge between the tab and session chat through the Mooi
+- Analytics setup, configuration and reports converge between the page and session chat through the Mooi
   platform agent API, so agents can read statistics and retrieve the tracker snippet as well as manage
   configuration.
 

@@ -10,6 +10,8 @@ export const ROUTES = {
   session: '/projects/:projectId/sessions/:sessionId',
   sessions: '/sessions',
   todos: '/todos',
+  analytics: '/analytics',
+  analyticsProject: '/analytics/:projectId',
   deployments: '/deployments',
   deployment: '/deployments/:projectId',
   backups: '/backups',

@@ -201,7 +201,7 @@ X-Mooi-Agent-Token header as the other platform endpoints. They act only for thi
 Install the snippet returned by /site in the application's HTML head for PRODUCTION only. Ensure
 allowedOrigins contains its production origins. Dev previews are private and must never be measured;
 gate the snippet on production configuration. Never commit Google credentials or invent account ids.
-Analytics changes appear live in the Analytics tab. Production public tracker reachability is configured
+Analytics changes appear live on the Analytics page. Production public tracker reachability is configured
 by operators through the production deployment feature; do not change deployment files here.
 """
 

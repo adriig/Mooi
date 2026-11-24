@@ -1,9 +1,8 @@
 import { lazy, Suspense, useMemo, useState } from 'react';
-import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { ChartLine, Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
+import { Navigate, useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
+import { Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
-import { sessionPath } from '@/app/paths';
-import { AnalyticsPanel } from '@/features/analytics/components/AnalyticsPanel';
+import { analyticsPath, sessionPath } from '@/app/paths';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { ProjectHeader } from '@/features/projects/components/ProjectHeader';
 import {
@@ -34,7 +33,8 @@ import { useLiveStore } from '@/stores/liveStore';
  * edited from the header.
  *
  * The active tab lives in `?tab=` so a reload lands back on the same view. To-dos lists the project's
- * features, defects and debt; Board maps one feature's tasks and their dependencies.
+ * features, defects and debt; Board maps one feature's tasks and their dependencies. Analytics lives on
+ * its own page in the main menu; the former `?tab=analytics` links land there.
  */
 // The graph library only loads with the Board.
 const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then((module) => ({ default: module.WorkBoard })));
@@ -42,8 +42,7 @@ const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then
 const WORKSPACES_TAB = 'workspaces';
 const TODOS_TAB = 'todos';
 const BOARD_TAB = 'board';
-const ANALYTICS_TAB = 'analytics';
-const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB, ANALYTICS_TAB]);
+const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -61,12 +60,11 @@ export const ProjectPage = () => {
   const { sessions, busy: sessionBusy, actionError, create, clearActionError } = useProjectSessions(project?.id);
   const { connections, reload: reloadConnections } = useAgentConnections();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
-  const [initialSessionMessage, setInitialSessionMessage] = useState<string | undefined>();
   const [removalOpen, setRemovalOpen] = useState(false);
   const [removalAction, setRemovalAction] = useState<ProjectRemovalAction | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
-  const tab = requestedTab && TABS.has(requestedTab) && (requestedTab !== ANALYTICS_TAB || project?.webApplication) ? requestedTab : 'sessions';
+  const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
   const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
   const projectWork = useProjectWork(project?.id ?? '', tab === WORKSPACES_TAB && Boolean(project));
   const openWork = useMemo(() => (work?.items && work.issues
@@ -80,6 +78,10 @@ export const ProjectPage = () => {
 
   const handleTabChange = (next: string) =>
     setSearchParams(TABS.has(next) ? { tab: next, ...(next === BOARD_TAB && searchParams.get('feature') ? { feature: searchParams.get('feature')! } : {}) } : {}, { replace: true });
+
+  if (project && requestedTab === 'analytics') {
+    return <Navigate to={analyticsPath(project.id)} replace />;
+  }
 
   if (!project) {
     if (status === 'loading' || status === 'idle') {
@@ -156,13 +158,10 @@ export const ProjectPage = () => {
             count: openWork,
           },
           { id: BOARD_TAB, label: 'Board', icon: Network, count: features },
-          ...(project.webApplication ? [{ id: ANALYTICS_TAB, label: 'Analytics', icon: ChartLine }] : []),
         ]}
       />
 
-      {tab === ANALYTICS_TAB ? (
-        <AnalyticsPanel projectId={project.id} onFix={(request) => { setInitialSessionMessage(request); setNewSessionOpen(true); }} />
-      ) : tab === TODOS_TAB ? (
+      {tab === TODOS_TAB ? (
         <WorkPanel projectId={project.id} connections={connections} />
       ) : tab === BOARD_TAB ? (
         <Suspense fallback={<Card className="h-[60vh] animate-pulse-soft" />}>
@@ -205,11 +204,9 @@ export const ProjectPage = () => {
         onRefreshConnections={reloadConnections}
         onClose={() => {
           setNewSessionOpen(false);
-          setInitialSessionMessage(undefined);
           clearActionError();
         }}
         onCreate={handleCreateSession}
-        initialMessage={initialSessionMessage}
       />
       {removalOpen ? (
         <RemoveProjectDialog
