@@ -271,11 +271,11 @@ async def reconcile_production_deployments(active: list[UUID]) -> int:
 
 
 async def _send(method: str, path: str, caller: Caller | None, not_found_message: str,
-                payload: dict | None = None) -> dict | None:
+                payload: dict | None = None, params: dict[str, str | int] | None = None) -> dict | None:
     """A service call that changes state in `mic-mooi`; answers its JSON body, or None when it has none."""
     try:
         response = await get_http_client().request(method, f"{get_settings().mooi_api_base_url}{path}",
-                                                    headers=_service_headers(caller), json=payload)
+                                                    headers=_service_headers(caller), json=payload, params=params)
     except httpx.HTTPError:
         raise ApiException.bad_gateway() from None
     _raise_for_status(response, not_found_message)
@@ -368,6 +368,18 @@ async def fetch_running_work() -> list[dict]:
 async def report_task(task_id: UUID, progress: dict) -> dict:
     """Service-only: the runner's account of one task; answers the item with its owner."""
     return await _send("PUT", f"/internal/work/tasks/{task_id}", None, "Task not found", progress) or {}
+
+
+async def save_task_recovery(task_id: UUID, recovery: dict) -> dict:
+    """Persist one revisioned task handoff/result; recovery bundles never pass through this API."""
+    return await _send("PUT", f"/internal/work/tasks/{task_id}/recovery", None, "Task not found",
+                       recovery) or {}
+
+
+async def fetch_task_recovery(task_id: UUID, attempt: int) -> dict:
+    """Read one durable attempt record for recovery_runner; ownership is resolved server-side."""
+    return await _send("GET", f"/internal/work/tasks/{task_id}/recovery", None, "Task not found",
+                       params={"attempt": attempt}) or {}
 
 
 async def report_defect(qa_task_id: UUID, report: dict) -> dict:

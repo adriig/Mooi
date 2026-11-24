@@ -31,6 +31,7 @@ import re
 from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -52,7 +53,7 @@ from mic_sessions.features.sessions import (
     Session,
     get_registry,
 )
-from mic_sessions.shared import mooi
+from mic_sessions.shared import mooi, workspaces
 from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.env import get_settings
@@ -330,6 +331,10 @@ class TaskReport(BaseModel):
     findings: list[TaskFinding] = Field(default_factory=list, max_length=20)
     blockerCategory: Literal["access", "credentials", "infrastructure", "capacity"] | None = None
     blockerCause: str | None = Field(default=None, max_length=4_000)
+    next_step: str = Field(default="", alias="nextStep", max_length=20_000)
+    files: list[str] = Field(default_factory=list, max_length=500)
+    verifications: list[str] = Field(default_factory=list, max_length=200)
+    obstacles: list[str] = Field(default_factory=list, max_length=200)
 
 
 @router.get("/sessions/{session_id}/work/agent")
@@ -462,7 +467,7 @@ async def agent_save_work_settings(session_id: UUID, request: Request, settings:
 @router.post("/sessions/{session_id}/work/agent/task", status_code=status.HTTP_204_NO_CONTENT)
 async def agent_report_task(session_id: UUID, request: Request, report: TaskReport) -> None:
     """Recorded now, acted on when the agent's turn ends: the agent may still be wrapping up."""
-    await sessions._agent_access(session_id, request, "session")
+    session, _ = await sessions._agent_access(session_id, request, "session")
     run = _runs.get(session_id)
     if run is None:
         raise ApiException.conflict("This session does not run a factory task")
@@ -476,13 +481,14 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
         raise ApiException.bad_request("Explain the blocker in `blockerCause` or `summary`")
     if report.outcome in ("done", "passed") and not report.summary.strip():
         raise ApiException.bad_request("Provide a summary of the completed work")
+    await _persist_recovery(run, session, report=report)
     if run.qa:
         persisted = await mooi.report_task(run.task_id, {
             "status": "running",
             "sessionId": str(session_id),
             "attempts": run.attempts,
             "report": report.blockerCause or report.summary or report.title,
-            "qaReport": report.model_dump(exclude_none=True),
+            "qaReport": report.model_dump(exclude_none=True, by_alias=True),
         })
         _publish_item(run.player_id, persisted.get("item"))
     run.outcome = report
@@ -568,8 +574,9 @@ This session runs one task of the project's software factory, on its own; there 
 - Ask the user only when you truly cannot go on: the task then waits for their answer.
 - Spec access: `GET {root}/work/agent/context` returns only this item's spec index and revision; add `?section=<number>&revision=<revision>` for one complete section or `?full=true` for the entire unabridged spec. Use this instead of downloading the project's work list. If a revision changed, reload the index.
 {branch_guidance}
+- When reporting, also include `nextStep`, `files`, `verifications` and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
-- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
+- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
 
 sessions.instruction_sections.append(_work_section)
@@ -706,6 +713,7 @@ class TaskRun:
     status: str = "running"
     # The project's factory limits as of the latest tick (see `DEFAULT_LIMITS`).
     limits: Json = field(default_factory=lambda: dict(DEFAULT_LIMITS))
+    recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 _runs: dict[UUID, TaskRun] = {}
@@ -715,6 +723,7 @@ _tasks: set[asyncio.Task[None]] = set()
 _runner_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
 _lock = asyncio.Lock()
+_last_recovery_cleanup = 0.0
 
 
 def wake() -> None:
@@ -766,11 +775,14 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
 
 
 async def _runner_loop() -> None:
-    global _wake_event
+    global _wake_event, _last_recovery_cleanup
     _wake_event = asyncio.Event()
     while True:
         try:
             await _tick()
+            if asyncio.get_running_loop().time() - _last_recovery_cleanup > 3600:
+                await workspaces.cleanup_recovery()
+                _last_recovery_cleanup = asyncio.get_running_loop().time()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1118,6 +1130,122 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
 sessions.session_listeners.append(_on_session_event)
 
 
+def _handoff_text(value: str) -> str:
+    """Keep recovery metadata compact and redact credentials and host-local paths."""
+    text = workspaces._safe_handoff_text(value)
+    return re.sub(r"(?<![A-Za-z0-9])/(?:home|tmp|var/tmp|workspace)/[^\s'\"`]+", "[local path]", text)[:20_000]
+
+
+def _handoff_files(values: list[str]) -> list[str]:
+    safe = []
+    for value in values:
+        path = PurePosixPath(value)
+        if (not value or path.is_absolute() or ".." in path.parts or ".git" in path.parts
+                or value.startswith("-") or "\0" in value or "\\" in value):
+            continue
+        safe.append(value[:1024])
+    return list(dict.fromkeys(safe))[:500]
+
+
+def _qa_delivery_payload(report: TaskReport) -> Json:
+    """Exclude task-recovery handoff fields from the separate QA delivery contract."""
+    return report.model_dump(exclude_none=True, include={
+        "outcome", "summary", "title", "deliveryId", "findings", "blockerCategory", "blockerCause",
+    })
+
+
+async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskReport | None = None,
+                            final_summary: str | None = None, final_outcome: str | None = None) -> None:
+    """Capture one end-of-turn/handoff snapshot and persist its revisioned metadata for recovery_runner.
+
+    The object bundle stays in workspaces' private store. Only opaque revision and compact, scrubbed
+    metadata cross to mic-mooi. A failed capture is persisted as invalid evidence so no consumer can
+    mistake missing/corrupt data for a recoverable workspace.
+    """
+    async with run.recovery_lock:
+        summary = report.summary if report else (final_summary or "")
+        next_step = report.next_step if report else ""
+        files = _handoff_files(report.files if report else [])
+        verifications = [_handoff_text(value)[:2000] for value in report.verifications[:200]] if report else []
+        obstacles = [_handoff_text(value)[:2000] for value in report.obstacles[:200]] if report else []
+        outcome = report.outcome if report else final_outcome
+        title = report.title if report else None
+        safe_summary = _handoff_text(summary)
+        reported_summary = safe_summary if outcome else None
+        safe_next_step = _handoff_text(next_step)
+        try:
+            snapshot = await workspaces.capture_recovery(
+                session.workspace, owner_id=run.player_id, project_id=run.project_id, item_id=run.item_id,
+                task_id=run.task_id, attempt=run.attempts, branch=session.branch, base_commit=session.base_commit,
+            )
+            head_commit = snapshot.head_commit
+            revision = snapshot.snapshot_revision
+            saved_files = snapshot.files
+            valid, reason = True, None
+        except ApiException as failure:
+            # The agent report remains durable, but an unavailable/unsafe snapshot is explicitly unusable.
+            inspection = await workspaces.inspect(session.workspace)
+            head_commit = inspection.head_commit or session.base_commit or "0" * 40
+            revision = hashlib.sha256(
+                f"invalid:{run.task_id}:{run.attempts}:{session.id}:{uuid4()}".encode()
+            ).hexdigest()
+            saved_files = []
+            valid = False
+            reason = _handoff_text(failure.message)[:2000] or "Recovery snapshot could not be validated"
+        existing: Json | None
+        try:
+            existing = await mooi.fetch_task_recovery(run.task_id, run.attempts)
+        except ApiException as failure:
+            if failure.status_code != 404:
+                raise
+            existing = None
+        if report is None and existing:
+            outcome = outcome or existing.get("reportedOutcome")
+            title = title or existing.get("reportedTitle")
+            reported_summary = reported_summary or existing.get("reportedSummary")
+            if not safe_summary:
+                safe_summary = "Workspace snapshot captured at turn end; no new handoff report was submitted."
+        if not valid and existing and existing.get("snapshotValid"):
+            # Keep the last known-good snapshot intact; the latest reported result is a separate field.
+            revision = existing["snapshotRevision"]
+            head_commit = existing["headCommit"]
+            saved_files = existing.get("files") or []
+            safe_summary = existing.get("summary") or ""
+            safe_next_step = existing.get("nextStep") or ""
+            verifications = existing.get("verifications") or []
+            obstacles = existing.get("obstacles") or []
+            valid = True
+            reason = existing.get("validityReason")
+        await mooi.save_task_recovery(run.task_id, {
+            "attempt": run.attempts,
+            "branch": session.branch,
+            "baseCommit": session.base_commit or "0" * 40,
+            "headCommit": head_commit,
+            "snapshotRevision": revision,
+            "previousRevision": (existing or {}).get("snapshotRevision"),
+            "summary": safe_summary,
+            "nextStep": safe_next_step,
+            "files": saved_files if valid else files,
+            "verifications": verifications,
+            "obstacles": obstacles,
+            "reportedOutcome": outcome,
+            "reportedTitle": _handoff_text(title)[:200] if title else None,
+            "reportedSummary": reported_summary,
+            "snapshotValid": valid,
+            "validityReason": reason,
+        })
+
+
+async def _before_workspace_cleanup(session: Session) -> None:
+    """Last chance to preserve an active factory workspace before normal session removal."""
+    run = _runs.get(session.id)
+    if run is not None:
+        await _persist_recovery(run, session, report=run.outcome)
+
+
+sessions.workspace_cleanup_listeners.append(_before_workspace_cleanup)
+
+
 async def _set_status(run: TaskRun, status_: str, report: str | None) -> None:
     async with _lock:
         if _runs.get(run.session_id) is run and run.status != status_ and run.phase != "merging":
@@ -1127,9 +1255,12 @@ async def _set_status(run: TaskRun, status_: str, report: str | None) -> None:
 async def _after_turn(run: TaskRun) -> None:
     async with _lock:
         session = get_registry().get(run.session_id)
-        if _runs.get(run.session_id) is not run or session is None or session.closing or session.queue:
+        if _runs.get(run.session_id) is not run or session is None or session.closing:
             return
         try:
+            await _persist_recovery(run, session, report=run.outcome)
+            if session.queue:
+                return
             await _settle(run, session)
         except Exception as failure:
             LOG.warning("Task %s could not settle", run.task_id, exc_info=True)
@@ -1157,7 +1288,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
     run.nudged = False
     if report.outcome == "blocked":
         if run.qa:
-            answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
+            answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
             _publish_item(run.player_id, answer.get("item"))
             run.outcome = None
             await _close(run)
@@ -1166,7 +1297,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
             await _report(run, "attention", report=report.summary)
     elif report.outcome == "passed":
         if run.qa:
-            answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
+            answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
             _publish_item(run.player_id, answer.get("item"))
             run.outcome = None
             await _close(run)
@@ -1174,7 +1305,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
             run.outcome = None
             await _finish(run, report.summary, locked=True)
     elif report.outcome == "defect":
-        answer = await mooi.report_defect(run.task_id, report.model_dump(exclude_none=True))
+        answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
         _publish_item(run.player_id, answer.get("item"))
         run.outcome = None
         await _close(run)
@@ -1222,7 +1353,16 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
         return
     if _runs.get(run.session_id) is not run:
         return
+    session = get_registry().get(run.session_id)
+    if session is not None:
+        await _persist_recovery(run, session, final_summary=report,
+                                final_outcome="passed" if run.qa else "done")
     item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None)
+    for attempt in range(run.attempts + 1):
+        with suppress(Exception):
+            await workspaces.delete_recovery_attempt(
+                run.player_id, run.project_id, run.item_id, run.task_id, attempt,
+            )
     await _close(run)
     if run.issue_number and item.get("status") == "done":
         # A merge titled by the player may not name the issue: closing it here is idempotent.

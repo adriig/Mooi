@@ -107,3 +107,5 @@ databaseChangeLog:
       file: db/changelog/changes/052-analytics-geo-run-runner.yaml
   - include:
       file: db/changelog/changes/053-work-qa-deliveries.yaml
+  - include:
+      file: db/changelog/changes/054-work-task-recovery.yaml

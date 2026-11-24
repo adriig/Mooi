@@ -1,0 +1,41 @@
+databaseChangeLog:
+  - changeSet:
+      id: 054-work-task-recovery
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE work_task_recovery (
+                id uuid NOT NULL,
+                player_id uuid NOT NULL,
+                project_id uuid NOT NULL,
+                item_id uuid NOT NULL,
+                task_id uuid NOT NULL,
+                attempt integer NOT NULL,
+                branch varchar(120) NOT NULL,
+                base_commit varchar(64) NOT NULL,
+                head_commit varchar(64) NOT NULL,
+                snapshot_revision varchar(64) NOT NULL,
+                summary text NOT NULL DEFAULT '',
+                next_step text NOT NULL DEFAULT '',
+                files text NOT NULL DEFAULT '[]',
+                verifications text NOT NULL DEFAULT '[]',
+                obstacles text NOT NULL DEFAULT '[]',
+                reported_outcome varchar(16),
+                reported_title varchar(200),
+                reported_summary text,
+                snapshot_valid boolean NOT NULL DEFAULT false,
+                validity_reason text,
+                updated_at timestamp with time zone NOT NULL,
+                CONSTRAINT pk_work_task_recovery PRIMARY KEY (id),
+                CONSTRAINT uq_work_task_recovery_attempt UNIQUE (task_id, attempt),
+                CONSTRAINT fk_work_task_recovery_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_task_recovery_item FOREIGN KEY (item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_task_recovery_task FOREIGN KEY (task_id) REFERENCES work_tasks(id) ON DELETE CASCADE,
+                CONSTRAINT ck_work_task_recovery_attempt CHECK (attempt >= 0),
+                CONSTRAINT ck_work_task_recovery_outcome CHECK (reported_outcome IS NULL OR reported_outcome IN ('done', 'blocked', 'passed', 'defect'))
+              );
+              CREATE INDEX ix_work_task_recovery_owner ON work_task_recovery (player_id, project_id, item_id);
+      rollback:
+        - dropTable:
+            tableName: work_task_recovery

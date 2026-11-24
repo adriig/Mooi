@@ -1137,8 +1137,10 @@ def get_registry() -> SessionRegistry:
 # session's own agent API root).
 
 SessionListener = Callable[[Session, str, dict[str, Any]], None]
+WorkspaceCleanupListener = Callable[[Session], Awaitable[None]]
 InstructionSection = Callable[[Session, str], str]
 session_listeners: list[SessionListener] = []
+workspace_cleanup_listeners: list[WorkspaceCleanupListener] = []
 instruction_sections: list[InstructionSection] = []
 
 
@@ -1454,6 +1456,13 @@ async def _cleanup_workspace(session: Session) -> None:
             LOG.warning("Session %s Compose resources could not be removed; next boot retries", session.id,
                         exc_info=True)
     if docker_clean and session.workspace != _UNSET_PATH:
+        for listener in workspace_cleanup_listeners:
+            try:
+                await listener(session)
+            except Exception:
+                # Recovery evidence is more important than deleting the only remaining workspace.
+                LOG.exception("Session %s recovery handoff failed; retaining workspace", session.id)
+                return
         try:
             await workspaces.remove_workspace(session.id)
             session.workspace = _UNSET_PATH

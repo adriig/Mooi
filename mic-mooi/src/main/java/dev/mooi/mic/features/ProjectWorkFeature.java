@@ -242,6 +242,26 @@ public class ProjectWorkFeature {
         return work.progress(taskId, progress);
     }
 
+    /**
+     * Durable, revisioned recovery metadata for the runner; blobs remain in mic-sessions' private
+     * store. A missing task is 404; attempt mismatch or stale revision is 409; service-only callers
+     * provide no owner identifiers, which are derived from the task's project relationship.
+     */
+    @PutMapping("/internal/work/tasks/{taskId}/recovery")
+    @Auth.ServiceOnly
+    public TaskRecoveryPayload saveRecovery(@PathVariable UUID taskId,
+                                            @Valid @RequestBody TaskRecoveryUpdate update) {
+        return work.saveRecovery(taskId, update);
+    }
+
+    /** Reads only the requested attempt; unknown tasks and absent attempts both return 404. */
+    @GetMapping("/internal/work/tasks/{taskId}/recovery")
+    @Auth.ServiceOnly
+    public TaskRecoveryPayload recovery(@PathVariable UUID taskId,
+                                        @org.springframework.web.bind.annotation.RequestParam int attempt) {
+        return work.recovery(taskId, attempt);
+    }
+
     /** A failed QA run: the defect it found becomes a fix task, and the QA waits for it to run again. */
     @PostMapping("/internal/work/tasks/{taskId}/fix")
     @Auth.ServiceOnly
@@ -270,6 +290,7 @@ public class ProjectWorkFeature {
         private final WorkProjectRepository projects;
         private final WorkItemRepository items;
         private final WorkTaskRepository tasks;
+        private final TaskRecoveryRepository recoveries;
         private final WorkQaDeliveryRepository qaDeliveries;
         private final WorkSettingsRepository settings;
         private final Clock clock;
@@ -588,12 +609,13 @@ public class ProjectWorkFeature {
             if (progress.status() == TaskStatus.done && task.getStatus() != TaskStatus.done) {
                 task.setFinishedAt(now);
             }
+            UUID previousSessionId = task.getSessionId();
             task.setStatus(progress.status());
             task.setSessionId(progress.sessionId());
             task.setAttempts(progress.attempts());
             task.setReport(progress.report());
             if (progress.status() == TaskStatus.running && task.getQaOfId() != null
-                    && !java.util.Objects.equals(task.getSessionId(), progress.sessionId())) {
+                    && !java.util.Objects.equals(previousSessionId, progress.sessionId())) {
                 task.setQaReport(null);
             } else if (progress.qaReport() != null) {
                 task.setQaReport(json.writeValueAsString(progress.qaReport()));
@@ -602,6 +624,14 @@ public class ProjectWorkFeature {
             if (progress.status() == TaskStatus.done && task.getQaOfId() == null
                     && task.getMergeSha() == null && progress.mergeSha() != null) {
                 task.setMergeSha(progress.mergeSha());
+            }
+            if (progress.status() == TaskStatus.done) {
+                for (TaskRecovery recovery : recoveries.findByTaskId(taskId)) {
+                    recovery.setSnapshotValid(false);
+                    recovery.setValidityReason("Task finalized; recovery bundle retired");
+                    recovery.setUpdatedAt(now);
+                }
+                recoveries.flush();
             }
             if (progress.assignment() != null) {
                 assign(task, progress.assignment());
@@ -613,6 +643,138 @@ public class ProjectWorkFeature {
             }
             items.save(touch(item));
             return runnerItem(item, all);
+        }
+
+        /**
+         * Store one task attempt's compact handoff/result only after validating the task/item/project
+         * chain. A compare-and-set revision prevents a delayed session from replacing newer recovery
+         * evidence. The bundle itself is never sent to this service or persisted in the repository.
+         */
+        @Transactional
+        public TaskRecoveryPayload saveRecovery(UUID taskId, TaskRecoveryUpdate update) {
+            WorkTask task = tasks.findLockedById(taskId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            WorkItem item = items.findLockedById(task.getItemId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            WorkProject project = projects.findById(item.getProjectId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            if (task.getStatus() == TaskStatus.done) {
+                throw conflict("A completed task cannot accept new recovery evidence");
+            }
+            if (update.attempt() != task.getAttempts()) {
+                throw conflict("Recovery attempt does not match the task's current attempt");
+            }
+            if (update.files() != null && update.files().stream().anyMatch(path ->
+                    path == null || path.isBlank() || path.startsWith("/") || path.startsWith("-")
+                            || path.contains("\\") || path.contains("\0")
+                            || List.of(path.split("/")).stream().anyMatch(part ->
+                                    part.isBlank() || part.equals(".") || part.equals("..") || part.equals(".git")))) {
+                throw badRequest("Recovery contains an unsafe file path");
+            }
+            TaskRecovery row = recoveries.findLockedByTaskIdAndAttempt(taskId, update.attempt()).orElse(null);
+            String currentRevision = row == null ? null : row.getSnapshotRevision();
+            if (row != null && currentRevision.equals(update.snapshotRevision())) {
+                TaskRecoveryPayload existing = toRecoveryPayload(row);
+                if (sameRecovery(existing, update)) {
+                    return existing;
+                }
+                if (java.util.Objects.equals(currentRevision, update.previousRevision())
+                        && sameSnapshot(existing, update)) {
+                    row.setReportedOutcome(update.reportedOutcome());
+                    row.setReportedTitle(update.reportedTitle());
+                    row.setReportedSummary(update.reportedSummary());
+                    row.setUpdatedAt(OffsetDateTime.now(clock));
+                    return toRecoveryPayload(recoveries.save(row));
+                }
+                throw conflict("Recovery revision already exists with different metadata");
+            }
+            if (!java.util.Objects.equals(currentRevision, update.previousRevision())) {
+                throw conflict("Recovery evidence changed; reload its current revision before saving");
+            }
+            if (row == null) {
+                row = new TaskRecovery();
+                row.setId(UUID.randomUUID());
+                row.setTaskId(taskId);
+                row.setAttempt(update.attempt());
+            }
+            row.setPlayerId(project.getPlayerId());
+            row.setProjectId(project.getId());
+            row.setItemId(item.getId());
+            row.setBranch(update.branch());
+            row.setBaseCommit(update.baseCommit());
+            row.setHeadCommit(update.headCommit());
+            row.setSnapshotRevision(update.snapshotRevision());
+            row.setSummary(update.summary());
+            row.setNextStep(update.nextStep());
+            row.setFiles(json.writeValueAsString(update.files() == null ? List.of() : update.files()));
+            row.setVerifications(json.writeValueAsString(update.verifications() == null ? List.of() : update.verifications()));
+            row.setObstacles(json.writeValueAsString(update.obstacles() == null ? List.of() : update.obstacles()));
+            row.setReportedOutcome(update.reportedOutcome());
+            row.setReportedTitle(update.reportedTitle());
+            row.setReportedSummary(update.reportedSummary());
+            row.setSnapshotValid(update.snapshotValid());
+            row.setValidityReason(update.validityReason());
+            row.setUpdatedAt(OffsetDateTime.now(clock));
+            return toRecoveryPayload(recoveries.save(row));
+        }
+
+        @Transactional(readOnly = true)
+        public TaskRecoveryPayload recovery(UUID taskId, int attempt) {
+            if (attempt < 0) {
+                throw badRequest("Recovery attempt must not be negative");
+            }
+            // Checking the task first avoids exposing whether a recovery row exists for an unknown id.
+            tasks.findById(taskId).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            return recoveries.findByTaskIdAndAttempt(taskId, attempt).map(WorkService::toRecoveryPayload)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Recovery evidence not found"));
+        }
+
+        private static boolean sameRecovery(TaskRecoveryPayload existing, TaskRecoveryUpdate update) {
+            return existing.attempt() == update.attempt()
+                    && existing.branch().equals(update.branch())
+                    && existing.baseCommit().equals(update.baseCommit())
+                    && existing.headCommit().equals(update.headCommit())
+                    && existing.summary().equals(update.summary() == null ? "" : update.summary())
+                    && existing.nextStep().equals(update.nextStep() == null ? "" : update.nextStep())
+                    && existing.files().equals(update.files() == null ? List.of() : update.files())
+                    && existing.verifications().equals(update.verifications() == null ? List.of() : update.verifications())
+                    && existing.obstacles().equals(update.obstacles() == null ? List.of() : update.obstacles())
+                    && java.util.Objects.equals(existing.reportedOutcome(), update.reportedOutcome())
+                    && java.util.Objects.equals(existing.reportedTitle(), update.reportedTitle())
+                    && java.util.Objects.equals(existing.reportedSummary(), update.reportedSummary())
+                    && existing.snapshotValid() == update.snapshotValid()
+                    && java.util.Objects.equals(existing.validityReason(), update.validityReason());
+        }
+
+        private static boolean sameSnapshot(TaskRecoveryPayload existing, TaskRecoveryUpdate update) {
+            return existing.attempt() == update.attempt()
+                    && existing.branch().equals(update.branch())
+                    && existing.baseCommit().equals(update.baseCommit())
+                    && existing.headCommit().equals(update.headCommit())
+                    && existing.snapshotRevision().equals(update.snapshotRevision())
+                    && existing.summary().equals(update.summary())
+                    && existing.nextStep().equals(update.nextStep())
+                    && existing.files().equals(update.files() == null ? List.of() : update.files())
+                    && existing.verifications().equals(update.verifications() == null ? List.of() : update.verifications())
+                    && existing.obstacles().equals(update.obstacles() == null ? List.of() : update.obstacles())
+                    && existing.snapshotValid() == update.snapshotValid()
+                    && java.util.Objects.equals(existing.validityReason(), update.validityReason());
+        }
+
+        private static TaskRecoveryPayload toRecoveryPayload(TaskRecovery row) {
+            return new TaskRecoveryPayload(row.getTaskId(), row.getAttempt(), row.getBranch(), row.getBaseCommit(),
+                    row.getHeadCommit(), row.getSnapshotRevision(), row.getSummary(), row.getNextStep(),
+                    readStringList(row.getFiles()), readStringList(row.getVerifications()),
+                    readStringList(row.getObstacles()), row.getReportedOutcome(), row.getReportedTitle(),
+                    row.getReportedSummary(), row.isSnapshotValid(), row.getValidityReason(), row.getUpdatedAt());
+        }
+
+        private static List<String> readStringList(String value) {
+            try {
+                return JsonMapper.shared().readValue(value == null ? "[]" : value, new TypeReference<List<String>>() {});
+            } catch (RuntimeException exception) {
+                return List.of();
+            }
         }
 
         @Transactional
@@ -1419,6 +1581,90 @@ public class ProjectWorkFeature {
         private Set<UUID> dependsOn = new LinkedHashSet<>();
     }
 
+    /** Durable metadata for one attempt. Recovery objects are kept only by the isolated sessions service. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "WorkTaskRecovery")
+    @Table(name = "work_task_recovery")
+    public static class TaskRecovery {
+
+        @Id
+        @Column(name = "id", nullable = false, updatable = false)
+        private UUID id;
+
+        @Column(name = "player_id", nullable = false, updatable = false)
+        private UUID playerId;
+
+        @Column(name = "project_id", nullable = false, updatable = false)
+        private UUID projectId;
+
+        @Column(name = "item_id", nullable = false, updatable = false)
+        private UUID itemId;
+
+        @Column(name = "task_id", nullable = false, updatable = false)
+        private UUID taskId;
+
+        @Column(name = "attempt", nullable = false, updatable = false)
+        private int attempt;
+
+        @Column(name = "branch", nullable = false, length = 120)
+        private String branch;
+
+        @Column(name = "base_commit", nullable = false, length = 64)
+        private String baseCommit;
+
+        @Column(name = "head_commit", nullable = false, length = 64)
+        private String headCommit;
+
+        @Column(name = "snapshot_revision", nullable = false, length = 64)
+        private String snapshotRevision;
+
+        @Column(name = "summary", nullable = false, columnDefinition = "text")
+        private String summary;
+
+        @Column(name = "next_step", nullable = false, columnDefinition = "text")
+        private String nextStep;
+
+        @Column(name = "files", nullable = false, columnDefinition = "text")
+        private String files;
+
+        @Column(name = "verifications", nullable = false, columnDefinition = "text")
+        private String verifications;
+
+        @Column(name = "obstacles", nullable = false, columnDefinition = "text")
+        private String obstacles;
+
+        @Column(name = "reported_outcome", length = 16)
+        private String reportedOutcome;
+
+        @Column(name = "reported_title", length = 200)
+        private String reportedTitle;
+
+        @Column(name = "reported_summary", columnDefinition = "text")
+        private String reportedSummary;
+
+        @Column(name = "snapshot_valid", nullable = false)
+        private boolean snapshotValid;
+
+        @Column(name = "validity_reason", columnDefinition = "text")
+        private String validityReason;
+
+        @Column(name = "updated_at", nullable = false)
+        private OffsetDateTime updatedAt;
+    }
+
+    public interface TaskRecoveryRepository extends JpaRepository<TaskRecovery, UUID> {
+
+        Optional<TaskRecovery> findByTaskIdAndAttempt(UUID taskId, int attempt);
+
+        List<TaskRecovery> findByTaskId(UUID taskId);
+
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select recovery from WorkTaskRecovery recovery where recovery.taskId = :taskId and recovery.attempt = :attempt")
+        Optional<TaskRecovery> findLockedByTaskIdAndAttempt(@Param("taskId") UUID taskId, @Param("attempt") int attempt);
+    }
+
     @Getter
     @Setter
     @NoArgsConstructor
@@ -1645,6 +1891,37 @@ public class ProjectWorkFeature {
                                @Size(max = 50_000) String report, Map<String, Object> qaReport,
                                @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha) {
+    }
+
+    /**
+     * v1 recovery metadata; the content-addressed bundle is external to this API. previousRevision is
+     * a compare-and-set guard (null only for the first revision). Invalid snapshots remain reportable
+     * but are never offered as restore candidates.
+     */
+    public record TaskRecoveryUpdate(@Min(0) int attempt,
+                                     @NotBlank @Size(max = 120) @Pattern(regexp = "[A-Za-z0-9._/-]+") String branch,
+                                     @NotBlank @Size(max = 64) @Pattern(regexp = "[0-9a-f]{40,64}") String baseCommit,
+                                     @NotBlank @Size(max = 64) @Pattern(regexp = "[0-9a-f]{40,64}") String headCommit,
+                                     @NotBlank @Size(max = 64) @Pattern(regexp = "[0-9a-f]{64}") String snapshotRevision,
+                                     @Size(max = 64) @Pattern(regexp = "[0-9a-f]{64}") String previousRevision,
+                                      @NotNull @Size(max = 20_000) String summary,
+                                      @NotNull @Size(max = 20_000) String nextStep,
+                                     @Size(max = 500) List<@Size(max = 1024) String> files,
+                                     @Size(max = 200) List<@Size(max = 2_000) String> verifications,
+                                     @Size(max = 200) List<@Size(max = 2_000) String> obstacles,
+                                      @Pattern(regexp = "done|blocked|passed|defect") String reportedOutcome,
+                                      @Size(max = 200) String reportedTitle,
+                                      @Size(max = 20_000) String reportedSummary,
+                                      boolean snapshotValid,
+                                      @Size(max = 2_000) String validityReason) {
+    }
+
+    public record TaskRecoveryPayload(UUID taskId, int attempt, String branch, String baseCommit, String headCommit,
+                                       String snapshotRevision, String summary, String nextStep, List<String> files,
+                                       List<String> verifications, List<String> obstacles, String reportedOutcome,
+                                       String reportedTitle, String reportedSummary, boolean snapshotValid,
+                                       String validityReason,
+                                       OffsetDateTime updatedAt) {
     }
 
     public enum QaOutcome { passed, defect, blocked }

@@ -9,12 +9,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import fcntl
 import hashlib
+import json
 import logging
 import os
 import re
 import shutil
 import signal
+import stat
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -137,8 +140,31 @@ class FileContent:
     size: int = 0
 
 
+@dataclass(frozen=True)
+class RecoverySnapshot:
+    """A completed, content-addressed recovery bundle and its safe task handoff metadata."""
+
+    task_id: UUID
+    attempt: int
+    branch: str
+    base_commit: str
+    head_commit: str
+    snapshot_revision: str
+    files: list[str]
+
+
+@dataclass(frozen=True)
+class RecoveryLease:
+    """An open shared lock that prevents retention cleanup from deleting an active restore input."""
+
+    directory: Path
+    lock_file: object
+
+
 _BINARY_DIFF = re.compile(r"^Binary files .* differ$", re.MULTILINE)
 _CHANGE_KINDS = {"A": "added", "M": "modified", "D": "deleted", "R": "renamed", "C": "renamed", "T": "modified"}
+_RECOVERY_REVISION = re.compile(r"^[0-9a-f]{64}$")
+_RECOVERY_BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
 
 
 def _identity_env(identity: GitIdentity) -> dict[str, str]:
@@ -161,6 +187,28 @@ def _directory_size(directory: Path) -> int:
                 continue
             total += stat.st_size
     return total
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _open_recovery_lock(path: Path):
+    """Open a lock without following a possibly substituted symlink."""
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    return os.fdopen(descriptor, "r+b")
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class Workspaces:
@@ -441,6 +489,399 @@ class Workspaces:
         """A stable identity for the complete tracked and untracked working tree."""
         snapshot = await self._snapshot(workspace)
         return (await self._git("-C", str(workspace), "rev-parse", f"{snapshot}^{{tree}}")).strip()
+
+    # --- isolated task recovery -----------------------------------------------------------------
+
+    def _recovery_directory(self, owner_id: UUID, project_id: UUID, item_id: UUID,
+                            task_id: UUID, attempt: int) -> Path:
+        """The opaque store key is the full ownership chain, never a repository-controlled path."""
+        if not all(isinstance(value, UUID) for value in (owner_id, project_id, item_id, task_id)):
+            raise ApiException.bad_request("Invalid recovery ownership scope")
+        if type(attempt) is not int or attempt < 0:
+            raise ApiException.bad_request("Recovery attempt must not be negative")
+        root = self.root / "recovery"
+        if root.is_symlink():
+            raise RuntimeError("Managed recovery root cannot be a symlink")
+        directory = root / str(owner_id) / str(project_id) / str(item_id) / str(task_id) / str(attempt)
+        if directory.resolve(strict=False) != directory:
+            raise RuntimeError("Recovery path is outside the managed root")
+        return directory
+
+    def _secure_recovery_directory(self, directory: Path) -> None:
+        """Create every owner-scope component privately, rejecting links at each level."""
+        root = self.root / "recovery"
+        relative = directory.relative_to(root)
+        current = root
+        for part in (None, *relative.parts):
+            if part is not None:
+                current = current / part
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            details = os.lstat(current)
+            if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+                raise RuntimeError("Managed recovery directory is unsafe")
+            current.chmod(0o700)
+
+    def _assert_managed_workspace(self, workspace: Path) -> Path:
+        """Reject workspace symlinks and paths outside the sessions root before resolving them."""
+        raw = workspace.absolute()
+        sessions_root = (self.root / "sessions").resolve()
+        if raw.is_symlink() or not raw.resolve(strict=True).is_relative_to(sessions_root):
+            raise ApiException.bad_request("Recovery workspace is outside the managed sessions root")
+        current = raw
+        while current != self.root and current != current.parent:
+            if current.is_symlink():
+                raise ApiException.bad_request("Recovery refuses symlinks in workspace paths")
+            current = current.parent
+        return raw.resolve(strict=True)
+
+    @staticmethod
+    def _safe_recovery_path(path: str) -> bool:
+        relative = Path(path)
+        if (not path or "\0" in path or "\\" in path or relative.is_absolute() or ".." in relative.parts
+                or ".git" in relative.parts or path.startswith("-")):
+            return False
+        excluded = {entry.strip("/") for entry in get_settings().changes_excluded_directories}
+        return not any(part in excluded for part in relative.parts)
+
+    @staticmethod
+    def _sensitive_recovery_path(path: str) -> bool:
+        name = Path(path).name.lower()
+        return (name.startswith(".env") or "secret" in name or "credential" in name
+                or name.endswith((".pem", ".key", ".p8", ".p12", ".pfx", ".jks", ".keystore"))
+                or name in {"id_rsa", "id_ed25519"})
+
+    @staticmethod
+    def _contains_secret(data: bytes) -> bool:
+        """Conservative high-confidence checks; suspicious content is refused, never copied."""
+        sample = data[:2_000_000].decode("utf-8", "ignore")
+        patterns = (
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b",
+            r"\bAKIA[0-9A-Z]{16}\b",
+            r"(?i)(?:api[-_]?key|access[-_]?token|client[-_]?secret|password|private[-_]?key)\s*[:=]\s*['\"]?(?!\$\{|<|your_|change_me|example)[A-Za-z0-9/+=._-]{16,}",
+            r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@",
+            r"(?im)^\s*(?:[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CLIENT_SECRET))\s*[:=]\s*['\"]?(?!\$\{|<|your_|change_me|example)[A-Za-z0-9/+=._-]{12,}",
+        )
+        return any(re.search(pattern, sample) for pattern in patterns)
+
+    @staticmethod
+    def _safe_handoff_text(value: str, limit: int = 20_000) -> str:
+        """Redact common credential forms from user/agent-authored handoff text."""
+        text = _redact(value)
+        text = re.sub(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1***", text)
+        text = re.sub(r"(?i)\b(gh[pousr]_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_-]{12,}", r"\1***", text)
+        text = re.sub(r"(?im)^(\s*[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|SECRET|PASSWORD|PRIVATE_KEY)\s*[:=]\s*)\S+",
+                      r"\1***", text)
+        return text[:limit]
+
+    async def capture_recovery(
+        self, workspace: Path, *, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+        branch: str, base_commit: str, previous_revision: str | None = None,
+    ) -> RecoverySnapshot:
+        """Atomically save only the eligible diff for one owner/project/item/task/attempt.
+
+        v1 collapses local unpublished commits and eligible working-tree edits into one synthetic
+        commit based on `base_commit`; this preserves the complete resulting change without copying
+        arbitrary repository history, ignored files, Git config or credentials. The synthetic commit
+        is bundled outside the checkout, addressed by SHA-256 and published only after verification.
+        `previous_revision` is validated here; compare-and-set protection is enforced by the
+        mic-mooi metadata API before a revision becomes the latest durable handoff. Invalid paths/symlinks or credential-like
+        file content abort capture without publishing a partial snapshot. Errors intentionally omit
+        repository paths and Git diagnostics. Bad requests mean unsafe scope/path/content or malformed
+        revisions; conflicts mean a missing base or mismatched branch; gateway errors mean Git/storage
+        failed. No commit is pushed.
+        """
+        if (not _RECOVERY_BRANCH.fullmatch(branch) or branch.startswith("-")
+                or not _RECOVERY_REVISION.fullmatch(previous_revision or "")
+                and previous_revision is not None):
+            raise ApiException.bad_request("Invalid recovery branch or revision")
+        try:
+            await self.validate_branch(branch)
+            workspace = self._assert_managed_workspace(workspace)
+            if not workspace.is_dir():
+                raise ApiException.conflict("Recovery workspace is unavailable")
+            base = base_commit.strip()
+            if not re.fullmatch(r"[0-9a-f]{40,64}", base):
+                raise ApiException.bad_request("Invalid recovery base revision")
+            if not await self._git_ok("-C", str(workspace), "cat-file", "-e", f"{base}^{{tree}}"):
+                raise ApiException.conflict("Recovery base revision is unavailable")
+            symbolic = (await self._git("-C", str(workspace), "symbolic-ref", "--quiet", "--short", "HEAD")).strip()
+            if symbolic != branch:
+                raise ApiException.conflict("Recovery workspace is on a different branch")
+
+            tracked = await self._git("-C", str(workspace), "diff", "--no-renames", "--name-only", "-z", base, "--")
+            candidates = {path for path in tracked.split("\0") if path}
+            candidates.update(path for path in await self._untracked(workspace) if not path.endswith("/"))
+            if any(not self._safe_recovery_path(path) for path in candidates):
+                raise ApiException.bad_request("Recovery contains an unsafe file path")
+            candidates = {path for path in candidates if not self._sensitive_recovery_path(path)}
+            if len(candidates) > 500 or any(len(path) > 1024 for path in candidates):
+                raise ApiException.bad_request("Recovery file manifest exceeds its safety limit")
+            ignored = await self._ignored(workspace, list(candidates))
+            candidates.difference_update(ignored)
+
+            def inspect_candidates() -> None:
+                root = workspace.resolve()
+                for path in candidates:
+                    target = workspace / path
+                    current = workspace
+                    for part in Path(path).parts:
+                        current = current / part
+                        try:
+                            details = os.lstat(current)
+                        except FileNotFoundError:
+                            break
+                        if stat.S_ISLNK(details.st_mode):
+                            raise ApiException.bad_request("Recovery refuses symlinks")
+                        if not current.resolve().is_relative_to(root):
+                            raise ApiException.bad_request("Recovery contains an unsafe file path")
+                    if target.exists() and target.is_file():
+                        details = target.stat()
+                        if details.st_nlink > 1:
+                            raise ApiException.bad_request("Recovery refuses files linked outside the workspace")
+                        if details.st_size > 20_000_000:
+                            raise ApiException.bad_request("Recovery file exceeds the per-file safety limit")
+                        if self._contains_secret(target.read_bytes()):
+                            raise ApiException.bad_request("Recovery refused credential-like file content")
+
+            await asyncio.to_thread(inspect_candidates)
+            git_dir = Path((await self._git("-C", str(workspace), "rev-parse", "--absolute-git-dir")).strip())
+            temporary_index = git_dir / f"mooi-recovery-{uuid4().hex}.index"
+            bundle_tmp: Path | None = None
+            try:
+                env = {"GIT_INDEX_FILE": str(temporary_index), **_identity_env(_SNAPSHOT_IDENTITY)}
+                await self._git("-C", str(workspace), "read-tree", base, extra_env=env)
+                if candidates:
+                    await self._git("--literal-pathspecs", "-C", str(workspace), "add", "-A",
+                                     "--pathspec-from-file=-", "--pathspec-file-nul", extra_env=env,
+                                     stdin="\0".join(sorted(candidates)) + "\0")
+                tree = (await self._git("-C", str(workspace), "write-tree", extra_env=env)).strip()
+                base_is_commit = await self._git_ok("-C", str(workspace), "cat-file", "-e", f"{base}^{{commit}}")
+                parent = ("-p", base) if base_is_commit else ()
+                synthetic = (await self._git("-C", str(workspace), "commit-tree", tree, *parent,
+                                             "-m", f"Mooi task recovery {uuid4().hex}", extra_env=env)).strip()
+                head = (await self._git("-C", str(workspace), "rev-parse", "-q", "--verify", "HEAD")).strip()
+                head = head or base
+
+                directory = self._recovery_directory(owner_id, project_id, item_id, task_id, attempt)
+                await asyncio.to_thread(self._secure_recovery_directory, directory)
+                revisions = directory / "revisions"
+                await asyncio.to_thread(self._secure_recovery_directory, revisions)
+
+                staging = revisions / f".capture-{uuid4().hex}"
+                staging.mkdir(mode=0o700)
+                bundle_tmp = staging / "objects.bundle"
+                bundle_args = ["-C", str(workspace), "bundle", "create", str(bundle_tmp), synthetic]
+                if base_is_commit:
+                    bundle_args.append(f"^{base}")
+                await self._git(*bundle_args)
+                await self._git("-C", str(workspace), "bundle", "verify", str(bundle_tmp))
+                bundle_digest = await asyncio.to_thread(_sha256_file, bundle_tmp)
+                manifest = {
+                    "version": 1, "ownerId": str(owner_id), "projectId": str(project_id), "itemId": str(item_id),
+                    "taskId": str(task_id), "attempt": attempt, "branch": branch, "baseCommit": base,
+                    "headCommit": head, "syntheticCommit": synthetic, "files": sorted(candidates),
+                    "bundleSha256": bundle_digest, "createdAt": int(time.time()),
+                }
+                manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+                revision = hashlib.sha256(manifest_bytes + bundle_digest.encode()).hexdigest()
+                (staging / "manifest.json").write_bytes(manifest_bytes)
+                for child in staging.iterdir():
+                    with child.open("rb") as stream:
+                        os.fsync(stream.fileno())
+                await asyncio.to_thread(_fsync_directory, staging)
+                final = revisions / revision
+                if final.exists():
+                    await asyncio.to_thread(shutil.rmtree, staging)
+                else:
+                    os.replace(staging, final)
+                    await asyncio.to_thread(_fsync_directory, revisions)
+                return RecoverySnapshot(task_id, attempt, branch, base, head, revision, sorted(candidates))
+            finally:
+                temporary_index.unlink(missing_ok=True)
+                if bundle_tmp is not None and bundle_tmp.parent.exists() and bundle_tmp.parent.name.startswith(".capture-"):
+                    with contextlib.suppress(OSError):
+                        shutil.rmtree(bundle_tmp.parent)
+        except ApiException as error:
+            if error.status_code == 502:
+                raise ApiException.bad_gateway("Task recovery could not be saved safely") from None
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            LOG.warning("Task recovery capture failed (%s)", type(error).__name__)
+            raise ApiException.bad_gateway("Task recovery could not be saved safely") from None
+
+    async def acquire_recovery(
+        self, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int, revision: str,
+    ) -> RecoveryLease:
+        """Acquire a process-shared lease before reading a bundle; cleanup skips leased revisions."""
+        if not _RECOVERY_REVISION.fullmatch(revision):
+            raise ApiException.bad_request("Invalid recovery revision")
+        directory = self._recovery_directory(owner_id, project_id, item_id, task_id, attempt) / "revisions" / revision
+        if directory.is_symlink() or not directory.is_dir() or directory.resolve() != directory:
+            raise ApiException.not_found("Recovery evidence not found")
+        lock_path = directory / ".consumer.lock"
+        if lock_path.is_symlink():
+            raise ApiException.conflict("Recovery evidence is unavailable")
+        lock_file = await asyncio.to_thread(_open_recovery_lock, lock_path)
+        await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_SH)
+        return RecoveryLease(directory, lock_file)
+
+    async def restore_recovery(
+        self, workspace: Path, *, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+        revision: str, expected_branch: str, expected_base: str,
+    ) -> str:
+        """Restore one verified v1 snapshot to a clean new workspace without pushing.
+
+        Requires the destination branch to be exactly at the recorded base, rejects unclean trees,
+        unsafe manifests and incomplete bundles, and creates one local commit from the filtered
+        handoff. It never resumes another provider's runtime or overwrites an existing workspace.
+        A missing ownership/revision key is 404; unsafe/incomplete evidence or a dirty/wrong-base
+        destination is 409; Git/storage failures are sanitized 502 errors. The caller must also require
+        mic-mooi's `snapshotValid` and exact `attempt` before calling this helper.
+        """
+        lease = await self.acquire_recovery(owner_id, project_id, item_id, task_id, attempt, revision)
+        try:
+            manifest_path = lease.directory / "manifest.json"
+            bundle = lease.directory / "objects.bundle"
+            if manifest_path.is_symlink() or bundle.is_symlink() or not manifest_path.is_file() or not bundle.is_file():
+                raise ApiException.conflict("Recovery snapshot is incomplete and cannot be restored")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (manifest.get("version") != 1 or manifest.get("ownerId") != str(owner_id)
+                    or manifest.get("projectId") != str(project_id) or manifest.get("itemId") != str(item_id)
+                    or manifest.get("taskId") != str(task_id) or manifest.get("attempt") != attempt
+                    or manifest.get("branch") != expected_branch or manifest.get("baseCommit") != expected_base):
+                raise ApiException.not_found("Recovery evidence does not match this task attempt")
+            digest = await asyncio.to_thread(_sha256_file, bundle)
+            manifest_bytes = manifest_path.read_bytes()
+            if (digest != manifest.get("bundleSha256")
+                    or hashlib.sha256(manifest_bytes + digest.encode()).hexdigest() != revision):
+                raise ApiException.conflict("Recovery snapshot is incomplete and cannot be restored")
+            workspace = self._assert_managed_workspace(workspace)
+            if not workspace.is_dir():
+                raise ApiException.conflict("Recovery workspace is unavailable")
+            branch = (await self._git("-C", str(workspace), "symbolic-ref", "--quiet", "--short", "HEAD")).strip()
+            head = (await self._git("-C", str(workspace), "rev-parse", "-q", "--verify", "HEAD")).strip()
+            if branch != expected_branch or (head and head != expected_base):
+                raise ApiException.conflict("Recovery workspace is not at the recorded branch base")
+            if (await self._git("-C", str(workspace), "status", "--porcelain", "--untracked-files=all")).strip():
+                raise ApiException.conflict("Recovery workspace is not clean; refusing to overwrite changes")
+            files = manifest.get("files")
+            if not isinstance(files, list) or any(not isinstance(path, str) or not self._safe_recovery_path(path)
+                                                   or self._sensitive_recovery_path(path) for path in files):
+                raise ApiException.conflict("Recovery snapshot contains unsafe paths")
+            for path in files:
+                current = workspace
+                for part in Path(path).parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ApiException.conflict("Recovery workspace contains a symlink at a recovery path")
+            await self._git("-C", str(workspace), "bundle", "verify", str(bundle))
+            synthetic = str(manifest["syntheticCommit"])
+            await self._git("-C", str(workspace), "fetch", "--no-tags", str(bundle), synthetic)
+            if not await self._git_ok("-C", str(workspace), "cat-file", "-e", f"{synthetic}^{{commit}}"):
+                raise ApiException.conflict("Recovery snapshot is incomplete and cannot be restored")
+            await self._git("-C", str(workspace), "cherry-pick", "--no-gpg-sign", synthetic)
+            return (await self._git("-C", str(workspace), "rev-parse", "HEAD")).strip()
+        except ApiException as error:
+            if error.status_code == 502:
+                raise ApiException.bad_gateway("Task recovery could not be restored safely") from None
+            raise
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+            LOG.warning("Task recovery restore failed (%s)", type(error).__name__)
+            raise ApiException.bad_gateway("Task recovery could not be restored safely") from None
+        finally:
+            await self.release_recovery(lease)
+
+    @staticmethod
+    async def release_recovery(lease: RecoveryLease) -> None:
+        """Release a previously acquired recovery lease."""
+        lock_file = lease.lock_file
+        await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
+        await asyncio.to_thread(lock_file.close)
+
+    async def cleanup_recovery(self, *, max_age_seconds: int = 7 * 24 * 60 * 60,
+                               keep_per_attempt: int = 5) -> int:
+        """Bound abandoned recovery storage; retain leased snapshots and always keep newest revisions."""
+        root = self.root / "recovery"
+        if root.is_symlink() or not root.is_dir():
+            return 0
+        now = time.time()
+        removed = 0
+        for current, dirs, _ in os.walk(root, topdown=True, followlinks=False):
+            dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
+            if Path(current).name != "revisions":
+                continue
+            for name in list(dirs):
+                incomplete = Path(current) / name
+                if name.startswith(".capture-") and now - incomplete.stat().st_mtime > max_age_seconds:
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(shutil.rmtree, incomplete)
+            revisions = []
+            for name in dirs:
+                candidate = Path(current) / name
+                if not _RECOVERY_REVISION.fullmatch(name) or candidate.is_symlink():
+                    continue
+                with contextlib.suppress(OSError, ValueError):
+                    manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
+                    revisions.append((int(manifest.get("createdAt", 0)), candidate))
+            revisions.sort(reverse=True)
+            for index, (created, candidate) in enumerate(revisions):
+                if index < keep_per_attempt and now - created <= max_age_seconds:
+                    continue
+                lock_path = candidate / ".consumer.lock"
+                if lock_path.is_symlink():
+                    continue
+                lock_file = await asyncio.to_thread(_open_recovery_lock, lock_path)
+                try:
+                    try:
+                        await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    await asyncio.to_thread(shutil.rmtree, candidate)
+                    removed += 1
+                finally:
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
+                    await asyncio.to_thread(lock_file.close)
+        return removed
+
+    async def delete_recovery_attempt(
+        self, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+    ) -> bool:
+        """Retire one finalized task attempt, leaving any revision held by an active consumer intact."""
+        directory = self._recovery_directory(owner_id, project_id, item_id, task_id, attempt)
+        revisions = directory / "revisions"
+        if revisions.is_symlink() or not revisions.is_dir():
+            return True
+        complete = True
+        for candidate in revisions.iterdir():
+            if not _RECOVERY_REVISION.fullmatch(candidate.name) or candidate.is_symlink() or not candidate.is_dir():
+                continue
+            lock_path = candidate / ".consumer.lock"
+            if lock_path.is_symlink():
+                complete = False
+                continue
+            lock_file = await asyncio.to_thread(_open_recovery_lock, lock_path)
+            try:
+                try:
+                    await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    complete = False
+                    continue
+                await asyncio.to_thread(shutil.rmtree, candidate)
+            finally:
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(fcntl.flock, lock_file.fileno(), fcntl.LOCK_UN)
+                await asyncio.to_thread(lock_file.close)
+        if complete:
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(revisions.rmdir)
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(directory.rmdir)
+        return complete
 
     async def set_identity(self, workspace: Path, identity: GitIdentity) -> None:
         """Makes commits the agent writes in this clone carry the player's identity."""
@@ -809,6 +1250,40 @@ async def changes(workspace: Path, base_commit: str) -> ChangesSummary:
 
 async def revision(workspace: Path) -> str:
     return await get_workspaces().revision(workspace)
+
+
+async def capture_recovery(
+    workspace: Path, *, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+    branch: str, base_commit: str, previous_revision: str | None = None,
+) -> RecoverySnapshot:
+    """Persist a filtered v1 recovery bundle under the full ownership scope; never pushes it."""
+    return await get_workspaces().capture_recovery(
+        workspace, owner_id=owner_id, project_id=project_id, item_id=item_id, task_id=task_id, attempt=attempt,
+        branch=branch, base_commit=base_commit, previous_revision=previous_revision,
+    )
+
+
+async def restore_recovery(
+    workspace: Path, *, owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+    revision: str, expected_branch: str, expected_base: str,
+) -> str:
+    """Restore a verified v1 bundle into a clean, matching session workspace without publishing it."""
+    return await get_workspaces().restore_recovery(
+        workspace, owner_id=owner_id, project_id=project_id, item_id=item_id, task_id=task_id, attempt=attempt,
+        revision=revision, expected_branch=expected_branch, expected_base=expected_base,
+    )
+
+
+async def cleanup_recovery() -> int:
+    """Apply bounded recovery retention, skipping every bundle held by an active consumer."""
+    return await get_workspaces().cleanup_recovery()
+
+
+async def delete_recovery_attempt(
+    owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID, attempt: int,
+) -> bool:
+    """Delete a completed attempt's bundles unless a recovery consumer currently holds one."""
+    return await get_workspaces().delete_recovery_attempt(owner_id, project_id, item_id, task_id, attempt)
 
 
 async def file_diff(workspace: Path, base_commit: str, path: str) -> FileDiff:
