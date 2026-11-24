@@ -1,0 +1,59 @@
+databaseChangeLog:
+  - changeSet:
+      id: 049-analytics-audits
+      author: mooi
+      changes:
+        - createTable:
+            tableName: analytics_audits
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_audits
+                    nullable: false
+              - column:
+                  name: site_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: url
+                  type: varchar(2048)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: score
+                  type: integer
+                  constraints:
+                    nullable: false
+              - column:
+                  name: findings
+                  type: jsonb
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_audits_site
+            baseTableName: analytics_audits
+            baseColumnNames: site_id
+            referencedTableName: analytics_sites
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            tableName: analytics_audits
+            indexName: ix_analytics_audits_site_created
+            columns:
+              - column:
+                  name: site_id
+              - column:
+                  name: created_at
+                  descending: true
+      rollback:
+        - dropTable:
+            tableName: analytics_audits

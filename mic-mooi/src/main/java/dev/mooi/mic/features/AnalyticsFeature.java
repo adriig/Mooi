@@ -1,6 +1,7 @@
 package dev.mooi.mic.features;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -32,6 +33,16 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
+
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.core5.util.Timeout;
 
 import org.hibernate.annotations.Immutable;
 import org.springframework.beans.factory.annotation.Value;
@@ -223,6 +234,30 @@ public class AnalyticsFeature {
         return service.regenerateKey(projectId, principal.player().id());
     }
 
+    @PostMapping("/me/projects/{projectId}/analytics/audits")
+    @Auth.Authenticated
+    public AuditPayload audit(@PathVariable UUID projectId, @Valid @RequestBody(required = false) AuditRequest body,
+                              Auth.Principal principal) {
+        return service.audit(projectId, principal.player().id(), body == null ? null : body.url());
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/audits")
+    @Auth.Authenticated
+    public List<AuditPayload> audits(@PathVariable UUID projectId, @RequestParam(defaultValue = "20") int limit,
+                                    Auth.Principal principal) {
+        return service.audits(projectId, principal.player().id(), limit);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/audits/{id}")
+    @Auth.Authenticated
+    public AuditPayload audit(@PathVariable UUID projectId, @PathVariable UUID id, Auth.Principal principal) {
+        return service.audit(projectId, principal.player().id(), id);
+    }
+
+    public record AuditRequest(@Size(max = 2048) String url) { }
+    public record AuditFinding(String id, String category, String severity, String title, String detail, String fix) { }
+    public record AuditPayload(UUID id, String url, int score, List<AuditFinding> findings, Instant createdAt) { }
+
     @GetMapping("/me/projects/{projectId}/analytics/overview")
     @Auth.Authenticated
     public OverviewPayload overview(@PathVariable UUID projectId, @RequestParam String from,
@@ -372,6 +407,7 @@ public class AnalyticsFeature {
 
         private final AnalyticsSiteRepository sites;
         private final AnalyticsEventRepository events;
+        private final AnalyticsAuditRepository audits;
         private final AnalyticsProjectRepository projects;
         private final AnalyticsProductionRecipeRepository recipes;
         private final AnalyticsGoogleConnectionRepository googleConnections;
@@ -389,6 +425,7 @@ public class AnalyticsFeature {
         private final String publicBaseUrl;
 
         AnalyticsService(AnalyticsSiteRepository sites, AnalyticsEventRepository events,
+                         AnalyticsAuditRepository audits,
                          AnalyticsProjectRepository projects, AnalyticsProductionRecipeRepository recipes,
                          AnalyticsGoogleConnectionRepository googleConnections,
                          GeoSettingsRepository geoSettings, GeoPromptRepository geoPrompts,
@@ -397,6 +434,7 @@ public class AnalyticsFeature {
                          @Value("${app.analytics.public-base-url:http://localhost:28471}") String publicBaseUrl) {
             this.sites = sites;
             this.events = events;
+            this.audits = audits;
             this.projects = projects;
             this.recipes = recipes;
             this.googleConnections = googleConnections;
@@ -494,6 +532,76 @@ public class AnalyticsFeature {
         }
         private void bad(String message) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message); }
         private record ReportRange(UUID siteId, Instant from, Instant to, String timezone) { }
+
+        @Transactional
+        public AuditPayload audit(UUID projectId, UUID playerId, String requestedUrl) {
+            requireProject(projectId, playerId);
+            List<String> production = productionAuditUrls(projectId);
+            AnalyticsSite site = sites.findByProjectId(projectId).orElseGet(() -> createSite(projectId, playerId));
+            Set<String> hosts = new LinkedHashSet<>();
+            for (String origin : production) hosts.add(URI.create(origin).getHost().toLowerCase(Locale.ROOT));
+            for (String origin : readOrigins(site.getAllowedOrigins())) {
+                hosts.add(URI.create(origin).getHost().toLowerCase(Locale.ROOT));
+            }
+            String url = requestedUrl == null || requestedUrl.isBlank()
+                    ? production.stream().findFirst().orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST, "Configure a production target or supply an allowed URL")) : requestedUrl.strip();
+            URI uri = AuditScanner.validateUrl(url);
+            if (!hosts.contains(uri.getHost().toLowerCase(Locale.ROOT))) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "URL must use a project's production or allowed host");
+            }
+            List<AuditFinding> findings = new AuditScanner(json).scan(uri);
+            AnalyticsAudit audit = new AnalyticsAudit();
+            audit.setId(UUID.randomUUID());
+            audit.setSiteId(site.getId());
+            audit.setUrl(uri.toString());
+            audit.setScore(Math.max(0, 100 - findings.stream().mapToInt(f -> switch (f.severity()) {
+                case "critical" -> 15;
+                case "warning" -> 4;
+                default -> 0;
+            }).sum()));
+            audit.setFindings(json.writeValueAsString(findings));
+            audit.setCreatedAt(Instant.now());
+            return auditPayload(audits.save(audit));
+        }
+
+        @Transactional(readOnly = true)
+        public List<AuditPayload> audits(UUID projectId, UUID playerId, int limit) {
+            requireProject(projectId, playerId);
+            if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Limit must be 1–100");
+            return sites.findByProjectId(projectId).map(site -> audits.findBySiteIdOrderByCreatedAtDesc(
+                    site.getId(), PageRequest.of(0, limit)).stream().map(this::auditPayload).toList()).orElseGet(List::of);
+        }
+
+        @Transactional(readOnly = true)
+        public AuditPayload audit(UUID projectId, UUID playerId, UUID id) {
+            requireProject(projectId, playerId);
+            AnalyticsSite site = sites.findByProjectId(projectId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Audit not found"));
+            return auditPayload(audits.findByIdAndSiteId(id, site.getId()).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Audit not found")));
+        }
+
+        private AuditPayload auditPayload(AnalyticsAudit audit) {
+            return new AuditPayload(audit.getId(), audit.getUrl(), audit.getScore(),
+                    json.readValue(audit.getFindings(), new TypeReference<List<AuditFinding>>() { }), audit.getCreatedAt());
+        }
+
+        private List<String> productionAuditUrls(UUID projectId) {
+            return recipes.findById(projectId).map(AnalyticsProductionRecipe::getActiveTargets).map(box::decrypt)
+                    .map(targets -> {
+                        try {
+                            List<AnalyticsDeploymentTarget> parsed = json.readValue(targets,
+                                    new TypeReference<List<AnalyticsDeploymentTarget>>() { });
+                            List<String> urls = new ArrayList<>();
+                            for (AnalyticsDeploymentTarget target : parsed) {
+                                try { urls.add(AuditScanner.validateUrl(target.url()).toString()); }
+                                catch (IllegalArgumentException | ResponseStatusException ignored) { /* Legacy target. */ }
+                            }
+                            return List.copyOf(urls);
+                        } catch (RuntimeException e) { return List.<String>of(); }
+                    }).orElseGet(List::of);
+        }
 
         @Transactional
         public GeoSettingsPayload geoSettings(UUID projectId, UUID playerId) {
@@ -1305,6 +1413,407 @@ public class AnalyticsFeature {
                 + "if(!x)return;const a=x.closest('a[href]');const v=x.dataset.mooiTrack||a?.href||x.innerText||x.getAttribute('aria-label')||'';"
                 + "send('click',{target:v.trim().slice(0,80)})},true);"
                 + "addEventListener('pagehide',()=>send('leave',{duration:visible+(shown?Date.now()-shown:0)}))})();";
+    }
+
+    /** No ambient proxy, DNS re-resolution, cookies or automatic redirects are used by the auditor. */
+    private static final class AuditScanner {
+        private static final int MAX_BYTES = 2 * 1024 * 1024;
+        private static final List<String> CRAWLERS = List.of("GPTBot", "OAI-SearchBot", "ChatGPT-User",
+                "ClaudeBot", "Claude-SearchBot", "PerplexityBot", "Google-Extended", "Applebot-Extended", "CCBot");
+        private static final java.util.concurrent.ExecutorService IO = Executors.newVirtualThreadPerTaskExecutor();
+        private static final Pattern TAG = Pattern.compile("(?is)<([a-z][a-z0-9:-]*)\\b((?:[^>\"']++|\"[^\"]*+\"|'[^']*+')*+)>");
+        private static final Pattern ATTR = Pattern.compile("([\\w:-]+)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))");
+        private final ObjectMapper json;
+        private final List<AuditFinding> findings = new ArrayList<>();
+        private final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+
+        AuditScanner(ObjectMapper json) { this.json = json; }
+
+        static URI validateUrl(String value) {
+            try {
+                URI uri = URI.create(value);
+                if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                        || uri.getHost() == null || uri.getUserInfo() != null || uri.getFragment() != null
+                        || uri.getPort() == 0 || uri.getPort() < -1 || uri.getPort() > 65535
+                        || value.length() > 2048) throw new IllegalArgumentException();
+                return uri;
+            } catch (IllegalArgumentException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Audit URL must be an absolute http(s) URL without credentials or fragment");
+            }
+        }
+
+        List<AuditFinding> scan(URI uri) {
+            try {
+                return bounded(() -> scanResources(uri), deadline);
+            } catch (ResponseStatusException e) {
+                throw e;
+            } catch (Exception e) {
+                // A single wall-clock deadline also covers DNS, parsing and all supporting resources.
+                List<AuditFinding> incomplete = new ArrayList<>();
+                List<String> checks = new ArrayList<>(List.of("https", "status", "title", "description", "canonical",
+                        "lang", "open-graph", "h1", "headings", "server-content", "json-ld", "robots",
+                        "llms-presence", "llms-format", "sitemap"));
+                for (String crawler : CRAWLERS) checks.add("robots-" + crawler.toLowerCase(Locale.ROOT));
+                for (String id : checks) incomplete.add(new AuditFinding(id,
+                        id.startsWith("robots") || id.startsWith("llms") || id.equals("json-ld") || id.equals("server-content")
+                                ? "geo" : "seo", "warning", "Check incomplete: " + id,
+                        "The audit could not finish within its 20 s budget, or parsing was interrupted or failed.",
+                        "Check production availability and run the audit again."));
+                return List.copyOf(incomplete);
+            }
+        }
+
+        private List<AuditFinding> scanResources(URI uri) {
+            Fetch page = fetch(uri);
+            check("https", "seo", "critical", "HTTPS", "https".equalsIgnoreCase(uri.getScheme()),
+                    "Requested URL: " + uri, "Serve the production site over HTTPS.");
+            check("status", "seo", "critical", "HTTP status", page.ok(), page.description(),
+                    "Return a successful HTTP response for the production page.");
+            inspectHtml(page.ok() ? page.body() : "");
+            URI root = uri.resolve("/");
+            Fetch robots = fetch(root.resolve("robots.txt"));
+            boolean robotsOk = robots.ok() && !robots.body().stripLeading().startsWith("<");
+            check("robots", "geo", "warning", "robots.txt", robotsOk, robots.description(),
+                    "Publish a plain-text robots.txt at the origin root.");
+            for (String crawler : CRAWLERS) {
+                boolean blocked = robotsOk && blocked(robots.body(), crawler, uri.getRawPath());
+                findings.add(new AuditFinding("robots-" + crawler.toLowerCase(Locale.ROOT), "geo",
+                        blocked || !robotsOk ? "warning" : "info", crawler + " crawler access",
+                        !robotsOk ? "Cannot determine access without a reachable robots.txt."
+                                : blocked ? "robots.txt blocks this crawler for the audited path; this may be intentional."
+                                : "robots.txt allows this crawler for the audited path.",
+                        "Review this crawler's Allow/Disallow rules against your intended AI visibility policy."));
+            }
+            Fetch llms = fetch(root.resolve("llms.txt"));
+            check("llms-presence", "geo", "warning", "llms.txt presence", llms.ok()
+                            && !llms.body().stripLeading().startsWith("<"), llms.description(),
+                    "Publish /llms.txt with a Markdown H1 title, summary and links to useful content.");
+            check("llms-format", "geo", "warning", "llms.txt format", llms.ok()
+                            && Pattern.compile("(?m)^#\\s+\\S+").matcher(llms.body()).find()
+                            && Pattern.compile("(?m)^>\\s+\\S+").matcher(llms.body()).find()
+                            && Pattern.compile("\\[[^]\\r\\n]+]\\(https?://[^)]+\\)").matcher(llms.body()).find(),
+                    "Expected a Markdown H1, blockquote summary and HTTP(S) links.",
+                    "Add # Site name, a > summary, and Markdown links to canonical documentation or pages.");
+            // Try robots-advertised sitemaps before the conventional fallback; never fetch a foreign host.
+            LinkedHashSet<URI> sitemaps = new LinkedHashSet<>();
+            var advertised = Pattern.compile("(?im)^\\s*Sitemap:\\s*(\\S+)").matcher(robots.body());
+            while (advertised.find() && sitemaps.size() < 3) {
+                try {
+                    URI candidate = validateUrl(root.resolve(advertised.group(1)).toString());
+                    if (sameHost(root, candidate)) sitemaps.add(candidate);
+                    else findings.add(new AuditFinding("sitemap-host-" + sitemaps.size(), "seo", "warning",
+                            "External sitemap not fetched", "robots.txt advertises a sitemap on another host.",
+                            "Expose a sitemap on the production host so it can be audited safely."));
+                } catch (RuntimeException ignored) { /* Invalid sitemap declarations are not followed. */ }
+            }
+            sitemaps.add(root.resolve("sitemap.xml"));
+            boolean sitemapOk = false;
+            String sitemapDetail = "No reachable XML sitemap (urlset or sitemapindex) found.";
+            for (URI candidate : sitemaps) {
+                Fetch sitemap = fetch(candidate);
+                if (sitemap.ok() && Pattern.compile("(?is)<(?:[\\w-]+:)?(?:urlset|sitemapindex)\\b")
+                        .matcher(sitemap.body()).find()) {
+                    sitemapOk = true;
+                    sitemapDetail = "Reachable XML sitemap: " + candidate;
+                    break;
+                }
+                sitemapDetail += " " + candidate + ": " + sitemap.description();
+                if (System.nanoTime() >= deadline) break;
+            }
+            check("sitemap", "seo", "warning", "XML sitemap", sitemapOk, sitemapDetail,
+                    "Publish sitemap.xml with canonical URLs and declare its URL in robots.txt.");
+            return List.copyOf(findings);
+        }
+
+        private void check(String id, String category, String severity, String title, boolean passed,
+                           String detail, String fix) {
+            findings.add(new AuditFinding(id, category, passed ? "info" : severity, title,
+                    (passed ? "Passed. " : "Needs attention. ") + detail, passed ? "" : fix));
+        }
+
+        private void inspectHtml(String html) {
+            // Tokenize attributes without assuming their order or quoting. Strip executable/non-visible text first.
+            String markup = html.replaceAll("(?is)<!--.*?-->", "");
+            String visibleMarkup = markup.replaceAll("(?is)<(script|style|template|noscript)\\b[^>]*>.*?</\\1\\s*>", "");
+            Map<String, String> meta = new LinkedHashMap<>();
+            String canonical = "";
+            String lang = "";
+            int h1 = 0;
+            int previousHeading = 0;
+            boolean hierarchy = true;
+            var tags = TAG.matcher(visibleMarkup);
+            while (tags.find()) {
+                String name = tags.group(1).toLowerCase(Locale.ROOT);
+                Map<String, String> attrs = attributes(tags.group(2));
+                if (name.equals("meta")) meta.put(attrs.getOrDefault("name", attrs.getOrDefault("property", ""))
+                        .toLowerCase(Locale.ROOT), attrs.getOrDefault("content", "").strip());
+                if (name.equals("html")) lang = attrs.getOrDefault("lang", "");
+                if (name.equals("link") && List.of(attrs.getOrDefault("rel", "").toLowerCase(Locale.ROOT).split("\\s+"))
+                        .contains("canonical")) canonical = attrs.getOrDefault("href", "");
+                if (name.matches("h[1-6]")) {
+                    int level = name.charAt(1) - '0';
+                    if (level == 1) h1++;
+                    if (level > previousHeading + 1) hierarchy = false;
+                    previousHeading = level;
+                }
+            }
+            var titleMatch = Pattern.compile("(?is)<title\\b[^>]*>(.*?)</title\\s*>").matcher(visibleMarkup);
+            String title = titleMatch.find() ? text(titleMatch.group(1)) : "";
+            check("title", "seo", "warning", "Page title", title.length() >= 10 && title.length() <= 60,
+                    "Title length: " + title.length() + " characters (recommended 10–60).", "Set a descriptive, unique title of 10–60 characters.");
+            String description = meta.getOrDefault("description", "");
+            check("description", "seo", "warning", "Meta description", description.length() >= 50 && description.length() <= 160,
+                    "Description length: " + description.length() + " characters (recommended 50–160).",
+                    "Add a useful meta description of 50–160 characters.");
+            boolean canonicalValid;
+            try {
+                URI candidate = URI.create(canonical);
+                canonicalValid = ("http".equalsIgnoreCase(candidate.getScheme()) || "https".equalsIgnoreCase(candidate.getScheme()))
+                        && candidate.getHost() != null;
+            }
+            catch (IllegalArgumentException e) { canonicalValid = false; }
+            check("canonical", "seo", "warning", "Canonical URL", canonicalValid,
+                    canonical.isBlank() ? "No canonical URL found." : "Canonical: " + canonical,
+                    "Add a link rel=canonical with the absolute preferred production URL.");
+            check("lang", "seo", "warning", "Document language", lang.matches("[a-zA-Z]{2,8}(-[a-zA-Z0-9]{1,8})*"),
+                    "HTML lang: " + lang, "Set the html lang attribute to the document's BCP 47 language tag.");
+            List<String> missingOg = List.of("og:title", "og:description", "og:url", "og:image", "og:type").stream()
+                    .filter(key -> meta.getOrDefault(key, "").isBlank()).toList();
+            check("open-graph", "seo", "warning", "Open Graph metadata", missingOg.isEmpty(),
+                    missingOg.isEmpty() ? "Core Open Graph fields present." : "Missing: " + String.join(", ", missingOg),
+                    "Add og:title, og:description, og:url, og:image and og:type metadata.");
+            check("h1", "seo", "warning", "Single H1", h1 == 1, "H1 count: " + h1,
+                    "Use one descriptive H1 for the main page topic.");
+            check("headings", "seo", "warning", "Heading hierarchy", hierarchy && previousHeading > 0,
+                    "Headings should start at H1 and descend without skipping levels.", "Use H1, then H2, then H3 for nested sections.");
+            var body = Pattern.compile("(?is)<body\\b[^>]*>(.*?)(?:</body\\s*>|$)").matcher(visibleMarkup);
+            String bodyMarkup = body.find() ? body.group(1) : "";
+            bodyMarkup = bodyMarkup.replaceAll("(?is)<([a-z][a-z0-9]*)\\b[^>]*(?:\\shidden(?=\\s|=|>)|aria-hidden\\s*=\\s*['\"]true['\"])[^>]*>.*?</\\1\\s*>", "");
+            int textLength = text(bodyMarkup).length();
+            check("server-content", "geo", "critical", "Server-rendered content", textLength >= 500,
+                    "Raw HTML body contains approximately " + textLength + " visible text characters; below 500 may indicate JavaScript-only rendering.",
+                    "Render the main content on the server or prerender it so crawlers can read it without JavaScript.");
+            Set<String> types = new LinkedHashSet<>();
+            int jsonBlocks = 0;
+            int invalidBlocks = 0;
+            var scripts = Pattern.compile("(?is)<script\\b((?:[^>\"']++|\"[^\"]*+\"|'[^']*+')*+)>(.*?)</script\\s*>").matcher(markup);
+            while (scripts.find()) {
+                if (!"application/ld+json".equalsIgnoreCase(attributes(scripts.group(1)).get("type"))) continue;
+                jsonBlocks++;
+                try {
+                    var node = json.readTree(scripts.group(2));
+                    if (node == null || !(node.isObject() || node.isArray())) invalidBlocks++;
+                    else collectTypes(node, types, 0);
+                } catch (RuntimeException e) { invalidBlocks++; }
+            }
+            check("json-ld", "geo", "warning", "JSON-LD structured data", jsonBlocks > 0 && invalidBlocks == 0 && !types.isEmpty(),
+                    "Blocks: " + jsonBlocks + "; invalid: " + invalidBlocks + "; types: " + String.join(", ", types),
+                    "Add valid schema.org JSON-LD: Organization and WebSite for site identity; FAQPage, Product or Article where the visible content supports them.");
+        }
+
+        private void collectTypes(tools.jackson.databind.JsonNode node, Set<String> types, int depth) {
+            if (depth > 64) return;
+            if (node.isObject()) {
+                var type = node.path("@type");
+                if (type.isTextual()) types.add(type.asString());
+                else if (type.isArray()) for (var value : type) if (value.isTextual()) types.add(value.asString());
+                for (var property : node.properties()) collectTypes(property.getValue(), types, depth + 1);
+            } else if (node.isArray()) for (var child : node) collectTypes(child, types, depth + 1);
+        }
+
+        private static Map<String, String> attributes(String input) {
+            Map<String, String> result = new LinkedHashMap<>();
+            var matcher = ATTR.matcher(input);
+            while (matcher.find()) result.put(matcher.group(1).toLowerCase(Locale.ROOT),
+                    matcher.group(2) != null ? matcher.group(2) : matcher.group(3) != null ? matcher.group(3) : matcher.group(4));
+            return result;
+        }
+
+        private static String text(String html) {
+            return html.replaceAll("(?s)<[^>]*>", " ").replaceAll("&(?:nbsp|#160|#x[aA]0);", " ")
+                    .replaceAll("&(?:[a-zA-Z]+|#\\d+|#x[0-9a-fA-F]+);", "x").replaceAll("\\s+", " ").strip();
+        }
+
+        private record RobotGroup(List<String> agents, List<String[]> rules) { }
+
+        private static boolean blocked(String robots, String crawler, String path) {
+            List<RobotGroup> groups = new ArrayList<>();
+            RobotGroup group = new RobotGroup(new ArrayList<>(), new ArrayList<>());
+            boolean hasRules = false;
+            for (String line : robots.split("\\R")) {
+                String[] directive = line.split("#", 2)[0].split(":", 2);
+                if (directive.length != 2) continue;
+                String key = directive[0].strip().toLowerCase(Locale.ROOT);
+                String value = directive[1].strip();
+                if (key.equals("user-agent")) {
+                    if (hasRules) { groups.add(group); group = new RobotGroup(new ArrayList<>(), new ArrayList<>()); hasRules = false; }
+                    group.agents().add(value.toLowerCase(Locale.ROOT));
+                } else if ((key.equals("allow") || key.equals("disallow")) && !group.agents().isEmpty()) {
+                    hasRules = true;
+                    if (!value.isEmpty()) group.rules().add(new String[] {key, value});
+                }
+            }
+            groups.add(group);
+            String agent = crawler.toLowerCase(Locale.ROOT);
+            int specificity = groups.stream().flatMap(g -> g.agents().stream())
+                    .filter(a -> a.equals("*") || agent.contains(a)).mapToInt(a -> a.equals("*") ? 0 : a.length()).max().orElse(-1);
+            int longest = -1;
+            boolean denied = false;
+            for (RobotGroup candidate : groups) {
+                if (candidate.agents().stream().noneMatch(a -> (a.equals("*") ? 0 : a.length()) == specificity
+                        && (a.equals("*") || agent.contains(a)))) continue;
+                for (String[] rule : candidate.rules()) {
+                    String value = rule[1];
+                    boolean end = value.endsWith("$");
+                    String raw = end ? value.substring(0, value.length() - 1) : value;
+                    int length = raw.replace("*", "").length();
+                    if (robotPathMatches(raw, path == null || path.isEmpty() ? "/" : path, end)
+                            && (length > longest || length == longest && rule[0].equals("allow"))) {
+                        longest = length;
+                        denied = rule[0].equals("disallow");
+                    }
+                }
+            }
+            return denied;
+        }
+
+        // Ordered literal segments avoid exponential regex backtracking on untrusted wildcard rules.
+        private static boolean robotPathMatches(String pattern, String path, boolean end) {
+            String[] parts = pattern.split("\\*", -1);
+            if (!path.startsWith(parts[0])) return false;
+            int offset = parts[0].length();
+            for (int i = 1; i < parts.length; i++) {
+                if (i == parts.length - 1 && end) return path.substring(offset).endsWith(parts[i]);
+                int index = path.indexOf(parts[i], offset);
+                if (index < 0) return false;
+                offset = index + parts[i].length();
+            }
+            return !end || offset == path.length();
+        }
+
+        private record Fetch(int status, String body, String error) {
+            boolean ok() { return error == null && status >= 200 && status < 300; }
+            String description() { return error != null ? error : "HTTP " + status; }
+        }
+
+        private Fetch fetch(URI initial) {
+            long requestDeadline = Math.min(deadline - TimeUnit.MILLISECONDS.toNanos(200),
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+            try {
+                URI uri = initial;
+                for (int redirects = 0; redirects <= 3; redirects++) {
+                    URI target = validateUrl(uri.toString());
+                    InetAddress[] addresses = bounded(() -> InetAddress.getAllByName(target.getHost()), requestDeadline);
+                    if (addresses.length == 0) throw new IOException("Host has no addresses");
+                    for (InetAddress address : addresses) {
+                        if (!publicAddress(address)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                "Audit refuses non-public, private or metadata addresses");
+                    }
+                    // Resolve once, validate every returned address, and pin the actual connection to that set.
+                    var manager = PoolingHttpClientConnectionManagerBuilder.create()
+                            .setDnsResolver(new org.apache.hc.client5.http.DnsResolver() {
+                                public InetAddress[] resolve(String host) throws java.net.UnknownHostException {
+                                    if (!host.equalsIgnoreCase(target.getHost())) throw new java.net.UnknownHostException("Foreign host");
+                                    return addresses;
+                                }
+                                public String resolveCanonicalHostname(String host) { return target.getHost(); }
+                            }).build();
+                    var client = HttpClients.custom().setConnectionManager(manager).disableRedirectHandling()
+                            .disableAutomaticRetries().disableCookieManagement().disableContentCompression()
+                            .setDefaultRequestConfig(RequestConfig.custom().setResponseTimeout(Timeout.ofSeconds(5))
+                                    .setConnectionRequestTimeout(Timeout.ofSeconds(5)).build()).build();
+                    try {
+                        var request = new HttpGet(target);
+                        request.setHeader("User-Agent", "MooiAudit/1.0");
+                        request.setHeader("Accept-Encoding", "identity");
+                        record Reply(int status, String body, String location) { }
+                        Reply reply = bounded(() -> client.execute(request, response -> {
+                            var entity = response.getEntity();
+                            if (entity != null && entity.getContentLength() > MAX_BYTES) throw new IOException("Response exceeds 2 MB");
+                            byte[] bytes = entity == null ? new byte[0] : entity.getContent().readNBytes(MAX_BYTES + 1);
+                            if (bytes.length > MAX_BYTES) throw new IOException("Response exceeds 2 MB");
+                            var location = response.getFirstHeader("Location");
+                            return new Reply(response.getCode(), new String(bytes, StandardCharsets.UTF_8),
+                                    location == null ? null : location.getValue());
+                        }), requestDeadline);
+                        if (Set.of(301, 302, 303, 307, 308).contains(reply.status()) && reply.location() != null) {
+                            URI next = validateUrl(target.resolve(reply.location()).toString());
+                            if (!sameHost(initial, next)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                                    "Audit refuses redirects to another host");
+                            uri = next;
+                            continue;
+                        }
+                        return new Fetch(reply.status(), reply.body(), null);
+                    } finally {
+                        client.close(org.apache.hc.core5.io.CloseMode.IMMEDIATE);
+                    }
+                }
+                return new Fetch(0, "", "Redirect limit exceeded");
+            } catch (ResponseStatusException e) {
+                throw e;
+            } catch (Exception e) {
+                return new Fetch(0, "", e instanceof TimeoutException ? "Audit time budget or 5 s request timeout exceeded"
+                        : e instanceof IOException ? "Fetch failed: " + e.getMessage() : "Resource could not be fetched");
+            }
+        }
+
+        private static <T> T bounded(java.util.concurrent.Callable<T> work, long until) throws Exception {
+            long remaining = until - System.nanoTime();
+            if (remaining <= 0) throw new TimeoutException();
+            var future = IO.submit(work);
+            try { return future.get(remaining, TimeUnit.NANOSECONDS); }
+            catch (java.util.concurrent.ExecutionException e) {
+                if (e.getCause() instanceof Exception cause) throw cause;
+                throw e;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
+            } finally { future.cancel(true); }
+        }
+
+        private static boolean sameHost(URI first, URI second) {
+            return first.getHost().equalsIgnoreCase(second.getHost());
+        }
+
+        private static boolean publicAddress(InetAddress address) {
+            if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isLinkLocalAddress()
+                    || address.isSiteLocalAddress() || address.isMulticastAddress()) return false;
+            byte[] bytes = address.getAddress();
+            int a = Byte.toUnsignedInt(bytes[0]);
+            if (bytes.length == 16) {
+                // Only native globally routed IPv6; excludes ULA, mapped/compatible, NAT64, Teredo and 6to4.
+                int b = Byte.toUnsignedInt(bytes[1]);
+                return (a & 0xe0) == 0x20 && !(a == 0x20 && b == 0x02)
+                        && !(a == 0x3f && (b & 0xf0) == 0xf0)
+                        && !(a == 0x20 && b == 0x01 && (bytes[2] == 0 || (Byte.toUnsignedInt(bytes[2]) == 0x0d && Byte.toUnsignedInt(bytes[3]) == 0xb8)));
+            }
+            int b = Byte.toUnsignedInt(bytes[1]);
+            int c = Byte.toUnsignedInt(bytes[2]);
+            return !(a == 0 || a == 10 || a == 127 || a >= 224
+                    || a == 168 && b == 63 && c == 129 && Byte.toUnsignedInt(bytes[3]) == 16
+                    || a == 100 && b >= 64 && b <= 127 || a == 169 && b == 254
+                    || a == 172 && b >= 16 && b <= 31 || a == 192 && (b == 168 || b == 0 || b == 2)
+                    || a == 198 && (b == 18 || b == 19 || b == 51 && c == 100)
+                    || a == 203 && b == 0 && c == 113);
+        }
+    }
+
+    @Getter @Setter @NoArgsConstructor
+    @Entity(name = "AnalyticsAudit")
+    @Table(name = "analytics_audits")
+    public static class AnalyticsAudit {
+        @Id @Column(name = "id") private UUID id;
+        @Column(name = "site_id", nullable = false) private UUID siteId;
+        @Column(name = "url", nullable = false, length = 2048) private String url;
+        @Column(name = "score", nullable = false) private int score;
+        @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+        @Column(name = "findings", nullable = false, columnDefinition = "jsonb") private String findings;
+        @Column(name = "created_at", nullable = false) private Instant createdAt;
+    }
+
+    public interface AnalyticsAuditRepository extends JpaRepository<AnalyticsAudit, UUID> {
+        List<AnalyticsAudit> findBySiteIdOrderByCreatedAtDesc(UUID siteId, org.springframework.data.domain.Pageable page);
+        java.util.Optional<AnalyticsAudit> findByIdAndSiteId(UUID id, UUID siteId);
     }
 
     /**
