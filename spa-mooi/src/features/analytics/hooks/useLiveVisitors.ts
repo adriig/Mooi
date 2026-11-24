@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useAnalyticsRevision } from '@/features/analytics/hooks/useAnalyticsRevision';
 import { fetchAnalyticsOverview } from '@/features/analytics/api/analyticsApi';
 
 const POLL_MS = 30_000;
@@ -6,6 +7,7 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 /** Visitors of the last five minutes, refreshed every 30 s only while the page is visible. */
 export const useLiveVisitors = (projectId: string | undefined): number | null => {
+  const liveRevision = useAnalyticsRevision(projectId);
   const [live, setLive] = useState<number | null>(null);
 
   useEffect(() => {
@@ -30,7 +32,7 @@ export const useLiveVisitors = (projectId: string | undefined): number | null =>
     start();
     document.addEventListener('visibilitychange', onVisibility);
     return () => { active = false; stop(); document.removeEventListener('visibilitychange', onVisibility); };
-  }, [projectId]);
+  }, [projectId, liveRevision]);
 
   return live;
 };

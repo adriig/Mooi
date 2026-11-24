@@ -12,9 +12,10 @@ those carry information this service should forward verbatim.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -320,6 +321,28 @@ async def write_development_environment(caller: Caller, project_id: UUID, values
 async def fetch_work(caller: Caller, project_id: UUID) -> dict:
     return await _get(get_http_client(), f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/work",
                       _service_headers(caller), "Project not found")
+
+
+async def fetch_analytics(caller: Caller, project_id: UUID, path: str,
+                          params: dict[str, str | int] | None = None) -> Any:
+    """Read production analytics as the session's player; ownership stays enforced by mic-mooi."""
+    return await send_analytics(caller, "GET", project_id, path, params=params)
+
+
+async def send_analytics(caller: Caller, method: str, project_id: UUID, path: str,
+                         payload: dict | None = None,
+                         params: dict[str, str | int] | None = None) -> Any:
+    # An audit has a server-side 20 s budget; the shared client's default timeout is only 10 s.
+    try:
+        response = await get_http_client().request(
+            method, f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/analytics{path}",
+            headers=_bearer(caller), params=params, json=payload,
+            timeout=30.0 if path == "/audits" and method == "POST" else 10.0,
+        )
+    except httpx.HTTPError:
+        raise ApiException.bad_gateway() from None
+    _raise_for_status(response, "Analytics not found")
+    return response.json() if response.content else None
 
 
 async def fetch_issues(caller: Caller, project_id: UUID) -> dict:

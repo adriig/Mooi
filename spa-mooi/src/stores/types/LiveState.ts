@@ -28,6 +28,8 @@ export interface LiveState {
   work: Record<string, ProjectWork>;
   /** Each project's factory limits, once read or announced. */
   workSettings: Record<string, WorkSettings>;
+  /** Per project: bumped when Analytics configuration, GEO or audits change from chat. */
+  analyticsRevisions: Record<string, number>;
   setStreamState: (streamState: EventStreamState) => void;
   /** Folds one frame of the player's channel that is not about sessions. */
   apply: (frame: StreamFrame) => void;

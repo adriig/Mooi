@@ -56,6 +56,7 @@ const RowsCard = ({ projectId, range, site, revision, dimension, title, name, on
   const { data, loading, error, errorCode, reload } = useAnalyticsReport(
     () => fetchAnalyticsSearch(projectId, range, dimension, dimension === 'query' || dimension === 'page' ? 25 : 10),
     `${projectId}|${range.from}|${range.to}|${site.searchConsoleSiteUrl}|${site.googleConnectionId}|${dimension}|${revision}`,
+    projectId,
   );
   return (
     <Card as="section" className="flex min-w-0 flex-col gap-3 p-4 sm:p-5">
@@ -88,6 +89,7 @@ export const AnalyticsSearchSection = (props: AnalyticsSearchSectionProps) => {
   const daily = useAnalyticsReport(
     ready ? () => fetchAnalyticsSearch(projectId, range, 'date', 1000) : null,
     `${projectId}|${range.from}|${range.to}|${site.searchConsoleSiteUrl}|${site.googleConnectionId}|date|${revision}`,
+    projectId,
   );
   const missing = !site.googleConnectionId ? 'google_not_connected' : !site.searchConsoleSiteUrl ? 'google_property_not_selected' : null;
   const totals = daily.data?.totals;

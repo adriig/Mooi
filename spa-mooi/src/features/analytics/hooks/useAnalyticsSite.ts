@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useAnalyticsRevision } from '@/features/analytics/hooks/useAnalyticsRevision';
 import { fetchAnalyticsSite, regenerateAnalyticsKey, updateAnalyticsGoogle, updateAnalyticsOrigins } from '@/features/analytics/api/analyticsApi';
 import type { AnalyticsGoogleSelection } from '@/features/analytics/types/AnalyticsGoogleSelection';
 import type { AnalyticsSite } from '@/features/analytics/types/AnalyticsSite';
@@ -17,6 +18,7 @@ interface UseAnalyticsSite {
 
 /** The tracker configuration of one project; the server creates it on first read. */
 export const useAnalyticsSite = (projectId: string | undefined): UseAnalyticsSite => {
+  const liveRevision = useAnalyticsRevision(projectId);
   const [site, setSite] = useState<AnalyticsSite | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -33,7 +35,7 @@ export const useAnalyticsSite = (projectId: string | undefined): UseAnalyticsSit
       .catch((failure: Error) => { if (active) setError(failure.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [projectId, revision]);
+  }, [projectId, revision, liveRevision]);
 
   const reload = useCallback(() => setRevision((value) => value + 1), []);
 

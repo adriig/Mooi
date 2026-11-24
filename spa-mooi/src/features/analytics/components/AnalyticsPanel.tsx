@@ -54,8 +54,8 @@ export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
   const siteState = useAnalyticsSite(projectId);
   const live = useLiveVisitors(projectId);
   const reportKey = `${projectId}|${range.from}|${range.to}`;
-  const overview = useAnalyticsReport<AnalyticsOverview>(() => fetchAnalyticsOverview(projectId, range), reportKey);
-  const series = useAnalyticsReport<AnalyticsSeriesPoint[]>(() => fetchAnalyticsSeries(projectId, range, metric), `${reportKey}|${metric}`);
+  const overview = useAnalyticsReport<AnalyticsOverview>(() => fetchAnalyticsOverview(projectId, range), reportKey, projectId);
+  const series = useAnalyticsReport<AnalyticsSeriesPoint[]>(() => fetchAnalyticsSeries(projectId, range, metric), `${reportKey}|${metric}`, projectId);
 
   const update = useCallback((next: Record<string, string>) => {
     const params = new URLSearchParams(searchParams);

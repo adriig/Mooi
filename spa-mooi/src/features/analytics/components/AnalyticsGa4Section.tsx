@@ -37,6 +37,7 @@ const RowsCard = ({ projectId, range, site, revision, kind, title, name, onActio
   const { data, loading, error, errorCode, reload } = useAnalyticsReport(
     () => fetchAnalyticsGa4(projectId, range, kind),
     `${projectId}|${range.from}|${range.to}|${site.ga4PropertyId}|${site.googleConnectionId}|${kind}|${revision}`,
+    projectId,
   );
   return (
     <Card as="section" className="flex min-w-0 flex-col gap-3 p-4 sm:p-5">
@@ -63,8 +64,8 @@ export const AnalyticsGa4Section = (props: AnalyticsGa4SectionProps) => {
   const ready = Boolean(site.googleConnectionId && site.ga4PropertyId);
   const missing = !site.googleConnectionId ? 'google_not_connected' : !site.ga4PropertyId ? 'google_property_not_selected' : null;
   const key = `${projectId}|${range.from}|${range.to}|${site.ga4PropertyId}|${site.googleConnectionId}|${revision}`;
-  const summary = useAnalyticsReport(ready ? () => fetchAnalyticsGa4(projectId, range, 'summary') : null, `${key}|summary`);
-  const series = useAnalyticsReport(ready ? () => fetchAnalyticsGa4(projectId, range, 'timeseries') : null, `${key}|timeseries`);
+  const summary = useAnalyticsReport(ready ? () => fetchAnalyticsGa4(projectId, range, 'summary') : null, `${key}|summary`, projectId);
+  const series = useAnalyticsReport(ready ? () => fetchAnalyticsGa4(projectId, range, 'timeseries') : null, `${key}|timeseries`, projectId);
   const totals = summary.data?.totals;
 
   return (

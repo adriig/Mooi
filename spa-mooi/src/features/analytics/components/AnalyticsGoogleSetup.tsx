@@ -31,6 +31,7 @@ export const AnalyticsGoogleSetup = ({ projectId, site, busy, onSave }: Analytic
   const properties = useAnalyticsReport(
     listable ? () => fetchAnalyticsGoogleProperties(projectId, connection.id) : null,
     `${projectId}|${connection?.id ?? ''}`,
+    projectId,
   );
   const [ga4Draft, setGa4Draft] = useState<string | null>(null);
   const [consoleDraft, setConsoleDraft] = useState<string | null>(null);

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useAnalyticsRevision } from '@/features/analytics/hooks/useAnalyticsRevision';
 import { GoogleReportError } from '@/features/analytics/lib/googleErrors';
 
 interface UseAnalyticsReport<T> {
@@ -11,7 +12,8 @@ interface UseAnalyticsReport<T> {
 }
 
 /** One report for a project and range; keeps the previous data on screen while the next loads. */
-export const useAnalyticsReport = <T,>(load: (() => Promise<T>) | null, key: string): UseAnalyticsReport<T> => {
+export const useAnalyticsReport = <T,>(load: (() => Promise<T>) | null, key: string, projectId: string): UseAnalyticsReport<T> => {
+  const liveRevision = useAnalyticsRevision(projectId);
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +34,7 @@ export const useAnalyticsReport = <T,>(load: (() => Promise<T>) | null, key: str
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
     // `key` stands for everything `load` closes over.
-  }, [key, revision]);
+  }, [key, revision, liveRevision]);
 
   return { data, loading, error, errorCode, reload: () => setRevision((value) => value + 1) };
 };

@@ -26,6 +26,7 @@ export const AnalyticsBreakdownCard = ({ projectId, range, dimension, title, mea
   const { data, loading, error, reload } = useAnalyticsReport<AnalyticsBreakdownRow[]>(
     () => fetchAnalyticsBreakdown(projectId, range, dimension),
     `${projectId}|${range.from}|${range.to}|${dimension}`,
+    projectId,
   );
   const rows = (data ?? [])
     .filter((row) => !(hideUnknown && row.key === '(unknown)'))
