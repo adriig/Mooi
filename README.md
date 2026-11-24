@@ -93,6 +93,20 @@ make up
 
 Sign in with **Continue as developer**. Local secrets are generated once in `.env.local`, which is never committed.
 
+### 📊 Analytics configuration
+
+Configure these environment variables when enabling project Analytics:
+
+| Variable | Purpose |
+| --- | --- |
+| `GOOGLE_CLIENT_SECRET` | OAuth client secret used to link Google accounts for Analytics. |
+| `GOOGLE_OAUTH_REDIRECT_URI` | OAuth callback URL registered for the Google Analytics connection flow. |
+| `ANALYTICS_PUBLIC_BASE_URL` | Public base URL used to serve the Mooi analytics tracker and collect endpoint. |
+
+The tracker requires the public ingest path `/api/mooi/public/analytics/` to be reachable from production
+websites. Mooi production is otherwise only reachable through Tailscale, so operators must explicitly
+expose this path publicly for the tracker to work.
+
 ---
 
 <div align="center">

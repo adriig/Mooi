@@ -41,6 +41,8 @@ from it. Where they differ, this context wins over the current implementation (s
 ## Identity and projects
 
 - Sign in with Google. Link a GitHub account to list public and private repositories.
+- A user can link a Google account for Analytics, separately from sign-in, to connect read-only Google
+  Analytics 4 and Search Console properties to projects.
 - Signed-in devices stay signed in while used: a 30-day sliding refresh token in an `HttpOnly` cookie is
   renewed on every use; 30 days without use requires signing in again.
 - Add repositories to Mooi as projects; iterate on them from there.
@@ -208,9 +210,32 @@ Each project plans and builds its work as a software factory: agents design it, 
 - Restore into production and into sandbox (disposable, isolated) environments.
 - Buttons and chat converge; changes appear live in both.
 
+## Analytics
+
+- Every web-application project has an **Analytics** tab for its production app only; private development
+  previews are never measured. The tab reports traffic, clicks and search positioning.
+- The built-in Mooi tracker is the default source. A small script installed in the production app sends
+  page views and clicks using a per-project public site key. It is cookieless, respects
+  `navigator.doNotTrack` and Global Privacy Control, and uses a daily-rotating salted visitor hash so
+  visitors cannot be tracked across days. IP addresses and user-agent strings are not stored.
+- Users may also connect Google Analytics 4 and Google Search Console through their linked Google account.
+  These integrations use read-only OAuth scopes and encrypted tokens. Search Console reports queries and
+  pages, impressions, clicks, click-through rate and average position.
+- The tab provides overview and traffic/click reports, live visitors, date ranges and source-specific
+  sections for the Mooi tracker, GA4 and Search Console, with explicit empty and partial setup states.
+- **GEO** includes AI-referral traffic from tracker visits; AI visibility monitoring that runs tracked
+  prompts through the user's already linked provider accounts, manually or on a weekly schedule, while
+  respecting account quotas; and an on-demand SEO & GEO audit of production sites. Audits check AI crawler
+  access and site discoverability, return scored findings with suggested fixes, and **Fix in a session**
+  opens a development session with the finding's fix request.
+- Analytics setup, configuration and reports converge between the tab and session chat through the Mooi
+  platform agent API, so agents can read statistics and retrieve the tracker snippet as well as manage
+  configuration.
+
 ## Accounts and administration
 
-- Account area: profile, linked GitHub, provider accounts and other personal settings; secure storage.
+- Account area: profile, linked GitHub and Google accounts, provider accounts and other personal settings;
+  secure storage.
 - Roles. **Admin** gets a tabbed console with rich, live insights and controls:
   - **Users**: every registered user with their last connection, who is online right now (and on how many
     devices), their live sessions and what each agent is doing, projects, provider accounts and devices,
