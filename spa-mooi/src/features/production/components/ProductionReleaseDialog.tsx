@@ -36,7 +36,7 @@ const shaPattern = /^[0-9a-f]{40}$/i;
 
 /**
  * Production always deploys an immutable GitHub release. The preview's exact commit list is joined
- * with project work items so a task/item appears only when its real merge commit enters this release.
+ * with project work items where possible; unmatched commits are still shown as other changes.
  */
 export const ProductionReleaseDialog = ({
   projectId, defaultBranch, initialReleaseTag, busy, error, onClearError, onClose, onSelect,
@@ -136,6 +136,7 @@ export const ProductionReleaseDialog = ({
   const groupedCommits = useMemo(() => {
     if (!preview || !workItems) return [];
     const commitsBySha = new Map(preview.commits.map((commit) => [commit.sha.toLowerCase(), commit]));
+    const matchedShas = new Set<string>();
     const uniquelyMatchesLegacyReport = (report: string | null): string | null => {
       if (!report) return null;
       const match = shortShaPattern.exec(report.trim());
@@ -144,7 +145,7 @@ export const ProductionReleaseDialog = ({
       const matches = [...commitsBySha.keys()].filter((sha) => sha.startsWith(prefix));
       return matches.length === 1 ? matches[0] : null;
     };
-    return [
+    const groups = [
       { kind: 'feature' as const, title: 'Feature' },
       { kind: 'defect' as const, title: 'Defect' },
       { kind: 'debt' as const, title: 'Debt' },
@@ -157,11 +158,20 @@ export const ProductionReleaseDialog = ({
         else if (!task.mergeSha && task.status === 'done') sha = uniquelyMatchesLegacyReport(task.report);
         if (sha && commitsBySha.has(sha)) includedShas.add(sha);
       }));
+      includedShas.forEach((sha) => matchedShas.add(sha));
       return {
         ...group,
         commits: preview.commits.filter((commit) => includedShas.has(commit.sha.toLowerCase())),
       };
     });
+    return [
+      ...groups,
+      {
+        kind: 'other' as const,
+        title: 'Other changes',
+        commits: preview.commits.filter((commit) => !matchedShas.has(commit.sha.toLowerCase())),
+      },
+    ];
   }, [preview, workItems]);
 
   const refresh = () => {
@@ -230,9 +240,9 @@ export const ProductionReleaseDialog = ({
     {selectionReady ? <section aria-labelledby="release-work-heading" className="mt-5 rounded-xl border border-line bg-surface-2/40 p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 id="release-work-heading" className="text-sm font-bold text-ink">Work items in this release</h3>
+          <h3 id="release-work-heading" className="text-sm font-bold text-ink">Changes in this release</h3>
           <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-            {preview?.baseTag ? `Compared with ${preview.baseTag}, currently in production.` : 'First production release; showing work merged in its history.'}
+            {preview?.baseTag ? `Compared with ${preview.baseTag}, currently in production.` : 'First production release; showing changes in its history.'}
           </p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy || checkingPreview || checkingWork} onClick={refresh}>
@@ -258,24 +268,26 @@ export const ProductionReleaseDialog = ({
       {preview && workItems && !preview.truncated ? <>
         <p className="mt-4 text-xs text-ink-subtle">
           {preview.comparison === 'identical'
-            ? 'This is the release currently in production. It has no new work items.'
+            ? 'This is the release currently in production. It has no new commits.'
             : preview.comparison === 'initial'
-              ? 'No release is in production yet; these items have merge commits in the selected release history.'
-              : 'Only items with merge commits entering this release are listed.'}
+              ? 'No release is in production yet; all commits in the selected release history are listed.'
+              : 'Every commit entering this release is listed, grouped by factory item where possible.'}
         </p>
+        <p className="mt-1 text-xs text-ink-subtle">Other changes include commits not reported as factory work, such as changes from individual sessions.</p>
         <p className="mt-1 font-mono text-[11px] text-ink-subtle">Target commit {preview.targetSha.slice(0, 12)}</p>
-        <ul aria-label="Work items in this release" className="mt-3 max-h-[min(18rem,35dvh)] divide-y divide-line overflow-y-auto overscroll-contain rounded-control border border-line bg-surface">
+        <ul aria-label="Changes in this release" className="mt-3 max-h-[min(18rem,35dvh)] divide-y divide-line overflow-y-auto overscroll-contain rounded-control border border-line bg-surface">
           {groupedCommits.flatMap(({ kind, title, commits }) => commits.map((commit) => (
             <li key={`${kind}-${commit.sha}`} className="flex min-w-0 items-start gap-2 px-3 py-2.5 text-sm">
               <span className={cn('shrink-0 font-semibold',
-                kind === 'feature' ? 'text-brand-strong' : kind === 'defect' ? 'text-danger' : 'text-accent')}>
+                kind === 'feature' ? 'text-brand-strong' : kind === 'defect' ? 'text-danger'
+                  : kind === 'debt' ? 'text-accent' : 'text-ink-muted')}>
                 {title}
               </span>
               <span className="min-w-0 break-words text-ink">{commit.title}</span>
             </li>
           )))}
           {groupedCommits.every(({ commits }) => commits.length === 0)
-            ? <li className="px-3 py-3 text-sm text-ink-subtle">No matching work items.</li> : null}
+            ? <li className="px-3 py-3 text-sm text-ink-subtle">No commits in this release.</li> : null}
         </ul>
       </> : null}
     </section> : null}
