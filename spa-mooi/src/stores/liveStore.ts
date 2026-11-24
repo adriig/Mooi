@@ -29,6 +29,7 @@ const initial = {
   work: {},
   workSettings: {},
   analyticsRevisions: {},
+  analyticsGeoRuns: {},
 };
 
 const EMPTY_WORK: ProjectWork = { items: null, issues: null };
@@ -87,6 +88,9 @@ export const useLiveStore = create<LiveState>((set) => ({
     const projectId = String(data.projectId ?? '');
     if (frame.type === 'analytics.updated') {
       return { analyticsRevisions: bump(state.analyticsRevisions, projectId) };
+    }
+    if (frame.type === 'analytics.geo.run') {
+      return { analyticsGeoRuns: { ...state.analyticsGeoRuns, [projectId]: data } };
     }
     if (frame.type === 'work.item') {
       return { work: { ...state.work, [projectId]: upsertItem(state.work[projectId], data.item as WorkItem) } };

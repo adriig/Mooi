@@ -16,6 +16,9 @@ export const applyLiveEvent = (frame: StreamFrame): void => {
     case 'session.removed':
       sessions.retireSession(String(frame.data.sessionId));
       return;
+    case 'analytics.geo.run':
+      // Folded by the live store so the Analytics panel can show runner progress immediately.
+      break;
     default:
       break;
   }

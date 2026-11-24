@@ -1,2 +1,2 @@
 export type AnalyticsDimension =
-  | 'page' | 'referrer' | 'utm_campaign' | 'country' | 'device' | 'browser' | 'os' | 'click_target' | 'outbound';
+  | 'page' | 'referrer' | 'utm_campaign' | 'country' | 'device' | 'browser' | 'os' | 'click_target' | 'outbound' | 'ai_source' | 'ai_landing';

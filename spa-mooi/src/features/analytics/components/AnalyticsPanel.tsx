@@ -4,6 +4,7 @@ import { BarChart3, RotateCw, Settings2 } from 'lucide-react';
 import { fetchAnalyticsOverview, fetchAnalyticsSeries } from '@/features/analytics/api/analyticsApi';
 import { AnalyticsBreakdownCard } from '@/features/analytics/components/AnalyticsBreakdownCard';
 import { AnalyticsGa4Section } from '@/features/analytics/components/AnalyticsGa4Section';
+import { AnalyticsGeoSection } from '@/features/analytics/components/AnalyticsGeoSection';
 import { AnalyticsKpis } from '@/features/analytics/components/AnalyticsKpis';
 import { AnalyticsRangePicker } from '@/features/analytics/components/AnalyticsRangePicker';
 import { AnalyticsSearchSection } from '@/features/analytics/components/AnalyticsSearchSection';
@@ -26,6 +27,7 @@ import { SegmentedControl } from '@/shared/components/SegmentedControl';
 
 interface AnalyticsPanelProps {
   projectId: string;
+  onFix: (request: string) => void;
 }
 
 const METRICS: { id: AnalyticsMetric; label: string }[] = [
@@ -40,7 +42,7 @@ const GROUP_TITLE = 'text-[13px] font-semibold tracking-[0.02em] text-ink-muted 
  * The Analytics tab of a web-application project: tracker setup, overview, traffic and clicks of its
  * production app. The range lives in the URL (`range`, and `from`/`to` for a custom one).
  */
-export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
+export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
   const [searchParams, setSearchParams] = useSearchParams();
   const key = analyticsRangeKey(searchParams.get('range'));
   const fromParam = searchParams.get('from');
@@ -165,6 +167,7 @@ export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
           <AnalyticsGa4Section projectId={projectId} range={range} site={siteState.site} revision={refresh} onAction={onGoogleAction} />
         </>
       ) : null}
+      <AnalyticsGeoSection projectId={projectId} range={range} onFix={onFix} />
     </div>
   );
 };

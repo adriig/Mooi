@@ -61,6 +61,7 @@ export const ProjectPage = () => {
   const { sessions, busy: sessionBusy, actionError, create, clearActionError } = useProjectSessions(project?.id);
   const { connections, reload: reloadConnections } = useAgentConnections();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [initialSessionMessage, setInitialSessionMessage] = useState<string | undefined>();
   const [removalOpen, setRemovalOpen] = useState(false);
   const [removalAction, setRemovalAction] = useState<ProjectRemovalAction | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -160,7 +161,7 @@ export const ProjectPage = () => {
       />
 
       {tab === ANALYTICS_TAB ? (
-        <AnalyticsPanel projectId={project.id} />
+        <AnalyticsPanel projectId={project.id} onFix={(request) => { setInitialSessionMessage(request); setNewSessionOpen(true); }} />
       ) : tab === TODOS_TAB ? (
         <WorkPanel projectId={project.id} connections={connections} />
       ) : tab === BOARD_TAB ? (
@@ -204,9 +205,11 @@ export const ProjectPage = () => {
         onRefreshConnections={reloadConnections}
         onClose={() => {
           setNewSessionOpen(false);
+          setInitialSessionMessage(undefined);
           clearActionError();
         }}
         onCreate={handleCreateSession}
+        initialMessage={initialSessionMessage}
       />
       {removalOpen ? (
         <RemoveProjectDialog

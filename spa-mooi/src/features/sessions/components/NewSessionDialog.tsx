@@ -20,6 +20,7 @@ interface NewSessionDialogProps {
   onRefreshConnections: () => Promise<void>;
   onClose: () => void;
   onCreate: (request: CreateSessionRequest) => Promise<boolean>;
+  initialMessage?: string;
 }
 
 const slugify = (value: string): string => {
@@ -58,6 +59,7 @@ export const NewSessionDialog = ({
   onRefreshConnections,
   onClose,
   onCreate,
+  initialMessage,
 }: NewSessionDialogProps) => {
   const [branch, setBranch] = useState('');
   const [refreshingConnections, setRefreshingConnections] = useState(false);
@@ -96,6 +98,7 @@ export const NewSessionDialog = ({
       model: choice.model,
       effort: choice.effort || null,
       branch: branch.trim(),
+      initialMessage,
     }).then((succeeded) => {
       if (succeeded) {
         onClose();
