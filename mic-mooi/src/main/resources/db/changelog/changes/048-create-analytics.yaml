@@ -1,0 +1,162 @@
+databaseChangeLog:
+  - changeSet:
+      id: 048-create-analytics
+      author: mooi
+      changes:
+        - createTable:
+            tableName: analytics_sites
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_sites
+                    nullable: false
+              - column:
+                  name: project_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    unique: true
+                    uniqueConstraintName: uq_analytics_sites_project
+              - column:
+                  name: player_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: site_key
+                  type: varchar(64)
+                  constraints:
+                    nullable: false
+                    unique: true
+                    uniqueConstraintName: uq_analytics_sites_site_key
+              - column:
+                  name: allowed_origins
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: ga4_property_id
+                  type: varchar(255)
+              - column:
+                  name: search_console_site_url
+                  type: varchar(2048)
+              - column:
+                  name: google_connection_id
+                  type: uuid
+              - column:
+                  name: created_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: updated_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_sites_project
+            baseTableName: analytics_sites
+            baseColumnNames: project_id
+            referencedTableName: projects
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_sites_player
+            baseTableName: analytics_sites
+            baseColumnNames: player_id
+            referencedTableName: players
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createTable:
+            tableName: analytics_events
+            columns:
+              - column:
+                  name: id
+                  type: bigserial
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_events
+                    nullable: false
+              - column:
+                  name: site_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: occurred_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: kind
+                  type: varchar(16)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: path
+                  type: varchar(2048)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: referrer_host
+                  type: varchar(255)
+              - column:
+                  name: utm_source
+                  type: varchar(255)
+              - column:
+                  name: utm_medium
+                  type: varchar(255)
+              - column:
+                  name: utm_campaign
+                  type: varchar(255)
+              - column:
+                  name: visitor_hash
+                  type: varchar(64)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: session_hash
+                  type: varchar(64)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: device
+                  type: varchar(32)
+              - column:
+                  name: browser
+                  type: varchar(64)
+              - column:
+                  name: os
+                  type: varchar(64)
+              - column:
+                  name: country
+                  type: varchar(8)
+              - column:
+                  name: target
+                  type: varchar(2048)
+              - column:
+                  name: duration_ms
+                  type: bigint
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_events_site
+            baseTableName: analytics_events
+            baseColumnNames: site_id
+            referencedTableName: analytics_sites
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: ix_analytics_events_site_occurred
+            tableName: analytics_events
+            columns:
+              - column:
+                  name: site_id
+              - column:
+                  name: occurred_at
+      rollback:
+        - dropTable:
+            tableName: analytics_events
+        - dropTable:
+            tableName: analytics_sites
