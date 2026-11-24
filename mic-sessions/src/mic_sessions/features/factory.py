@@ -25,6 +25,7 @@ runner reconciles from `mic-mooi` on every tick, so a restart only relaunches th
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import Coroutine
@@ -33,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Body, Depends, Request, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 from pydantic import BaseModel, Field
 
 from mic_sessions.features import agent_connections, sessions
@@ -368,6 +369,35 @@ async def agent_assignment(session_id: UUID, request: Request) -> Json:
             "accounts": accounts}
 
 
+@router.get("/sessions/{session_id}/work/agent/context")
+async def agent_task_context(session_id: UUID, request: Request,
+                             section: Annotated[int | None, Query(ge=0)] = None,
+                             revision: str | None = None, full: bool = False) -> Json:
+    """Only this run's spec, never the project's task list. No GitHub sync or writes."""
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    run = _runs.get(session_id)
+    if run is None:
+        raise ApiException.conflict("This session does not run a factory task")
+    work = await mooi.fetch_work(caller, session.project_id)
+    item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), None)
+    if item is None:
+        raise ApiException.not_found("Work item not found")
+    spec = item.get("spec") or ""
+    current_revision = _spec_revision(spec)
+    if revision is not None and revision != current_revision:
+        raise ApiException.conflict("The spec changed; read the context index again before selecting sections")
+    sections = _spec_sections(spec)
+    result: Json = {"itemId": item["id"], "title": item["title"], "revision": current_revision}
+    if full:
+        return {**result, "spec": spec}
+    if section is not None:
+        if section >= len(sections):
+            raise ApiException.not_found("Spec section not found")
+        return {**result, "section": section, "content": sections[section][1]}
+    return {**result, "sections": [{"section": index, "title": title, "characters": len(content)}
+                                    for index, (title, content) in enumerate(sections)]}
+
+
 @router.post("/sessions/{session_id}/work/agent/features", status_code=status.HTTP_201_CREATED)
 async def agent_create_feature(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
@@ -487,7 +517,7 @@ Never start work items yourself: Start belongs to the user.
 
 Designing a feature:
 - Read the code first. Write a `spec`: the goal, the user-facing behaviour and the main technical decisions.
-- Break it into tasks of about one to four hours of agent work. Each task runs in a fresh session that only sees the feature's spec and its own task, so its `description` must be self-contained: what to build, where in the code, and the decisions it must follow. Write verifiable `acceptance` criteria for every task.
+- Break it into tasks of about one to four hours of agent work. Each task runs in a fresh session with its own task and access to the feature's spec by section, so its `description` must be self-contained: what to build, where in the code, and the decisions it must follow. Name relevant spec sections explicitly, including shared decisions and preparation; QA must have enough preparation in its description. Write verifiable `acceptance` criteria for every task.
 - Categories: `ux` (UX/UI), `dev` (development), `infra` (infrastructure/DevOps), `docs` (documentation). QA tasks are never written by hand: set `tests: true` on a task whose behaviour must be checked, with optional `qa` settings, and the platform adds its QA task, blocked until the task merges.
 - `dependsOn` lists the keys of tasks of the same feature that must be merged first. Add a dependency only when a task really builds on another's code (a new system before the features that use it); everything else stays parallel. Never make a task depend on another feature; at most a whole feature `dependsOn` another feature's id.
 - `autoMerge` (default true) merges a finished task on its own, resolving conflicts with the agent; set it to false where the user should review the merge.
@@ -536,6 +566,7 @@ def _task_section(run: TaskRun, root: str) -> str:
 This session runs one task of the project's software factory, on its own; there may be nobody watching. Its first message is the task.
 - Stay within the task. Other tasks run in their own sessions; the tasks this one depended on are already merged into the default branch.
 - Ask the user only when you truly cannot go on: the task then waits for their answer.
+- Spec access: `GET {root}/work/agent/context` returns only this item's spec index and revision; add `?section=<number>&revision=<revision>` for one complete section or `?full=true` for the entire unabridged spec. Use this instead of downloading the project's work list. If a revision changed, reload the index.
 {branch_guidance}
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
 - Before your turn ends, report the outcome with `POST {report}`: {outcomes}. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
@@ -966,29 +997,100 @@ def _same_assignment(left: Json, right: Json) -> bool:
     return all(left.get(field) == right.get(field) for field in fields)
 
 
+def _spec_revision(spec: str) -> str:
+    return hashlib.sha256(spec.encode()).hexdigest()[:16]
+
+
+def _spec_sections(spec: str) -> list[tuple[str, str]]:
+    """Lossless ATX heading boundaries, ignoring headings inside Markdown code fences.
+
+    Existing prose-only specs remain one section; no inferred summaries or semantic cuts.
+    Joining the returned contents reproduces the original stored spec exactly.
+    """
+    sections: list[tuple[str, str]] = []
+    title = "Overview / shared decisions"
+    lines: list[str] = []
+    fence = ""
+    for line in spec.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker:
+            run, rest = marker.groups()
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not rest.strip():
+                fence = ""
+        heading = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line) if not fence else None
+        if heading:
+            if lines:
+                sections.append((title, "".join(lines)))
+            title, lines = heading[1], []
+        lines.append(line)
+    if lines:
+        sections.append((title, "".join(lines)))
+    return sections
+
+
 def _brief(item: Json, task: Json) -> str:
-    spec = (item.get("spec") or "").strip()
-    spec = spec if len(spec) <= 30_000 else spec[:30_000] + "\n[...]"
+    spec = item.get("spec") or ""
     kind = {"feature": "Feature", "defect": "Defect", "debt": "Debt"}[item["kind"]]
     issue = f" (GitHub issue #{item['issueNumber']})" if item.get("issueNumber") else ""
-    lines = [f"# {kind}{issue}: {item['title']}", "", spec or "(no spec)", ""]
+    lines = [f"# {kind}{issue}: {item['title']}"]
+    seen: dict[str, str] = {}
+
+    def block(title: str, content: str | None, fallback: str = "") -> None:
+        text = (content or "").strip() or fallback
+        if not text:
+            return
+        if text in seen:
+            lines.extend(["", f"## {title}", "", f"Same as {seen[text]} above."])
+        else:
+            lines.extend(["", f"## {title}", "", text])
+            seen[text] = title
+
+    # A duplicated issue body belongs to the task description, once, regardless of its size.
+    description = (task.get("description") or "").strip()
+    duplicated_spec = spec.strip() and (
+        spec.strip() == description
+        # Existing issue tasks prefix the exact body with "GitHub issue #N: <title>".
+        or (item["kind"] in ("defect", "debt") and spec.strip() in description)
+    )
+    if spec.strip() and not duplicated_spec:
+        if len(spec) <= 2_000 and not task.get("qaOf"):
+            block("Specification", spec)
+        else:
+            lines += ["", "## Specification index", "",
+                      (f"Revision: {_spec_revision(spec)}. Read sections through the spec access endpoint in "
+                       "your Software factory instructions."),
+                      ("Before working, read the goal, overview/shared decisions, sections named by the task, and all "
+                       "sections needed for its decisions, acceptance and preparation. Select from this index; "
+                       "do not assume omitted content. If relevance is unclear or there are no headings, read "
+                       "the full spec. QA should select only shared rules and the behaviour/preparation it checks.")]
+            lines += [f"- {index}: {title} ({len(content)} characters)"
+                      for index, (title, content) in enumerate(_spec_sections(spec))]
     if task.get("qaOf"):
-        tested = next((other for other in item["tasks"] if other["id"] == task["qaOf"]), None)
-        lines += [f"# Your task: {task['title']} (QA)", "",
+        tested = next((other for other in item.get("tasks", []) if other["id"] == task["qaOf"]), None)
+        lines += ["", f"# Your task: {task['title']} (QA)", "",
                   (f"Check the work of \"{tested['title'] if tested else 'its task'}\". It is already merged into the "
                    "default branch together with everything merged before it, and this session's branch starts from "
-                   "there. Do not change repository files."),
-                  "", task.get("description") or "",
-                  "", ("Run the project the way its development deployment brief says (read it with the deployment "
+                   "there. Do not change repository files.")]
+        if tested:
+            block("Task under review", tested.get("description"))
+            block("Tested task acceptance criteria", tested.get("acceptance"), "Use the tested task description.")
+        else:
+            lines += ["", ("The tested task is unavailable. Use the QA description and criteria below; read "
+                           "the full spec if needed and report blocked if the expected behaviour cannot be established.")]
+        block("QA preparation and scope", task.get("description"))
+        block("QA acceptance criteria", task.get("acceptance"),
+              "Use the tested task acceptance criteria and QA description." if tested else "Use the QA description.")
+        lines += ["", ("Run the project the way its development deployment brief says (read it with the deployment "
                        "brief endpoint of your session instructions) and verify the criteria through Playwright, as a "
-                       "user would. When the project is not a web application, verify them with the project's own means."),
-                  "", "## Acceptance criteria", "", task.get("acceptance") or "(none given: use the task description)"]
+                       "user would. When the project is not a web application, verify them with the project's own means.")]
     else:
-        lines += [f"# Your task: {task['title']}", "", task.get("description") or "",
-                  "", "## Acceptance criteria", "", task.get("acceptance") or "(none given)",
-                  "", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
+        lines += ["", f"# Your task: {task['title']}"]
+        block("Description", task.get("description"))
+        block("Acceptance criteria", task.get("acceptance"), "(none given)")
+        lines += ["", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
                        "else than this task.")]
-    lines += ["", "Report the outcome before your turn ends, as your Software factory task instructions say."]
     return "\n".join(lines)
 
 
