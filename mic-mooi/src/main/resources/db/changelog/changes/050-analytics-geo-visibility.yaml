@@ -1,0 +1,261 @@
+databaseChangeLog:
+  - changeSet:
+      id: 050-analytics-geo-visibility
+      author: mooi
+      changes:
+        - createTable:
+            tableName: analytics_geo_settings
+            columns:
+              - column:
+                  name: site_id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_geo_settings
+                    nullable: false
+              - column:
+                  name: brand_terms
+                  type: text
+                  defaultValue: "[]"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: competitors
+                  type: text
+                  defaultValue: "[]"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: weekly_enabled
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+              - column:
+                  name: next_run_at
+                  type: timestamptz
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_geo_settings_site
+            baseTableName: analytics_geo_settings
+            baseColumnNames: site_id
+            referencedTableName: analytics_sites
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: ix_analytics_geo_settings_due
+            tableName: analytics_geo_settings
+            columns:
+              - column:
+                  name: weekly_enabled
+              - column:
+                  name: next_run_at
+        - createTable:
+            tableName: analytics_geo_prompts
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_geo_prompts
+                    nullable: false
+              - column:
+                  name: site_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: text
+                  type: varchar(500)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: enabled
+                  type: boolean
+                  defaultValueBoolean: true
+                  constraints:
+                    nullable: false
+              - column:
+                  name: position
+                  type: integer
+                  defaultValueNumeric: 0
+                  constraints:
+                    nullable: false
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_geo_prompts_site
+            baseTableName: analytics_geo_prompts
+            baseColumnNames: site_id
+            referencedTableName: analytics_sites
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: ix_analytics_geo_prompts_site_position
+            tableName: analytics_geo_prompts
+            columns:
+              - column:
+                  name: site_id
+              - column:
+                  name: position
+        - createTable:
+            tableName: analytics_geo_runs
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_geo_runs
+                    nullable: false
+              - column:
+                  name: site_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: trigger
+                  type: varchar(16)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: status
+                  type: varchar(16)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: started_at
+                  type: timestamptz
+              - column:
+                  name: finished_at
+                  type: timestamptz
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_geo_runs_site
+            baseTableName: analytics_geo_runs
+            baseColumnNames: site_id
+            referencedTableName: analytics_sites
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: ix_analytics_geo_runs_site_created
+            tableName: analytics_geo_runs
+            columns:
+              - column:
+                  name: site_id
+              - column:
+                  name: created_at
+        - createIndex:
+            indexName: ix_analytics_geo_runs_claim
+            tableName: analytics_geo_runs
+            columns:
+              - column:
+                  name: trigger
+              - column:
+                  name: status
+              - column:
+                  name: created_at
+        - createIndex:
+            indexName: ix_analytics_geo_runs_site_status
+            tableName: analytics_geo_runs
+            columns:
+              - column:
+                  name: site_id
+              - column:
+                  name: status
+        - sql:
+            sql: >-
+              create unique index uq_analytics_geo_runs_active_site
+              on analytics_geo_runs (site_id)
+              where status in ('queued', 'running')
+        - createTable:
+            tableName: analytics_geo_results
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_analytics_geo_results
+                    nullable: false
+              - column:
+                  name: run_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: prompt_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+              - column:
+                  name: provider
+                  type: varchar(80)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: model
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: mentioned
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+              - column:
+                  name: cited
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+              - column:
+                  name: position
+                  type: integer
+              - column:
+                  name: cited_urls
+                  type: text
+                  defaultValue: "[]"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: competitors_mentioned
+                  type: text
+                  defaultValue: "[]"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: excerpt
+                  type: varchar(2000)
+              - column:
+                  name: error
+                  type: varchar(2000)
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_geo_results_run
+            baseTableName: analytics_geo_results
+            baseColumnNames: run_id
+            referencedTableName: analytics_geo_runs
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - addUniqueConstraint:
+            constraintName: uq_analytics_geo_results_engine_prompt
+            tableName: analytics_geo_results
+            columnNames: run_id, prompt_id, provider, model
+        - createIndex:
+            indexName: ix_analytics_geo_results_run
+            tableName: analytics_geo_results
+            columns:
+              - column:
+                  name: run_id
+      rollback:
+        - dropTable:
+            tableName: analytics_geo_results
+        - dropTable:
+            tableName: analytics_geo_runs
+        - dropTable:
+            tableName: analytics_geo_prompts
+        - dropTable:
+            tableName: analytics_geo_settings

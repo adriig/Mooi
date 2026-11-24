@@ -6,54 +6,69 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.hibernate.annotations.Immutable;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-import org.springframework.context.annotation.Bean;
-import org.springframework.scheduling.annotation.Scheduled;
 
 import dev.mooi.mic.shared.Auth;
 import dev.mooi.mic.shared.Crypto;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EntityManager;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
-import jakarta.persistence.EntityManager;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -95,6 +110,97 @@ public class AnalyticsFeature {
     public SitePayload updateSite(@PathVariable UUID projectId, @Valid @RequestBody SiteUpdate body,
                                   Auth.Principal principal) {
         return service.updateSite(projectId, principal.player().id(), body);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/geo/settings")
+    @Auth.Authenticated
+    public GeoSettingsPayload geoSettings(@PathVariable UUID projectId, Auth.Principal principal) {
+        return service.geoSettings(projectId, principal.player().id());
+    }
+
+    @PutMapping("/me/projects/{projectId}/analytics/geo/settings")
+    @Auth.Authenticated
+    public GeoSettingsPayload saveGeoSettings(@PathVariable UUID projectId,
+                                              @Valid @RequestBody GeoSettingsUpdate body,
+                                              Auth.Principal principal) {
+        return service.saveGeoSettings(projectId, principal.player().id(), body);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/geo/prompts")
+    @Auth.Authenticated
+    public List<GeoPromptPayload> geoPrompts(@PathVariable UUID projectId, Auth.Principal principal) {
+        return service.geoPrompts(projectId, principal.player().id());
+    }
+
+    @PostMapping("/me/projects/{projectId}/analytics/geo/prompts")
+    @Auth.Authenticated
+    public GeoPromptPayload createGeoPrompt(@PathVariable UUID projectId,
+                                            @Valid @RequestBody GeoPromptCreate body,
+                                            Auth.Principal principal) {
+        return service.createGeoPrompt(projectId, principal.player().id(), body);
+    }
+
+    @PatchMapping("/me/projects/{projectId}/analytics/geo/prompts/{promptId}")
+    @Auth.Authenticated
+    public GeoPromptPayload updateGeoPrompt(@PathVariable UUID projectId, @PathVariable UUID promptId,
+                                            @Valid @RequestBody GeoPromptUpdate body,
+                                            Auth.Principal principal) {
+        return service.updateGeoPrompt(projectId, principal.player().id(), promptId, body);
+    }
+
+    @DeleteMapping("/me/projects/{projectId}/analytics/geo/prompts/{promptId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    @Auth.Authenticated
+    public void deleteGeoPrompt(@PathVariable UUID projectId, @PathVariable UUID promptId,
+                                Auth.Principal principal) {
+        service.deleteGeoPrompt(projectId, principal.player().id(), promptId);
+    }
+
+    @PostMapping("/me/projects/{projectId}/analytics/geo/runs")
+    @Auth.Authenticated
+    public GeoRunPayload queueGeoRun(@PathVariable UUID projectId, Auth.Principal principal) {
+        return service.queueGeoRun(projectId, principal.player().id());
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/geo/runs")
+    @Auth.Authenticated
+    public List<GeoRunPayload> geoRuns(@PathVariable UUID projectId,
+                                       @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit,
+                                       Auth.Principal principal) {
+        return service.geoRuns(projectId, principal.player().id(), limit);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/geo/runs/{runId}")
+    @Auth.Authenticated
+    public GeoRunDetail geoRun(@PathVariable UUID projectId, @PathVariable UUID runId,
+                               Auth.Principal principal) {
+        return service.geoRun(projectId, principal.player().id(), runId);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/geo/summary")
+    @Auth.Authenticated
+    public GeoSummary geoSummary(@PathVariable UUID projectId, @RequestParam(required = false) Instant from,
+                                 @RequestParam(required = false) Instant to, Auth.Principal principal) {
+        return service.geoSummary(projectId, principal.player().id(), from, to);
+    }
+
+    @PostMapping("/internal/analytics/geo/runs/claim")
+    @Auth.ServiceOnly
+    public List<GeoClaim> claimGeoRuns(@Valid @RequestBody(required = false) GeoClaimRequest body) {
+        return service.claimGeoRuns(body == null || body.limit() == null ? 10 : body.limit());
+    }
+
+    @PutMapping("/internal/analytics/geo/runs/{runId}/status")
+    @Auth.ServiceOnly
+    public GeoRunPayload setGeoRunStatus(@PathVariable UUID runId, @Valid @RequestBody GeoRunStatusChange body) {
+        return service.setGeoRunStatus(runId, body.status());
+    }
+
+    @PostMapping("/internal/analytics/geo/runs/{runId}/results")
+    @Auth.ServiceOnly
+    @ResponseStatus(HttpStatus.CREATED)
+    public GeoRunDetail postGeoResults(@PathVariable UUID runId, @Valid @RequestBody GeoResultsBatch body) {
+        return service.postGeoResults(runId, body.results());
     }
 
     @PostMapping("/me/projects/{projectId}/analytics/site/key")
@@ -160,6 +266,45 @@ public class AnalyticsFeature {
     public record SitePayload(String siteKey, List<String> allowedOrigins, String snippet,
                               String ga4PropertyId, String searchConsoleSiteUrl) { }
 
+    public record GeoCompetitor(@NotBlank @Size(max = 255) String name,
+                                @NotBlank @Size(max = 255) String domain) { }
+    public record GeoSettingsUpdate(@Size(max = 20) List<@NotBlank @Size(max = 255) String> brandTerms,
+                                    @Size(max = 20) List<@NotNull @Valid GeoCompetitor> competitors,
+                                    @NotNull Boolean weeklyEnabled) { }
+    public record GeoSettingsPayload(List<String> brandTerms, List<GeoCompetitor> competitors,
+                                     boolean weeklyEnabled, Instant nextRunAt) { }
+    public record GeoPromptCreate(@NotBlank @Size(max = 500) String text,
+                                  Boolean enabled, @Min(0) Integer position) { }
+    public record GeoPromptUpdate(@Size(min = 1, max = 500) String text, Boolean enabled,
+                                  @Min(0) Integer position) { }
+    public record GeoPromptPayload(UUID id, String text, boolean enabled, int position) { }
+    public record GeoRunPayload(UUID id, String trigger, String status, Instant createdAt,
+                                Instant startedAt, Instant finishedAt) { }
+    public record GeoResultPayload(UUID id, UUID promptId, String provider, String model,
+                                   boolean mentioned, boolean cited, Integer position,
+                                   List<String> citedUrls, List<String> competitorsMentioned,
+                                   String excerpt, String error) { }
+    public record GeoRunDetail(GeoRunPayload run, List<GeoResultPayload> results) { }
+    public record GeoClaimRequest(@Min(1) @Max(100) Integer limit) { }
+    public record GeoClaim(UUID runId, UUID siteId, UUID projectId, String trigger,
+                           List<String> brandTerms, List<GeoCompetitor> competitors,
+                           List<GeoPromptPayload> prompts) { }
+    public record GeoRunStatusChange(@NotBlank String status) { }
+    public record GeoResultInput(@NotNull UUID promptId, @NotBlank @Size(max = 80) String provider,
+                                 @NotBlank @Size(max = 255) String model, boolean mentioned, boolean cited,
+                                 @Min(1) Integer position, @Size(max = 50) List<@Size(max = 2048) String> citedUrls,
+                                 @Size(max = 50) List<@Size(max = 255) String> competitorsMentioned,
+                                 @Size(max = 2000) String excerpt, @Size(max = 2000) String error) { }
+    public record GeoResultsBatch(@NotNull @Size(max = 500) List<@NotNull @Valid GeoResultInput> results) { }
+    public record GeoVoice(String provider, String model, long mentionedPrompts, long answeredPrompts,
+                           double shareOfVoice, long citedPrompts, double citationRate,
+                           Double averageFirstMentionPosition, Map<String, Long> competitorMentions) { }
+    public record GeoTrendPoint(UUID runId, Instant createdAt, String provider, String model,
+                                long mentionedPrompts, long answeredPrompts, double shareOfVoice,
+                                long citedPrompts, double citationRate) { }
+    public record GeoSummary(Instant from, Instant to, List<GeoVoice> visibility,
+                             List<GeoTrendPoint> trend) { }
+
     @Service
     public static class AnalyticsService {
         private static final int MAX_PAYLOAD_BYTES = 4096;
@@ -171,6 +316,10 @@ public class AnalyticsFeature {
         private final AnalyticsEventRepository events;
         private final AnalyticsProjectRepository projects;
         private final AnalyticsProductionRecipeRepository recipes;
+        private final GeoSettingsRepository geoSettings;
+        private final GeoPromptRepository geoPrompts;
+        private final GeoRunRepository geoRuns;
+        private final GeoResultRepository geoResults;
         private final EntityManager entityManager;
         private final Crypto.SecretBox box;
         private final SecureRandom random = new SecureRandom();
@@ -182,14 +331,20 @@ public class AnalyticsFeature {
 
         AnalyticsService(AnalyticsSiteRepository sites, AnalyticsEventRepository events,
                          AnalyticsProjectRepository projects, AnalyticsProductionRecipeRepository recipes,
-                         Crypto.SecretBox box, EntityManager entityManager,
+                         GeoSettingsRepository geoSettings, GeoPromptRepository geoPrompts,
+                         GeoRunRepository geoRuns, GeoResultRepository geoResults,
+                         EntityManager entityManager, Crypto.SecretBox box,
                          @Value("${app.analytics.public-base-url:http://localhost:28471}") String publicBaseUrl) {
             this.sites = sites;
             this.events = events;
             this.projects = projects;
             this.recipes = recipes;
-            this.box = box;
+            this.geoSettings = geoSettings;
+            this.geoPrompts = geoPrompts;
+            this.geoRuns = geoRuns;
+            this.geoResults = geoResults;
             this.entityManager = entityManager;
+            this.box = box;
             this.publicBaseUrl = stripTrailingSlash(publicBaseUrl);
         }
 
@@ -278,6 +433,404 @@ public class AnalyticsFeature {
         }
         private void bad(String message) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message); }
         private record ReportRange(UUID siteId, Instant from, Instant to, String timezone) { }
+
+        @Transactional
+        public GeoSettingsPayload geoSettings(UUID projectId, UUID playerId) {
+            AnalyticsSite site = ownedSite(projectId, playerId);
+            return geoSettings.findById(site.getId()).map(this::settingsPayload)
+                    .orElseGet(() -> new GeoSettingsPayload(List.of(), List.of(), false, null));
+        }
+
+        @Transactional
+        public GeoSettingsPayload saveGeoSettings(UUID projectId, UUID playerId, GeoSettingsUpdate update) {
+            AnalyticsSite site = lockedOwnedSite(projectId, playerId);
+            GeoSettings row = geoSettings.findById(site.getId()).orElseGet(() -> {
+                GeoSettings fresh = new GeoSettings();
+                fresh.setSiteId(site.getId());
+                fresh.setBrandTerms("[]");
+                fresh.setCompetitors("[]");
+                fresh.setWeeklyEnabled(false);
+                return fresh;
+            });
+            List<String> terms = update.brandTerms() == null ? List.of()
+                    : update.brandTerms().stream().map(String::strip).filter(value -> !value.isEmpty()).distinct().toList();
+            List<GeoCompetitor> competitors = update.competitors() == null ? List.of()
+                    : update.competitors().stream().map(value -> new GeoCompetitor(value.name().strip(),
+                            value.domain().strip().toLowerCase(Locale.ROOT))).toList();
+            boolean wasEnabled = row.isWeeklyEnabled();
+            boolean enabled = update.weeklyEnabled();
+            row.setBrandTerms(json.writeValueAsString(terms));
+            row.setCompetitors(json.writeValueAsString(competitors));
+            row.setWeeklyEnabled(enabled);
+            if (!enabled) {
+                row.setNextRunAt(null);
+            } else if (!wasEnabled || row.getNextRunAt() == null) {
+                row.setNextRunAt(Instant.now().plus(Duration.ofDays(7)));
+            }
+            return settingsPayload(geoSettings.save(row));
+        }
+
+        @Transactional
+        public List<GeoPromptPayload> geoPrompts(UUID projectId, UUID playerId) {
+            AnalyticsSite site = ownedSite(projectId, playerId);
+            return geoPrompts.findBySiteIdOrderByPositionAscIdAsc(site.getId()).stream()
+                    .map(this::promptPayload).toList();
+        }
+
+        @Transactional
+        public GeoPromptPayload createGeoPrompt(UUID projectId, UUID playerId, GeoPromptCreate input) {
+            AnalyticsSite site = lockedOwnedSite(projectId, playerId);
+            List<GeoPrompt> existing = geoPrompts.findBySiteIdOrderByPositionAscIdAsc(site.getId());
+            if (existing.size() >= 50) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At most 50 prompts are supported");
+            }
+            GeoPrompt row = new GeoPrompt();
+            row.setId(UUID.randomUUID());
+            row.setSiteId(site.getId());
+            row.setText(input.text().strip());
+            row.setEnabled(input.enabled() == null || input.enabled());
+            row.setPosition(input.position() == null ? existing.size() : input.position());
+            geoPrompts.save(row);
+            normalizePromptPositions(site.getId(), row.getId(), row.getPosition());
+            return promptPayload(row);
+        }
+
+        @Transactional
+        public GeoPromptPayload updateGeoPrompt(UUID projectId, UUID playerId, UUID promptId, GeoPromptUpdate input) {
+            AnalyticsSite site = lockedOwnedSite(projectId, playerId);
+            GeoPrompt row = ownedPrompt(site.getId(), promptId);
+            if (input.text() != null) {
+                if (input.text().isBlank()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Prompt text cannot be blank");
+                }
+                row.setText(input.text().strip());
+            }
+            if (input.enabled() != null) row.setEnabled(input.enabled());
+            if (input.position() != null) row.setPosition(input.position());
+            geoPrompts.save(row);
+            if (input.position() != null) normalizePromptPositions(site.getId(), row.getId(), row.getPosition());
+            return promptPayload(row);
+        }
+
+        @Transactional
+        public void deleteGeoPrompt(UUID projectId, UUID playerId, UUID promptId) {
+            AnalyticsSite site = lockedOwnedSite(projectId, playerId);
+            GeoPrompt row = ownedPrompt(site.getId(), promptId);
+            geoPrompts.delete(row);
+            normalizePromptPositions(site.getId(), null, 0);
+        }
+
+        @Transactional
+        public GeoRunPayload queueGeoRun(UUID projectId, UUID playerId) {
+            AnalyticsSite site = lockedOwnedSite(projectId, playerId);
+            if (geoRuns.existsBySiteIdAndStatusIn(site.getId(), List.of("queued", "running"))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "An AI visibility run is already active");
+            }
+            GeoRun run = new GeoRun();
+            run.setId(UUID.randomUUID());
+            run.setSiteId(site.getId());
+            run.setTrigger("manual");
+            run.setStatus("queued");
+            run.setCreatedAt(Instant.now());
+            return runPayload(geoRuns.save(run));
+        }
+
+        @Transactional
+        public List<GeoRunPayload> geoRuns(UUID projectId, UUID playerId, int limit) {
+            AnalyticsSite site = ownedSite(projectId, playerId);
+            if (limit < 1 || limit > 100) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Limit must be from 1 to 100");
+            }
+            return geoRuns.findBySiteIdOrderByCreatedAtDesc(site.getId(), PageRequest.of(0, limit))
+                    .stream().map(this::runPayload).toList();
+        }
+
+        @Transactional
+        public GeoRunDetail geoRun(UUID projectId, UUID playerId, UUID runId) {
+            AnalyticsSite site = ownedSite(projectId, playerId);
+            GeoRun run = ownedRun(site.getId(), runId);
+            return runDetail(run);
+        }
+
+        @Transactional
+        public GeoSummary geoSummary(UUID projectId, UUID playerId, Instant requestedFrom, Instant requestedTo) {
+            AnalyticsSite site = ownedSite(projectId, playerId);
+            Instant to = requestedTo == null ? Instant.now() : requestedTo;
+            Instant from = requestedFrom == null ? to.minus(Duration.ofDays(30)) : requestedFrom;
+            if (!from.isBefore(to)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from must be before to");
+            }
+            List<GeoRun> runs = geoRuns.findBySiteIdAndCreatedAtBetweenOrderByCreatedAtAsc(site.getId(), from, to);
+            Map<UUID, GeoRun> runById = new HashMap<>();
+            runs.forEach(run -> runById.put(run.getId(), run));
+            if (runs.isEmpty()) return new GeoSummary(from, to, List.of(), List.of());
+            List<GeoResult> results = geoResults.findByRunIdIn(runById.keySet());
+            Map<String, List<GeoResult>> byEngine = new HashMap<>();
+            Map<UUID, Map<String, List<GeoResult>>> byRunAndEngine = new HashMap<>();
+            for (GeoResult result : results) {
+                if (result.getError() != null) continue;
+                String key = engineKey(result.getProvider(), result.getModel());
+                byEngine.computeIfAbsent(key, ignored -> new ArrayList<>()).add(result);
+                byRunAndEngine.computeIfAbsent(result.getRunId(), ignored -> new HashMap<>())
+                        .computeIfAbsent(key, ignored -> new ArrayList<>()).add(result);
+            }
+            List<GeoVoice> voice = byEngine.entrySet().stream().map(entry -> {
+                List<GeoResult> rows = entry.getValue();
+                GeoResult first = rows.getFirst();
+                long mentioned = rows.stream().filter(GeoResult::isMentioned).count();
+                long cited = rows.stream().filter(GeoResult::isCited).count();
+                double positionTotal = rows.stream().filter(row -> row.isMentioned() && row.getPosition() != null)
+                        .mapToInt(GeoResult::getPosition).sum();
+                long positionCount = rows.stream().filter(row -> row.isMentioned() && row.getPosition() != null).count();
+                Map<String, Long> competitors = new HashMap<>();
+                rows.stream().filter(row -> row.getCompetitorsMentioned() != null)
+                        .flatMap(row -> readStringList(row.getCompetitorsMentioned()).stream())
+                        .forEach(name -> competitors.merge(name, 1L, Long::sum));
+                return new GeoVoice(first.getProvider(), first.getModel(), mentioned, rows.size(),
+                        ratio(mentioned, rows.size()), cited, ratio(cited, rows.size()),
+                        positionCount == 0 ? null : positionTotal / positionCount, Map.copyOf(competitors));
+            }).sorted(Comparator.comparing(GeoVoice::provider).thenComparing(GeoVoice::model)).toList();
+            List<GeoTrendPoint> trend = new ArrayList<>();
+            for (GeoRun run : runs) {
+                Map<String, List<GeoResult>> engineRows = byRunAndEngine.getOrDefault(run.getId(), Map.of());
+                engineRows.forEach((key, rows) -> {
+                    GeoResult first = rows.getFirst();
+                    long mentioned = rows.stream().filter(GeoResult::isMentioned).count();
+                    long cited = rows.stream().filter(GeoResult::isCited).count();
+                    trend.add(new GeoTrendPoint(run.getId(), run.getCreatedAt(), first.getProvider(),
+                            first.getModel(), mentioned, rows.size(), ratio(mentioned, rows.size()),
+                            cited, ratio(cited, rows.size())));
+                });
+            }
+            return new GeoSummary(from, to, voice, trend);
+        }
+
+        @Transactional
+        public List<GeoClaim> claimGeoRuns(int limit) {
+            if (limit < 1 || limit > 100) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Claim limit must be from 1 to 100");
+            }
+            Instant now = Instant.now();
+            @SuppressWarnings("unchecked")
+            List<UUID> manualIds = entityManager.createNativeQuery(
+                    "select id from analytics_geo_runs where trigger = 'manual' and status = 'queued' "
+                            + "order by created_at asc limit :limit for update skip locked")
+                    .setParameter("limit", limit).getResultList();
+            List<GeoClaim> claimed = new ArrayList<>();
+            for (GeoRun run : geoRuns.findAllById(manualIds)) {
+                if (!"queued".equals(run.getStatus())) continue;
+                run.setStatus("running");
+                run.setStartedAt(now);
+                claimed.add(claim(run));
+            }
+            int remaining = limit - claimed.size();
+            if (remaining > 0) {
+                @SuppressWarnings("unchecked")
+                List<UUID> dueSiteIds = entityManager.createNativeQuery(
+                        "select s.site_id from analytics_geo_settings s join analytics_sites a on a.id = s.site_id "
+                                + "where s.weekly_enabled = true and s.next_run_at <= :now "
+                                + "and not exists (select 1 from analytics_geo_runs r "
+                                + "where r.site_id = s.site_id and r.status in ('queued', 'running')) "
+                                + "order by s.next_run_at asc limit :limit for update of a, s skip locked")
+                        .setParameter("now", now).setParameter("limit", remaining).getResultList();
+                for (UUID siteId : dueSiteIds) {
+                    GeoSettings schedule = geoSettings.findById(siteId).orElse(null);
+                    if (schedule == null || !schedule.isWeeklyEnabled() || schedule.getNextRunAt() == null
+                            || schedule.getNextRunAt().isAfter(now)) continue;
+                    GeoRun run = new GeoRun();
+                    run.setId(UUID.randomUUID());
+                    run.setSiteId(siteId);
+                    run.setTrigger("weekly");
+                    run.setStatus("running");
+                    run.setCreatedAt(now);
+                    run.setStartedAt(now);
+                    geoRuns.save(run);
+                    schedule.setNextRunAt(schedule.getNextRunAt().plus(Duration.ofDays(7)));
+                    claimed.add(claim(run));
+                }
+            }
+            return claimed;
+        }
+
+        @Transactional
+        public GeoRunPayload setGeoRunStatus(UUID runId, String status) {
+            if (!List.of("running", "finished", "failed").contains(status)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Run status must be running, finished, or failed");
+            }
+            GeoRun run = lockedRun(runId);
+            if (run.getFinishedAt() != null) {
+                if (run.getStatus().equals(status)) return runPayload(run);
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Run is already complete");
+            }
+            Instant now = Instant.now();
+            if ("running".equals(status)) {
+                if ("queued".equals(run.getStatus())) {
+                    run.setStatus(status);
+                    run.setStartedAt(now);
+                }
+            } else {
+                if (!"running".equals(run.getStatus())) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "Only a running run can finish");
+                }
+                run.setStatus(status);
+                run.setFinishedAt(now);
+            }
+            return runPayload(run);
+        }
+
+        @Transactional
+        public GeoRunDetail postGeoResults(UUID runId, List<GeoResultInput> inputs) {
+            GeoRun run = lockedRun(runId);
+            if (!"running".equals(run.getStatus()) || run.getFinishedAt() != null) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Results can only be added to a running run");
+            }
+            List<GeoPrompt> prompts = geoPrompts.findBySiteIdOrderByPositionAscIdAsc(run.getSiteId());
+            var promptIds = prompts.stream().map(GeoPrompt::getId).collect(java.util.stream.Collectors.toSet());
+            for (GeoResultInput input : inputs) {
+                if (!promptIds.contains(input.promptId())) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Result prompt does not belong to this site");
+                }
+                String provider = input.provider().strip();
+                String model = input.model().strip();
+                GeoResult row = geoResults.findByRunIdAndPromptIdAndProviderAndModel(runId, input.promptId(),
+                        provider, model).orElseGet(() -> {
+                            GeoResult fresh = new GeoResult();
+                            fresh.setId(UUID.randomUUID());
+                            fresh.setRunId(runId);
+                            fresh.setPromptId(input.promptId());
+                            fresh.setProvider(provider);
+                            fresh.setModel(model);
+                            return fresh;
+                        });
+                row.setMentioned(input.mentioned());
+                row.setCited(input.cited());
+                row.setPosition(input.position());
+                row.setCitedUrls(json.writeValueAsString(input.citedUrls() == null ? List.of() : input.citedUrls()));
+                row.setCompetitorsMentioned(json.writeValueAsString(
+                        input.competitorsMentioned() == null ? List.of() : input.competitorsMentioned()));
+                row.setExcerpt(cleanNullable(input.excerpt()));
+                row.setError(cleanNullable(input.error()));
+                geoResults.save(row);
+            }
+            return runDetail(run);
+        }
+
+        private AnalyticsSite ownedSite(UUID projectId, UUID playerId) {
+            requireProject(projectId, playerId);
+            return sites.findByProjectId(projectId).orElseGet(() -> createSite(projectId, playerId));
+        }
+
+        private AnalyticsSite lockedOwnedSite(UUID projectId, UUID playerId) {
+            requireProject(projectId, playerId);
+            AnalyticsSite site = sites.findByProjectIdForUpdate(projectId).orElse(null);
+            if (site == null) {
+                createSite(projectId, playerId);
+                site = sites.findByProjectIdForUpdate(projectId).orElseThrow();
+            }
+            return site;
+        }
+
+        private GeoPrompt ownedPrompt(UUID siteId, UUID promptId) {
+            GeoPrompt prompt = geoPrompts.findById(promptId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Prompt not found"));
+            if (!prompt.getSiteId().equals(siteId)) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Prompt not found");
+            }
+            return prompt;
+        }
+
+        private GeoRun ownedRun(UUID siteId, UUID runId) {
+            GeoRun run = geoRuns.findById(runId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found"));
+            if (!run.getSiteId().equals(siteId)) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found");
+            }
+            return run;
+        }
+
+        private GeoRun lockedRun(UUID runId) {
+            GeoRun run = entityManager.find(GeoRun.class, runId, LockModeType.PESSIMISTIC_WRITE);
+            if (run == null) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Run not found");
+            }
+            return run;
+        }
+
+        private void normalizePromptPositions(UUID siteId, UUID movingId, int desiredPosition) {
+            List<GeoPrompt> rows = new ArrayList<>(geoPrompts.findBySiteIdOrderByPositionAscIdAsc(siteId));
+            rows.sort(Comparator.comparingInt(GeoPrompt::getPosition).thenComparing(GeoPrompt::getId));
+            if (movingId != null) {
+                GeoPrompt moving = rows.stream().filter(row -> row.getId().equals(movingId)).findFirst().orElse(null);
+                if (moving != null) {
+                    rows.remove(moving);
+                    rows.add(Math.min(desiredPosition, rows.size()), moving);
+                }
+            }
+            for (int i = 0; i < rows.size(); i++) rows.get(i).setPosition(i);
+            geoPrompts.saveAll(rows);
+        }
+
+        private GeoSettingsPayload settingsPayload(GeoSettings row) {
+            return new GeoSettingsPayload(readStringList(row.getBrandTerms()), readCompetitors(row.getCompetitors()),
+                    row.isWeeklyEnabled(), row.getNextRunAt());
+        }
+
+        private List<GeoCompetitor> readCompetitors(String value) {
+            if (value == null || value.isBlank()) return List.of();
+            try {
+                return json.readValue(value, new TypeReference<List<GeoCompetitor>>() { });
+            } catch (RuntimeException exception) {
+                return List.of();
+            }
+        }
+
+        private List<String> readStringList(String value) {
+            if (value == null || value.isBlank()) return List.of();
+            try {
+                return json.readValue(value, new TypeReference<List<String>>() { });
+            } catch (RuntimeException exception) {
+                return List.of();
+            }
+        }
+
+        private GeoPromptPayload promptPayload(GeoPrompt row) {
+            return new GeoPromptPayload(row.getId(), row.getText(), row.isEnabled(), row.getPosition());
+        }
+
+        private GeoRunPayload runPayload(GeoRun row) {
+            return new GeoRunPayload(row.getId(), row.getTrigger(), row.getStatus(), row.getCreatedAt(),
+                    row.getStartedAt(), row.getFinishedAt());
+        }
+
+        private GeoResultPayload resultPayload(GeoResult row) {
+            return new GeoResultPayload(row.getId(), row.getPromptId(), row.getProvider(), row.getModel(),
+                    row.isMentioned(), row.isCited(), row.getPosition(), readStringList(row.getCitedUrls()),
+                    readStringList(row.getCompetitorsMentioned()), row.getExcerpt(), row.getError());
+        }
+
+        private GeoRunDetail runDetail(GeoRun run) {
+            return new GeoRunDetail(runPayload(run), geoResults.findByRunIdOrderByProviderAscModelAscPromptIdAsc(run.getId())
+                    .stream().map(this::resultPayload).toList());
+        }
+
+        private GeoClaim claim(GeoRun run) {
+            GeoSettings settings = geoSettings.findById(run.getSiteId()).orElse(null);
+            AnalyticsSite site = sites.findById(run.getSiteId()).orElseThrow();
+            List<String> terms = settings == null ? List.of() : readStringList(settings.getBrandTerms());
+            List<GeoCompetitor> competitors = settings == null ? List.of() : readCompetitors(settings.getCompetitors());
+            List<GeoPromptPayload> prompts = geoPrompts.findBySiteIdOrderByPositionAscIdAsc(run.getSiteId()).stream()
+                    .filter(GeoPrompt::isEnabled).map(this::promptPayload).toList();
+            return new GeoClaim(run.getId(), site.getId(), site.getProjectId(), run.getTrigger(),
+                    terms, competitors, prompts);
+        }
+
+        private static String engineKey(String provider, String model) {
+            return provider + "\u0000" + model;
+        }
+
+        private static double ratio(long numerator, long denominator) {
+            return denominator == 0 ? 0 : (double) numerator / denominator;
+        }
 
         @Transactional
         public SitePayload getSite(UUID projectId, UUID playerId) {
@@ -667,6 +1220,60 @@ public class AnalyticsFeature {
         @Column(name = "duration_ms") private Long durationMs;
     }
 
+    @Getter @Setter @NoArgsConstructor
+    @Entity(name = "AnalyticsGeoSettings")
+    @Table(name = "analytics_geo_settings")
+    public static class GeoSettings {
+        @Id @Column(name = "site_id") private UUID siteId;
+        @Column(name = "brand_terms", nullable = false, columnDefinition = "text") private String brandTerms;
+        @Column(name = "competitors", nullable = false, columnDefinition = "text") private String competitors;
+        @Column(name = "weekly_enabled", nullable = false) private boolean weeklyEnabled;
+        @Column(name = "next_run_at") private Instant nextRunAt;
+    }
+
+    @Getter @Setter @NoArgsConstructor
+    @Entity(name = "AnalyticsGeoPrompt")
+    @Table(name = "analytics_geo_prompts")
+    public static class GeoPrompt {
+        @Id @Column(name = "id") private UUID id;
+        @Column(name = "site_id", nullable = false) private UUID siteId;
+        @Column(name = "text", nullable = false, length = 500) private String text;
+        @Column(name = "enabled", nullable = false) private boolean enabled;
+        @Column(name = "position", nullable = false) private int position;
+    }
+
+    @Getter @Setter @NoArgsConstructor
+    @Entity(name = "AnalyticsGeoRun")
+    @Table(name = "analytics_geo_runs")
+    public static class GeoRun {
+        @Id @Column(name = "id") private UUID id;
+        @Column(name = "site_id", nullable = false) private UUID siteId;
+        @Column(name = "trigger", nullable = false, length = 16) private String trigger;
+        @Column(name = "status", nullable = false, length = 16) private String status;
+        @Column(name = "created_at", nullable = false) private Instant createdAt;
+        @Column(name = "started_at") private Instant startedAt;
+        @Column(name = "finished_at") private Instant finishedAt;
+    }
+
+    @Getter @Setter @NoArgsConstructor
+    @Entity(name = "AnalyticsGeoResult")
+    @Table(name = "analytics_geo_results")
+    public static class GeoResult {
+        @Id @Column(name = "id") private UUID id;
+        @Column(name = "run_id", nullable = false) private UUID runId;
+        @Column(name = "prompt_id", nullable = false) private UUID promptId;
+        @Column(name = "provider", nullable = false, length = 80) private String provider;
+        @Column(name = "model", nullable = false, length = 255) private String model;
+        @Column(name = "mentioned", nullable = false) private boolean mentioned;
+        @Column(name = "cited", nullable = false) private boolean cited;
+        @Column(name = "position") private Integer position;
+        @Column(name = "cited_urls", nullable = false, columnDefinition = "text") private String citedUrls;
+        @Column(name = "competitors_mentioned", nullable = false, columnDefinition = "text")
+        private String competitorsMentioned;
+        @Column(name = "excerpt", length = 2000) private String excerpt;
+        @Column(name = "error", length = 2000) private String error;
+    }
+
     @Getter @Immutable @NoArgsConstructor
     @Entity(name = "AnalyticsProject")
     @Table(name = "projects")
@@ -687,6 +1294,10 @@ public class AnalyticsFeature {
         java.util.Optional<AnalyticsSite> findByProjectId(UUID projectId);
         java.util.Optional<AnalyticsSite> findBySiteKey(String siteKey);
 
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select s from AnalyticsSite s where s.projectId = :projectId")
+        java.util.Optional<AnalyticsSite> findByProjectIdForUpdate(@Param("projectId") UUID projectId);
+
         @Modifying
         @Query(value = "insert into analytics_sites (id, project_id, player_id, site_key, allowed_origins, created_at, updated_at) "
                 + "values (?1, ?2, ?3, ?4, ?5, ?6, ?6) on conflict (project_id) do nothing", nativeQuery = true)
@@ -705,6 +1316,25 @@ public class AnalyticsFeature {
 
     public interface AnalyticsProductionRecipeRepository
             extends JpaRepository<AnalyticsProductionRecipe, UUID> { }
+
+    public interface GeoSettingsRepository extends JpaRepository<GeoSettings, UUID> { }
+
+    public interface GeoPromptRepository extends JpaRepository<GeoPrompt, UUID> {
+        List<GeoPrompt> findBySiteIdOrderByPositionAscIdAsc(UUID siteId);
+    }
+
+    public interface GeoRunRepository extends JpaRepository<GeoRun, UUID> {
+        boolean existsBySiteIdAndStatusIn(UUID siteId, List<String> statuses);
+        List<GeoRun> findBySiteIdOrderByCreatedAtDesc(UUID siteId, Pageable pageable);
+        List<GeoRun> findBySiteIdAndCreatedAtBetweenOrderByCreatedAtAsc(UUID siteId, Instant from, Instant to);
+    }
+
+    public interface GeoResultRepository extends JpaRepository<GeoResult, UUID> {
+        List<GeoResult> findByRunIdOrderByProviderAscModelAscPromptIdAsc(UUID runId);
+        List<GeoResult> findByRunIdIn(java.util.Collection<UUID> runIds);
+        java.util.Optional<GeoResult> findByRunIdAndPromptIdAndProviderAndModel(
+                UUID runId, UUID promptId, String provider, String model);
+    }
 
     private static final String TRACKER = AnalyticsService.TRACKER;
 
