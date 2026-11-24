@@ -1,8 +1,9 @@
 import { lazy, Suspense, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
+import { ChartLine, Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { sessionPath } from '@/app/paths';
+import { AnalyticsPanel } from '@/features/analytics/components/AnalyticsPanel';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { ProjectHeader } from '@/features/projects/components/ProjectHeader';
 import {
@@ -41,7 +42,8 @@ const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then
 const WORKSPACES_TAB = 'workspaces';
 const TODOS_TAB = 'todos';
 const BOARD_TAB = 'board';
-const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB]);
+const ANALYTICS_TAB = 'analytics';
+const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB, ANALYTICS_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -63,7 +65,7 @@ export const ProjectPage = () => {
   const [removalAction, setRemovalAction] = useState<ProjectRemovalAction | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
-  const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
+  const tab = requestedTab && TABS.has(requestedTab) && (requestedTab !== ANALYTICS_TAB || project?.webApplication) ? requestedTab : 'sessions';
   const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
   const projectWork = useProjectWork(project?.id ?? '', tab === WORKSPACES_TAB && Boolean(project));
   const openWork = useMemo(() => (work?.items && work.issues
@@ -153,10 +155,13 @@ export const ProjectPage = () => {
             count: openWork,
           },
           { id: BOARD_TAB, label: 'Board', icon: Network, count: features },
+          ...(project.webApplication ? [{ id: ANALYTICS_TAB, label: 'Analytics', icon: ChartLine }] : []),
         ]}
       />
 
-      {tab === TODOS_TAB ? (
+      {tab === ANALYTICS_TAB ? (
+        <AnalyticsPanel projectId={project.id} />
+      ) : tab === TODOS_TAB ? (
         <WorkPanel projectId={project.id} connections={connections} />
       ) : tab === BOARD_TAB ? (
         <Suspense fallback={<Card className="h-[60vh] animate-pulse-soft" />}>
