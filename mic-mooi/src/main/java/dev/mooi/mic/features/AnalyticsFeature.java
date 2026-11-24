@@ -8,6 +8,8 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.Duration;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -34,6 +36,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
@@ -49,6 +52,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.EntityManager;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
@@ -99,6 +103,36 @@ public class AnalyticsFeature {
         return service.regenerateKey(projectId, principal.player().id());
     }
 
+    @GetMapping("/me/projects/{projectId}/analytics/overview")
+    @Auth.Authenticated
+    public OverviewPayload overview(@PathVariable UUID projectId, @RequestParam String from,
+            @RequestParam String to, @RequestParam(defaultValue = "UTC") String tz, Auth.Principal principal) {
+        return service.overview(projectId, principal.player().id(), from, to, tz);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/timeseries")
+    @Auth.Authenticated
+    public List<SeriesPoint> timeseries(@PathVariable UUID projectId, @RequestParam String from,
+            @RequestParam String to, @RequestParam(defaultValue = "UTC") String tz,
+            @RequestParam String metric, @RequestParam(required = false) String interval, Auth.Principal principal) {
+        return service.timeseries(projectId, principal.player().id(), from, to, tz, metric, interval);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/breakdown")
+    @Auth.Authenticated
+    public List<BreakdownRow> breakdown(@PathVariable UUID projectId, @RequestParam String from,
+            @RequestParam String to, @RequestParam(defaultValue = "UTC") String tz,
+            @RequestParam String dimension, @RequestParam(defaultValue = "20") int limit, Auth.Principal principal) {
+        return service.breakdown(projectId, principal.player().id(), from, to, tz, dimension, limit);
+    }
+
+    public record MetricValue(long value, Long previous, Double deltaPercent) { }
+    public record OverviewPayload(MetricValue visitors, MetricValue sessions, MetricValue pageviews,
+            MetricValue clicks, MetricValue bounceRate, MetricValue avgVisitDurationMs,
+            MetricValue aiVisitors, long live) { }
+    public record SeriesPoint(String bucket, long value) { }
+    public record BreakdownRow(String key, long visitors, long pageviews, long clicks) { }
+
     @GetMapping(value = "/public/analytics/t.js", produces = "application/javascript")
     public ResponseEntity<String> tracker() {
         return ResponseEntity.ok()
@@ -137,6 +171,7 @@ public class AnalyticsFeature {
         private final AnalyticsEventRepository events;
         private final AnalyticsProjectRepository projects;
         private final AnalyticsProductionRecipeRepository recipes;
+        private final EntityManager entityManager;
         private final Crypto.SecretBox box;
         private final SecureRandom random = new SecureRandom();
         private final ObjectMapper json = JsonMapper.shared();
@@ -147,13 +182,14 @@ public class AnalyticsFeature {
 
         AnalyticsService(AnalyticsSiteRepository sites, AnalyticsEventRepository events,
                          AnalyticsProjectRepository projects, AnalyticsProductionRecipeRepository recipes,
-                         Crypto.SecretBox box,
+                         Crypto.SecretBox box, EntityManager entityManager,
                          @Value("${app.analytics.public-base-url:http://localhost:28471}") String publicBaseUrl) {
             this.sites = sites;
             this.events = events;
             this.projects = projects;
             this.recipes = recipes;
             this.box = box;
+            this.entityManager = entityManager;
             this.publicBaseUrl = stripTrailingSlash(publicBaseUrl);
         }
 
@@ -162,6 +198,86 @@ public class AnalyticsFeature {
                 throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found");
             }
         }
+
+        private ReportRange range(UUID projectId, UUID playerId, String fromText, String toText, String tzText) {
+            requireProject(projectId, playerId);
+            try {
+                Instant from = Instant.parse(fromText), to = Instant.parse(toText);
+                ZoneId zone = ZoneId.of(tzText);
+                long millis = Duration.between(from, to).toMillis();
+                if (millis <= 0 || millis > Duration.ofDays(400).toMillis()) throw new IllegalArgumentException();
+                return new ReportRange(sites.findByProjectId(projectId).map(AnalyticsSite::getId).orElse(null),
+                        from, to, zone.getId());
+            } catch (RuntimeException exception) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid date range or timezone", exception);
+            }
+        }
+
+        @Transactional(readOnly = true)
+        public OverviewPayload overview(UUID projectId, UUID playerId, String fromText, String toText, String tz) {
+            ReportRange r = range(projectId, playerId, fromText, toText, tz);
+            if (r.siteId() == null) return emptyOverview();
+            long span = Duration.between(r.from(), r.to()).toMillis();
+            Instant prevFrom = r.from().minusMillis(span), prevTo = r.from();
+            Object[] now = aggregate(r.siteId(), r.from(), r.to());
+            Object[] prev = aggregate(r.siteId(), prevFrom, prevTo);
+            long live = number(entityManager.createNativeQuery("select count(distinct visitor_hash) from analytics_events where site_id=:site and occurred_at >= :since and kind='pageview'")
+                    .setParameter("site", r.siteId()).setParameter("since", Instant.now().minusSeconds(300)).getSingleResult());
+            return new OverviewPayload(metric(number(now[0]), number(prev[0])), metric(number(now[1]), number(prev[1])),
+                    metric(number(now[2]), number(prev[2])), metric(number(now[3]), number(prev[3])),
+                    metric(number(now[4]), number(prev[4])), metric(number(now[5]), number(prev[5])),
+                    metric(number(now[6]), number(prev[6])), live);
+        }
+
+        private Object[] aggregate(UUID site, Instant from, Instant to) {
+            return (Object[]) entityManager.createNativeQuery("with e as (select * from analytics_events where site_id=:site and occurred_at>=:from and occurred_at<:to), s as (select session_hash, count(*) filter(where kind='pageview') pv, count(*) filter(where kind='click') cl, max(duration_ms) filter(where kind='leave') dur from e group by session_hash) select (select count(distinct visitor_hash) from e where kind='pageview'), count(*), coalesce(sum(pv),0), coalesce(sum(cl),0), coalesce(100.0*count(*) filter(where pv=1 and cl=0)/nullif(count(*),0),0), coalesce(avg(dur),0), (select count(distinct visitor_hash) from e where kind='pageview' and (lower(coalesce(referrer_host,'') ) like '%chatgpt.com%' or lower(coalesce(referrer_host,'') ) like '%chat.openai.com%' or lower(coalesce(utm_source,'') ) like '%chatgpt%' or lower(coalesce(referrer_host,'') ) like '%perplexity.ai%' or lower(coalesce(utm_source,'') ) like '%perplexity%' or lower(coalesce(referrer_host,'') ) like '%gemini.google.com%' or lower(coalesce(referrer_host,'') ) like '%bard.google.com%' or lower(coalesce(utm_source,'') ) like '%gemini%' or lower(coalesce(referrer_host,'') ) like '%claude.ai%' or lower(coalesce(utm_source,'') ) like '%claude%' or lower(coalesce(referrer_host,'') ) like '%copilot.microsoft.com%' or lower(coalesce(utm_source,'') ) like '%copilot%')) from s")
+                    .setParameter("site", site).setParameter("from", from).setParameter("to", to).getSingleResult();
+        }
+
+        private OverviewPayload emptyOverview() { MetricValue z = metric(0, 0); return new OverviewPayload(z,z,z,z,z,z,z,0); }
+        private MetricValue metric(long value, long previous) {
+            return new MetricValue(value, previous, previous == 0 ? (value == 0 ? 0d : null) : 100d * (value - previous) / previous);
+        }
+        private long number(Object value) { return value == null ? 0 : ((Number) value).longValue(); }
+
+        @Transactional(readOnly = true)
+        public List<SeriesPoint> timeseries(UUID projectId, UUID playerId, String fromText, String toText, String tz,
+                String metric, String interval) {
+            ReportRange r = range(projectId, playerId, fromText, toText, tz);
+            if (!List.of("visitors","pageviews","clicks","ai_visitors").contains(metric)) bad("Invalid metric");
+            String unit = interval == null || interval.isBlank() ? (Duration.between(r.from(),r.to()).toDays() <= 2 ? "hour" : "day") : interval;
+            if (!List.of("hour","day").contains(unit)) bad("Invalid interval");
+            if (r.siteId() == null) return List.of();
+            String expression = switch(metric) { case "visitors" -> "count(distinct visitor_hash)"; case "pageviews" -> "count(*)"; case "clicks" -> "count(*)"; default -> "count(distinct visitor_hash)"; };
+            String kind = metric.equals("pageviews") ? "pageview" : metric.equals("clicks") ? "click" : "pageview";
+            String ai = metric.equals("ai_visitors") ? " and (lower(coalesce(referrer_host,'')) like '%chatgpt.com%' or lower(coalesce(referrer_host,'')) like '%chat.openai.com%' or lower(coalesce(utm_source,'')) like '%chatgpt%' or lower(coalesce(referrer_host,'')) like '%perplexity.ai%' or lower(coalesce(utm_source,'')) like '%perplexity%' or lower(coalesce(referrer_host,'')) like '%gemini.google.com%' or lower(coalesce(referrer_host,'')) like '%bard.google.com%' or lower(coalesce(utm_source,'')) like '%gemini%' or lower(coalesce(referrer_host,'')) like '%claude.ai%' or lower(coalesce(utm_source,'')) like '%claude%' or lower(coalesce(referrer_host,'')) like '%copilot.microsoft.com%' or lower(coalesce(utm_source,'')) like '%copilot%')" : "";
+            String sql = "with bounds as (select date_trunc(:unit, cast(:from as timestamptz) at time zone :tz) as a, date_trunc(:unit, (cast(:to as timestamptz)-interval '1 microsecond') at time zone :tz) as b), buckets as (select generate_series(a,b,case when :unit='hour' then interval '1 hour' else interval '1 day' end) bucket from bounds), vals as (select date_trunc(:unit, occurred_at at time zone :tz) bucket,"+expression+" value from analytics_events where site_id=:site and occurred_at>=:from and occurred_at<:to and kind=:kind"+ai+" group by 1) select buckets.bucket, coalesce(vals.value,0) from buckets left join vals using(bucket) order by buckets.bucket";
+            @SuppressWarnings("unchecked") List<Object[]> rows = entityManager.createNativeQuery(sql).setParameter("unit",unit).setParameter("from",r.from()).setParameter("to",r.to()).setParameter("tz",r.timezone()).setParameter("site",r.siteId()).setParameter("kind",kind).getResultList();
+            return rows.stream().map(row -> new SeriesPoint(row[0].toString(), number(row[1]))).toList();
+        }
+
+        @Transactional(readOnly = true)
+        public List<BreakdownRow> breakdown(UUID projectId, UUID playerId, String fromText, String toText, String tz,
+                String dimension, int limit) {
+            ReportRange r = range(projectId, playerId, fromText, toText, tz);
+            if (limit < 1 || limit > 100) bad("Invalid limit");
+            String expression = switch (dimension) {
+                case "page" -> "path"; case "referrer" -> "referrer_host"; case "utm_source" -> "utm_source";
+                case "utm_campaign" -> "utm_campaign"; case "country" -> "country"; case "device" -> "device";
+                case "browser" -> "browser"; case "os" -> "os"; case "click_target" -> "target";
+                case "outbound" -> "target"; case "ai_source" -> "case when lower(coalesce(referrer_host,'')) like '%chatgpt.com%' or lower(coalesce(referrer_host,'')) like '%chat.openai.com%' or lower(coalesce(utm_source,'')) like '%chatgpt%' then 'chatgpt' when lower(coalesce(referrer_host,'')) like '%perplexity.ai%' or lower(coalesce(utm_source,'')) like '%perplexity%' then 'perplexity' when lower(coalesce(referrer_host,'')) like '%gemini.google.com%' or lower(coalesce(referrer_host,'')) like '%bard.google.com%' or lower(coalesce(utm_source,'')) like '%gemini%' then 'gemini' when lower(coalesce(referrer_host,'')) like '%claude.ai%' or lower(coalesce(utm_source,'')) like '%claude%' then 'claude' when lower(coalesce(referrer_host,'')) like '%copilot.microsoft.com%' or lower(coalesce(utm_source,'')) like '%copilot%' then 'copilot' else null end";
+                case "ai_landing" -> "path"; default -> { bad("Invalid dimension"); yield "path"; }
+            };
+            if (r.siteId() == null) return List.of();
+            String kindFilter = List.of("click_target","outbound").contains(dimension) ? "click" : "pageview";
+            String aiFilter = dimension.startsWith("ai_") ? " and (lower(coalesce(referrer_host,'')) like '%chatgpt.com%' or lower(coalesce(referrer_host,'')) like '%chat.openai.com%' or lower(coalesce(utm_source,'')) like '%chatgpt%' or lower(coalesce(referrer_host,'')) like '%perplexity.ai%' or lower(coalesce(utm_source,'')) like '%perplexity%' or lower(coalesce(referrer_host,'')) like '%gemini.google.com%' or lower(coalesce(referrer_host,'')) like '%bard.google.com%' or lower(coalesce(utm_source,'')) like '%gemini%' or lower(coalesce(referrer_host,'')) like '%claude.ai%' or lower(coalesce(utm_source,'')) like '%claude%' or lower(coalesce(referrer_host,'')) like '%copilot.microsoft.com%' or lower(coalesce(utm_source,'')) like '%copilot%')" : "";
+            String outboundFilter = dimension.equals("outbound") ? " and target ~ '^https?://' and split_part(target,'/',3) <> split_part(coalesce(referrer_host,''),'/',1)" : "";
+            String sql = "select coalesce("+expression+",'(unknown)') key, count(distinct visitor_hash) visitors, count(*) filter(where kind='pageview') pageviews, count(*) filter(where kind='click') clicks from analytics_events where site_id=:site and occurred_at>=:from and occurred_at<:to and kind=:kind"+aiFilter+outboundFilter+" group by key order by clicks desc, pageviews desc, visitors desc limit :lim";
+            @SuppressWarnings("unchecked") List<Object[]> rows = entityManager.createNativeQuery(sql).setParameter("site",r.siteId()).setParameter("from",r.from()).setParameter("to",r.to()).setParameter("kind",kindFilter).setParameter("lim",limit).getResultList();
+            return rows.stream().map(row -> new BreakdownRow((String)row[0],number(row[1]),number(row[2]),number(row[3]))).toList();
+        }
+        private void bad(String message) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message); }
+        private record ReportRange(UUID siteId, Instant from, Instant to, String timezone) { }
 
         @Transactional
         public SitePayload getSite(UUID projectId, UUID playerId) {
