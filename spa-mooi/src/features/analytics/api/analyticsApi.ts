@@ -7,6 +7,11 @@ import type { AnalyticsOverview } from '@/features/analytics/types/AnalyticsOver
 import type { AnalyticsRange } from '@/features/analytics/types/AnalyticsRange';
 import type { AnalyticsSeriesPoint } from '@/features/analytics/types/AnalyticsSeriesPoint';
 import type { AnalyticsSite } from '@/features/analytics/types/AnalyticsSite';
+import { GoogleReportError } from '@/features/analytics/lib/googleErrors';
+import type { AnalyticsGa4Report, AnalyticsGa4ReportKind } from '@/features/analytics/types/AnalyticsGa4Report';
+import type { AnalyticsGoogleProperties } from '@/features/analytics/types/AnalyticsGoogleProperties';
+import type { AnalyticsGoogleSelection } from '@/features/analytics/types/AnalyticsGoogleSelection';
+import type { AnalyticsSearchDimension, AnalyticsSearchReport } from '@/features/analytics/types/AnalyticsSearchReport';
 import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const base = (projectId: string) => `/me/projects/${encodeURIComponent(projectId)}/analytics`;
@@ -37,3 +42,29 @@ export const fetchAnalyticsSeries = async (projectId: string, range: AnalyticsRa
 
 export const fetchAnalyticsBreakdown = async (projectId: string, range: AnalyticsRange, dimension: AnalyticsDimension): Promise<AnalyticsBreakdownRow[]> =>
   read(await authenticatedFetch(`${base(projectId)}/breakdown?${rangeParams(range)}&dimension=${dimension}&limit=10`), 'Could not load the report.');
+
+/** Google-backed reads put their `google_*` reason in the error message; keep it as a code. */
+const readGoogle = async <T>(response: Response, fallback: string): Promise<T> => {
+  if (!response.ok) {
+    const message = await apiErrorMessage(response, fallback);
+    throw new GoogleReportError(message, message.startsWith('google_') ? message : null);
+  }
+  return (await response.json()) as T;
+};
+
+export const updateAnalyticsGoogle = async (projectId: string, selection: AnalyticsGoogleSelection): Promise<AnalyticsSite> =>
+  read(await authenticatedFetch(`${base(projectId)}/site`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(selection),
+  }), 'Could not save the Google selection.');
+
+export const fetchAnalyticsGoogleProperties = async (projectId: string, connectionId?: string): Promise<AnalyticsGoogleProperties> =>
+  readGoogle(await authenticatedFetch(`${base(projectId)}/google/properties${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ''}`),
+    'Could not list the Google properties.');
+
+export const fetchAnalyticsSearch = async (projectId: string, range: AnalyticsRange, dimension: AnalyticsSearchDimension, limit = 25): Promise<AnalyticsSearchReport> =>
+  readGoogle(await authenticatedFetch(`${base(projectId)}/search?${rangeParams(range)}&dimension=${dimension}&limit=${limit}`), 'Could not load Search Console.');
+
+export const fetchAnalyticsGa4 = async (projectId: string, range: AnalyticsRange, report: AnalyticsGa4ReportKind, limit = 10): Promise<AnalyticsGa4Report> =>
+  readGoogle(await authenticatedFetch(`${base(projectId)}/ga4?${rangeParams(range)}&report=${report}&limit=${limit}`), 'Could not load Google Analytics.');

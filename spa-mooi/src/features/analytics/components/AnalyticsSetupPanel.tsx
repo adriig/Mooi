@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { KeyRound, Plus, X } from 'lucide-react';
+import { AnalyticsGoogleSetup } from '@/features/analytics/components/AnalyticsGoogleSetup';
+import type { AnalyticsGoogleSelection } from '@/features/analytics/types/AnalyticsGoogleSelection';
 import type { AnalyticsSite } from '@/features/analytics/types/AnalyticsSite';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
@@ -7,11 +9,13 @@ import { CopyButton } from '@/shared/components/CopyButton';
 import { Modal } from '@/shared/components/Modal';
 
 interface AnalyticsSetupPanelProps {
+  projectId: string;
   site: AnalyticsSite;
   busy: boolean;
   error: string | null;
   onSaveOrigins: (origins: string[]) => Promise<boolean>;
   onRegenerateKey: () => Promise<boolean>;
+  onSaveGoogle: (selection: AnalyticsGoogleSelection) => Promise<boolean>;
 }
 
 const STEPS = [
@@ -21,7 +25,7 @@ const STEPS = [
 ];
 
 /** Everything needed to install the tracker; shown open while the project has no events. */
-export const AnalyticsSetupPanel = ({ site, busy, error, onSaveOrigins, onRegenerateKey }: AnalyticsSetupPanelProps) => {
+export const AnalyticsSetupPanel = ({ projectId, site, busy, error, onSaveOrigins, onRegenerateKey, onSaveGoogle }: AnalyticsSetupPanelProps) => {
   const [origins, setOrigins] = useState<string[] | null>(null);
   const [draft, setDraft] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -81,6 +85,8 @@ export const AnalyticsSetupPanel = ({ site, busy, error, onSaveOrigins, onRegene
           <Button variant="brand" onClick={save} disabled={busy || (!dirty && !draft.trim())}>Save origins</Button>
         </form>
       </div>
+
+      <AnalyticsGoogleSetup projectId={projectId} site={site} busy={busy} onSave={onSaveGoogle} />
 
       {error ? <p role="alert" className="text-[13px] text-danger">{error}</p> : null}
 

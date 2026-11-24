@@ -21,3 +21,9 @@ export const formatBucket = (bucket: string, hourly: boolean): string => {
     ? date.toLocaleString('en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
     : date.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
 };
+
+/** A 0..1 ratio as a percentage. */
+export const formatRatio = (ratio: number): string => formatPercent(ratio * 100);
+
+/** Average search position, one decimal. */
+export const formatPosition = (position: number): string => (position > 0 ? position.toFixed(1) : '–');

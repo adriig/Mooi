@@ -3,18 +3,22 @@ import { useSearchParams } from 'react-router-dom';
 import { BarChart3, RotateCw, Settings2 } from 'lucide-react';
 import { fetchAnalyticsOverview, fetchAnalyticsSeries } from '@/features/analytics/api/analyticsApi';
 import { AnalyticsBreakdownCard } from '@/features/analytics/components/AnalyticsBreakdownCard';
+import { AnalyticsGa4Section } from '@/features/analytics/components/AnalyticsGa4Section';
 import { AnalyticsKpis } from '@/features/analytics/components/AnalyticsKpis';
 import { AnalyticsRangePicker } from '@/features/analytics/components/AnalyticsRangePicker';
+import { AnalyticsSearchSection } from '@/features/analytics/components/AnalyticsSearchSection';
 import { AnalyticsSetupPanel } from '@/features/analytics/components/AnalyticsSetupPanel';
 import { AnalyticsTimeSeriesChart } from '@/features/analytics/components/AnalyticsTimeSeriesChart';
 import { useAnalyticsReport } from '@/features/analytics/hooks/useAnalyticsReport';
 import { useAnalyticsSite } from '@/features/analytics/hooks/useAnalyticsSite';
 import { useLiveVisitors } from '@/features/analytics/hooks/useLiveVisitors';
+import type { GoogleErrorAction } from '@/features/analytics/lib/googleErrors';
 import { analyticsRangeKey, resolveAnalyticsRange } from '@/features/analytics/lib/analyticsRange';
 import type { AnalyticsMetric } from '@/features/analytics/types/AnalyticsMetric';
 import type { AnalyticsOverview } from '@/features/analytics/types/AnalyticsOverview';
 import type { AnalyticsRangeKey } from '@/features/analytics/types/AnalyticsRangeKey';
 import type { AnalyticsSeriesPoint } from '@/features/analytics/types/AnalyticsSeriesPoint';
+import { startGoogleAuthorization } from '@/features/google/api/googleApi';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
@@ -66,6 +70,14 @@ export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
   const hasData = overview.data ? overview.data.pageviews.value + overview.data.clicks.value + overview.data.visitors.value > 0 : null;
   const reload = () => { setRefresh((value) => value + 1); overview.reload(); series.reload(); };
 
+  const onGoogleAction = (action: GoogleErrorAction) => {
+    if (action === 'retry') { setRefresh((value) => value + 1); return; }
+    if (action === 'pick') { setSetupOpen(true); return; }
+    // connect / relink: the account's Google link flow; it returns to the account page.
+    const connectionId = action === 'relink' ? siteState.site?.googleConnectionId ?? undefined : undefined;
+    void startGoogleAuthorization(connectionId).then((url) => window.location.assign(url)).catch(() => setSetupOpen(true));
+  };
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
@@ -88,8 +100,8 @@ export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
       ) : siteState.loading && !siteState.site ? (
         <Card className="h-40 animate-pulse-soft" />
       ) : siteState.site && (hasData === false || setupOpen) ? (
-        <AnalyticsSetupPanel site={siteState.site} busy={siteState.busy} error={siteState.actionError}
-          onSaveOrigins={siteState.saveOrigins} onRegenerateKey={siteState.regenerateKey} />
+        <AnalyticsSetupPanel projectId={projectId} site={siteState.site} busy={siteState.busy} error={siteState.actionError}
+          onSaveOrigins={siteState.saveOrigins} onRegenerateKey={siteState.regenerateKey} onSaveGoogle={siteState.saveGoogle} />
       ) : null}
 
       {overview.error ? (
@@ -144,11 +156,15 @@ export const AnalyticsPanel = ({ projectId }: AnalyticsPanelProps) => {
               <AnalyticsBreakdownCard projectId={projectId} range={range} dimension="outbound" title="Outbound links" measure="clicks" emptyText="No outbound link clicks." />
             </div>
           </section>
-
-          {/* Reserved: "Search positioning" (Search Console) and "Google Analytics" sections mount here. */}
-          <div id="analytics-integrations" data-slot="analytics-integrations" className="contents" />
         </>
       )}
+
+      {siteState.site ? (
+        <>
+          <AnalyticsSearchSection projectId={projectId} range={range} site={siteState.site} revision={refresh} onAction={onGoogleAction} />
+          <AnalyticsGa4Section projectId={projectId} range={range} site={siteState.site} revision={refresh} onAction={onGoogleAction} />
+        </>
+      ) : null}
     </div>
   );
 };

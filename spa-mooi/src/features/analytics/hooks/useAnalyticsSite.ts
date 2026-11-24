@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { fetchAnalyticsSite, regenerateAnalyticsKey, updateAnalyticsOrigins } from '@/features/analytics/api/analyticsApi';
+import { fetchAnalyticsSite, regenerateAnalyticsKey, updateAnalyticsGoogle, updateAnalyticsOrigins } from '@/features/analytics/api/analyticsApi';
+import type { AnalyticsGoogleSelection } from '@/features/analytics/types/AnalyticsGoogleSelection';
 import type { AnalyticsSite } from '@/features/analytics/types/AnalyticsSite';
 
 interface UseAnalyticsSite {
@@ -11,6 +12,7 @@ interface UseAnalyticsSite {
   reload: () => void;
   saveOrigins: (origins: string[]) => Promise<boolean>;
   regenerateKey: () => Promise<boolean>;
+  saveGoogle: (selection: AnalyticsGoogleSelection) => Promise<boolean>;
 }
 
 /** The tracker configuration of one project; the server creates it on first read. */
@@ -51,6 +53,7 @@ export const useAnalyticsSite = (projectId: string | undefined): UseAnalyticsSit
 
   const saveOrigins = useCallback((origins: string[]) => (projectId ? mutate(() => updateAnalyticsOrigins(projectId, origins)) : Promise.resolve(false)), [projectId, mutate]);
   const regenerateKey = useCallback(() => (projectId ? mutate(() => regenerateAnalyticsKey(projectId)) : Promise.resolve(false)), [projectId, mutate]);
+  const saveGoogle = useCallback((selection: AnalyticsGoogleSelection) => (projectId ? mutate(() => updateAnalyticsGoogle(projectId, selection)) : Promise.resolve(false)), [projectId, mutate]);
 
-  return { site, loading, error, busy, actionError, reload, saveOrigins, regenerateKey };
+  return { site, loading, error, busy, actionError, reload, saveOrigins, regenerateKey, saveGoogle };
 };

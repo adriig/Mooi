@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
+import { GoogleReportError } from '@/features/analytics/lib/googleErrors';
 
 interface UseAnalyticsReport<T> {
   data: T | null;
   loading: boolean;
   error: string | null;
+  /** The `google_*` reason when a Google-backed report failed with one. */
+  errorCode: string | null;
   reload: () => void;
 }
 
@@ -12,6 +15,7 @@ export const useAnalyticsReport = <T,>(load: (() => Promise<T>) | null, key: str
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -19,12 +23,16 @@ export const useAnalyticsReport = <T,>(load: (() => Promise<T>) | null, key: str
     let active = true;
     setLoading(true);
     load()
-      .then((next) => { if (active) { setData(next); setError(null); } })
-      .catch((failure: Error) => { if (active) setError(failure.message); })
+      .then((next) => { if (active) { setData(next); setError(null); setErrorCode(null); } })
+      .catch((failure: Error) => {
+        if (!active) return;
+        setError(failure.message);
+        setErrorCode(failure instanceof GoogleReportError ? failure.code : null);
+      })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
     // `key` stands for everything `load` closes over.
   }, [key, revision]);
 
-  return { data, loading, error, reload: () => setRevision((value) => value + 1) };
+  return { data, loading, error, errorCode, reload: () => setRevision((value) => value + 1) };
 };
