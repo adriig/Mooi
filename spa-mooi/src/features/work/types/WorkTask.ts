@@ -28,6 +28,14 @@ export interface QaTaskReport {
   blockerCause?: string | null;
 }
 
+/** Compact development handoff for its independent QA task; all evidence remains agent-reported. */
+export interface QaTaskHandoff {
+  summary: string;
+  files: string[];
+  verifications: string[];
+  preparation: string;
+}
+
 /** One task of a work item, run in its own session; `dependsOn` names tasks of the same item. */
 export interface WorkTask {
   id: string;
@@ -58,6 +66,8 @@ export interface WorkTask {
   findingId?: string | null;
   /** The commit that merged this task into the default branch, when available. */
   mergeSha?: string | null;
+  /** Task-scoped handoff; absent on legacy work items. */
+  qaHandoff?: QaTaskHandoff | null;
   dependsOn: string[];
   startedAt: string | null;
   finishedAt: string | null;

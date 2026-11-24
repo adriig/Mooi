@@ -1,0 +1,15 @@
+databaseChangeLog:
+  - changeSet:
+      id: 056-work-task-recovery-preparation
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_task_recovery
+            columns:
+              - column:
+                  name: reported_preparation
+                  type: text
+      rollback:
+        - dropColumn:
+            tableName: work_task_recovery
+            columnName: reported_preparation

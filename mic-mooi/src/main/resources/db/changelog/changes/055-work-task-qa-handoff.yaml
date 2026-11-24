@@ -1,0 +1,15 @@
+databaseChangeLog:
+  - changeSet:
+      id: 055-work-task-qa-handoff
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_tasks
+            columns:
+              - column:
+                  name: qa_handoff
+                  type: text
+      rollback:
+        - dropColumn:
+            tableName: work_tasks
+            columnName: qa_handoff

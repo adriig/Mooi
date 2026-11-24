@@ -625,6 +625,10 @@ public class ProjectWorkFeature {
                     && task.getMergeSha() == null && progress.mergeSha() != null) {
                 task.setMergeSha(progress.mergeSha());
             }
+            if (progress.status() == TaskStatus.done && task.getQaOfId() == null
+                    && progress.qaHandoff() != null && task.getQaHandoff() == null) {
+                task.setQaHandoff(json.writeValueAsString(progress.qaHandoff()));
+            }
             if (progress.status() == TaskStatus.done) {
                 for (TaskRecovery recovery : recoveries.findByTaskId(taskId)) {
                     recovery.setSnapshotValid(false);
@@ -683,6 +687,7 @@ public class ProjectWorkFeature {
                     row.setReportedOutcome(update.reportedOutcome());
                     row.setReportedTitle(update.reportedTitle());
                     row.setReportedSummary(update.reportedSummary());
+                    row.setReportedPreparation(update.reportedPreparation());
                     row.setUpdatedAt(OffsetDateTime.now(clock));
                     return toRecoveryPayload(recoveries.save(row));
                 }
@@ -712,6 +717,7 @@ public class ProjectWorkFeature {
             row.setReportedOutcome(update.reportedOutcome());
             row.setReportedTitle(update.reportedTitle());
             row.setReportedSummary(update.reportedSummary());
+            row.setReportedPreparation(update.reportedPreparation());
             row.setSnapshotValid(update.snapshotValid());
             row.setValidityReason(update.validityReason());
             row.setUpdatedAt(OffsetDateTime.now(clock));
@@ -742,6 +748,7 @@ public class ProjectWorkFeature {
                     && java.util.Objects.equals(existing.reportedOutcome(), update.reportedOutcome())
                     && java.util.Objects.equals(existing.reportedTitle(), update.reportedTitle())
                     && java.util.Objects.equals(existing.reportedSummary(), update.reportedSummary())
+                    && java.util.Objects.equals(existing.reportedPreparation(), update.reportedPreparation())
                     && existing.snapshotValid() == update.snapshotValid()
                     && java.util.Objects.equals(existing.validityReason(), update.validityReason());
         }
@@ -766,7 +773,8 @@ public class ProjectWorkFeature {
                     row.getHeadCommit(), row.getSnapshotRevision(), row.getSummary(), row.getNextStep(),
                     readStringList(row.getFiles()), readStringList(row.getVerifications()),
                     readStringList(row.getObstacles()), row.getReportedOutcome(), row.getReportedTitle(),
-                    row.getReportedSummary(), row.isSnapshotValid(), row.getValidityReason(), row.getUpdatedAt());
+                    row.getReportedSummary(), row.getReportedPreparation(), row.isSnapshotValid(),
+                    row.getValidityReason(), row.getUpdatedAt());
         }
 
         private static List<String> readStringList(String value) {
@@ -1200,6 +1208,15 @@ public class ProjectWorkFeature {
             }
         }
 
+        private Map<String, Object> readQaHandoff(String value) {
+            try {
+                return value == null || value.isBlank() ? null
+                        : json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            } catch (RuntimeException exception) {
+                return null;
+            }
+        }
+
         private WorkItem touch(WorkItem item) {
             item.setUpdatedAt(OffsetDateTime.now(clock));
             return item;
@@ -1227,7 +1244,8 @@ public class ProjectWorkFeature {
                                      task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
                                      task.getAttempts(), task.getReport(), readQaReport(task.getQaReport()),
                                      task.getFindingId(),
-                                     task.getQaRounds(), task.getMergeSha(), List.copyOf(task.getDependsOn()),
+                                     task.getQaRounds(), task.getMergeSha(), readQaHandoff(task.getQaHandoff()),
+                                     List.copyOf(task.getDependsOn()),
                                      task.getStartedAt(), task.getFinishedAt()))
                             .toList());
         }
@@ -1566,6 +1584,10 @@ public class ProjectWorkFeature {
         @Column(name = "merge_sha", length = 40)
         private String mergeSha;
 
+        /** Compact, reported development evidence for its independent QA task; never a diff or repository. */
+        @Column(name = "qa_handoff", columnDefinition = "text")
+        private String qaHandoff;
+
         @Column(name = "position", nullable = false)
         private int position;
 
@@ -1643,6 +1665,9 @@ public class ProjectWorkFeature {
 
         @Column(name = "reported_summary", columnDefinition = "text")
         private String reportedSummary;
+
+        @Column(name = "reported_preparation", columnDefinition = "text")
+        private String reportedPreparation;
 
         @Column(name = "snapshot_valid", nullable = false)
         private boolean snapshotValid;
@@ -1890,7 +1915,8 @@ public class ProjectWorkFeature {
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
                                @Size(max = 50_000) String report, Map<String, Object> qaReport,
                                @Valid Assignment assignment,
-                               @Pattern(regexp = "[0-9a-f]{40}") String mergeSha) {
+                               @Pattern(regexp = "[0-9a-f]{40}") String mergeSha,
+                               Map<String, Object> qaHandoff) {
     }
 
     /**
@@ -1912,6 +1938,7 @@ public class ProjectWorkFeature {
                                       @Pattern(regexp = "done|blocked|passed|defect") String reportedOutcome,
                                       @Size(max = 200) String reportedTitle,
                                       @Size(max = 20_000) String reportedSummary,
+                                      @Size(max = 20_000) String reportedPreparation,
                                       boolean snapshotValid,
                                       @Size(max = 2_000) String validityReason) {
     }
@@ -1919,7 +1946,8 @@ public class ProjectWorkFeature {
     public record TaskRecoveryPayload(UUID taskId, int attempt, String branch, String baseCommit, String headCommit,
                                        String snapshotRevision, String summary, String nextStep, List<String> files,
                                        List<String> verifications, List<String> obstacles, String reportedOutcome,
-                                       String reportedTitle, String reportedSummary, boolean snapshotValid,
+                                       String reportedTitle, String reportedSummary, String reportedPreparation,
+                                       boolean snapshotValid,
                                        String validityReason,
                                        OffsetDateTime updatedAt) {
     }
@@ -1958,7 +1986,8 @@ public class ProjectWorkFeature {
                                String acceptance, Assignment assignment, List<Assignment> alternatives,
                                boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
                                UUID sessionId, int attempts, String report, Map<String, Object> qaReport,
-                               String findingId, int qaRounds, String mergeSha, List<UUID> dependsOn,
+                               String findingId, int qaRounds, String mergeSha, Map<String, Object> qaHandoff,
+                               List<UUID> dependsOn,
                                OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
 

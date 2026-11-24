@@ -334,6 +334,7 @@ class TaskReport(BaseModel):
     next_step: str = Field(default="", alias="nextStep", max_length=20_000)
     files: list[str] = Field(default_factory=list, max_length=500)
     verifications: list[str] = Field(default_factory=list, max_length=200)
+    preparation: str = Field(default="", max_length=20_000)
     obstacles: list[str] = Field(default_factory=list, max_length=200)
 
 
@@ -401,6 +402,35 @@ async def agent_task_context(session_id: UUID, request: Request,
         return {**result, "section": section, "content": sections[section][1]}
     return {**result, "sections": [{"section": index, "title": title, "characters": len(content)}
                                     for index, (title, content) in enumerate(sections)]}
+
+
+@router.get("/sessions/{session_id}/work/agent/qa-handoff")
+async def agent_qa_handoff(session_id: UUID, request: Request) -> Json:
+    """Bounded, read-only detail for this QA run's one tested task; never a project task list or diff."""
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    run = _runs.get(session_id)
+    if run is None or not run.qa:
+        raise ApiException.conflict("This session is not a factory QA task")
+    item = await mooi.fetch_work(caller, session.project_id)
+    work_item = next((row for row in item.get("items", []) if row["id"] == str(run.item_id)), None)
+    if work_item is None:
+        raise ApiException.not_found("Work item not found")
+    qa_task = next((row for row in work_item.get("tasks", []) if row["id"] == str(run.task_id)), None)
+    if qa_task is None or not qa_task.get("qaOf"):
+        raise ApiException.not_found("QA task not found")
+    tested = next((row for row in work_item.get("tasks", []) if row["id"] == qa_task["qaOf"]), None)
+    if tested is None:
+        return {"available": False, "reason": "The tested legacy task is unavailable"}
+    handoff = tested.get("qaHandoff")
+    if not isinstance(handoff, dict):
+        return {"available": False, "reason": "No structured handoff is stored for this legacy task",
+                "mergeSha": tested.get("mergeSha")}
+    return {"available": True, "taskId": tested["id"], "title": tested["title"],
+            "mergeSha": tested.get("mergeSha"), "summary": str(handoff.get("summary") or "")[:20_000],
+            "files": _handoff_files(handoff.get("files") or []),
+            "verifications": [_handoff_text(str(value))[:2_000]
+                              for value in (handoff.get("verifications") or [])[:200]],
+            "preparation": _handoff_text(str(handoff.get("preparation") or ""))}
 
 
 @router.post("/sessions/{session_id}/work/agent/features", status_code=status.HTTP_201_CREATED)
@@ -574,7 +604,7 @@ This session runs one task of the project's software factory, on its own; there 
 - Ask the user only when you truly cannot go on: the task then waits for their answer.
 - Spec access: `GET {root}/work/agent/context` returns only this item's spec index and revision; add `?section=<number>&revision=<revision>` for one complete section or `?full=true` for the entire unabridged spec. Use this instead of downloading the project's work list. If a revision changed, reload the index.
 {branch_guidance}
-- When reporting, also include `nextStep`, `files`, `verifications` and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
+- When reporting development work, include `nextStep`, `files`, `verifications`, `preparation` requirements for independent QA, and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
 - Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
@@ -757,7 +787,7 @@ async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -
 
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
                   attempts: int | None = None, report: str | None = None, assignment: Json | None = None,
-                  merge_sha: str | None = None) -> Json:
+                  merge_sha: str | None = None, qa_handoff: Json | None = None) -> Json:
     """Saves a task's progress in mic-mooi and announces its item."""
     if isinstance(run_or_task, TaskRun):
         task_id, player_hint = run_or_task.task_id, run_or_task.player_id
@@ -768,7 +798,8 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
         task_id, player_hint = UUID(run_or_task["id"]), None
         attempts = run_or_task.get("attempts", 0) if attempts is None else attempts
     body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
-            "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha}
+            "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha,
+            "qaHandoff": qa_handoff}
     answer = await mooi.report_task(task_id, body)
     player_id = UUID(answer["playerId"]) if answer.get("playerId") else player_hint
     if player_id is not None:
@@ -1020,6 +1051,7 @@ def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Js
             outcome="done", summary=recovery.get("reportedSummary") or recovery.get("summary") or "",
             nextStep=recovery.get("nextStep") or "", files=recovery.get("files") or [],
             verifications=recovery.get("verifications") or [], obstacles=recovery.get("obstacles") or [],
+            preparation=recovery.get("reportedPreparation") or "",
         )
     _runs[session.id] = run
     return run
@@ -1245,6 +1277,25 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
         if tested:
             block("Task under review", tested.get("description"))
             block("Tested task acceptance criteria", tested.get("acceptance"), "Use the tested task description.")
+            handoff = tested.get("qaHandoff")
+            if isinstance(handoff, dict):
+                lines += ["", "## Integrated change handoff (reported evidence, not proof)", "",
+                          f"Merged commit: {tested.get('mergeSha') or 'missing; no verified commit SHA recorded'}"]
+                block("Development summary", handoff.get("summary"), "(not reported)")
+                block("Changed files", "\n".join(f"- {path}" for path in handoff.get("files", [])),
+                      "(not reported)")
+                block("Checks reported before QA", "\n".join(
+                    f"- {value}" for value in handoff.get("verifications", [])), "(not reported)")
+                block("Declared preparation", handoff.get("preparation"), "(not declared)")
+                lines += ["", "This report is orientation only. Independently verify the integrated default branch "
+                          "using the acceptance criteria and this QA task's preparation."]
+            else:
+                lines += ["", "## Legacy evidence limits", "",
+                          f"Merged commit: {tested.get('mergeSha') or 'missing; no SHA is available to verify'}",
+                          "Development summary, changed files, prior checks and declared preparation: unavailable "
+                          "in this legacy task record. Do not infer them; validate independently from the criteria."]
+            lines += ["", ("For bounded task handoff details, use GET `/sessions/{session_id}/work/agent/qa-handoff`. "
+                            "It returns only the task this QA run checks; it never returns a diff or other tasks.")]
         else:
             lines += ["", ("The tested task is unavailable. Use the QA description and criteria below; read "
                            "the full spec if needed and report blocked if the expected behaviour cannot be established.")]
@@ -1317,7 +1368,7 @@ def _handoff_files(values: list[str]) -> list[str]:
                 or value.startswith("-") or "\0" in value or "\\" in value):
             continue
         safe.append(value[:1024])
-    return list(dict.fromkeys(safe))[:500]
+    return sorted(set(safe))[:500]
 
 
 def _qa_delivery_payload(report: TaskReport) -> Json:
@@ -1347,6 +1398,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             obstacles = obstacles[:200]
         outcome = report.outcome if report else final_outcome
         title = report.title if report else None
+        preparation = _handoff_text(report.preparation) if report else ""
         safe_summary = _handoff_text(summary)
         reported_summary = safe_summary if outcome else None
         safe_next_step = _handoff_text(next_step)
@@ -1382,6 +1434,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             outcome = outcome or existing.get("reportedOutcome")
             title = title or existing.get("reportedTitle")
             reported_summary = reported_summary or existing.get("reportedSummary")
+            preparation = preparation or _handoff_text(existing.get("reportedPreparation") or "")
             if not safe_summary:
                 safe_summary = "Workspace snapshot captured at turn end; no new handoff report was submitted."
         if not valid and existing and existing.get("snapshotValid"):
@@ -1399,6 +1452,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             outcome = existing.get("reportedOutcome")
             title = existing.get("reportedTitle")
             reported_summary = existing.get("reportedSummary")
+            preparation = _handoff_text(existing.get("reportedPreparation") or "")
             valid = True
             reason = existing.get("validityReason")
         await mooi.save_task_recovery(run.task_id, {
@@ -1416,6 +1470,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             "reportedOutcome": outcome,
             "reportedTitle": _handoff_text(title)[:200] if title else None,
             "reportedSummary": reported_summary,
+            "reportedPreparation": preparation or None,
             "snapshotValid": valid,
             "validityReason": reason,
         })
@@ -1545,7 +1600,19 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
     if session is not None:
         await _persist_recovery(run, session, final_summary=report,
                                 final_outcome="passed" if run.qa else "done")
-    item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None)
+    handoff = None
+    if not run.qa:
+        outcome = run.outcome
+        handoff = {
+            "summary": _handoff_text(outcome.summary if outcome else report),
+            "files": _handoff_files(outcome.files if outcome else []),
+            "verifications": [
+                _handoff_text(value)[:2_000] for value in (outcome.verifications if outcome else [])[:200]
+            ],
+            "preparation": _handoff_text(outcome.preparation if outcome else ""),
+        }
+    item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None,
+                         qa_handoff=handoff)
     await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
     await _close(run)
     if run.issue_number and item.get("status") == "done":

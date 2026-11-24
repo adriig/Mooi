@@ -109,3 +109,7 @@ databaseChangeLog:
       file: db/changelog/changes/053-work-qa-deliveries.yaml
   - include:
       file: db/changelog/changes/054-work-task-recovery.yaml
+  - include:
+      file: db/changelog/changes/055-work-task-qa-handoff.yaml
+  - include:
+      file: db/changelog/changes/056-work-task-recovery-preparation.yaml
