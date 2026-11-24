@@ -1,0 +1,76 @@
+databaseChangeLog:
+  - changeSet:
+      id: 049-create-google-connections
+      author: mooi
+      changes:
+        - createTable:
+            tableName: google_connections
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: player_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    referencedTableName: players
+                    referencedColumnNames: id
+                    foreignKeyName: fk_google_connections_player
+                    deleteCascade: true
+              - column:
+                  name: google_subject
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: google_email
+                  type: varchar(320)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: scopes
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: refresh_token
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: access_token
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: access_expires_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: reauth_required
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: updated_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+        - addUniqueConstraint:
+            tableName: google_connections
+            columnNames: player_id, google_subject
+            constraintName: uq_google_connections_player_subject
+      rollback:
+        - dropTable:
+            tableName: google_connections

@@ -8,6 +8,7 @@ import { RouteErrorBoundary } from '@/shared/components/RouteErrorBoundary';
 import { AccountPage } from '@/pages/AccountPage';
 import { AdminPage } from '@/pages/AdminPage';
 import { GithubCallbackPage } from '@/pages/GithubCallbackPage';
+import { GoogleCallbackPage } from '@/pages/GoogleCallbackPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import { ProjectPage } from '@/pages/ProjectPage';
@@ -54,6 +55,7 @@ export const router = createBrowserRouter([
           { path: ROUTES.backup, element: <ProjectBackupPage />, handle: immersive },
           { path: ROUTES.account, element: <AccountPage /> },
           { path: ROUTES.githubCallback, element: <GithubCallbackPage /> },
+          { path: ROUTES.googleCallback, element: <GoogleCallbackPage /> },
           {
             element: <RoleRoute role="admin" />,
             children: [{ path: ROUTES.admin, element: <AdminPage /> }],

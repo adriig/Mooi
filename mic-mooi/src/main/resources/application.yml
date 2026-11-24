@@ -88,6 +88,19 @@ app:
       github-token: ${AUTH_GOOGLE_MOCK_GITHUB_TOKEN:}
       claude-token: ${AUTH_GOOGLE_MOCK_CLAUDE_TOKEN:}
       codex-auth-json: ${AUTH_GOOGLE_MOCK_CODEX_AUTH_JSON:}
+  google-oauth:
+    client-id: ${GOOGLE_CLIENT_ID:}
+    client-secret: ${GOOGLE_CLIENT_SECRET:}
+    # The protected SPA callback, separate from Google sign-in.
+    redirect-uri: ${GOOGLE_OAUTH_REDIRECT_URI:}
+    authorize-uri: ${GOOGLE_OAUTH_AUTHORIZE_URI:https://accounts.google.com/o/oauth2/v2/auth}
+    token-uri: ${GOOGLE_OAUTH_TOKEN_URI:https://oauth2.googleapis.com/token}
+    revoke-uri: ${GOOGLE_OAUTH_REVOKE_URI:https://oauth2.googleapis.com/revoke}
+    userinfo-uri: ${GOOGLE_OAUTH_USERINFO_URI:https://openidconnect.googleapis.com/v1/userinfo}
+    scopes: openid email https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly
+    state-expires-in: 10m
+    token-refresh-skew: 5m
+    request-timeout: 10s
   github:
     client-id: ${GITHUB_CLIENT_ID:}
     client-secret: ${GITHUB_CLIENT_SECRET:}
