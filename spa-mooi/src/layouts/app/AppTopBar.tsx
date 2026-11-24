@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
+import { ProjectSelector } from '@/features/projects/components/ProjectSelector';
 import { AppUserMenu } from '@/layouts/app/AppUserMenu';
 import { appNavLinks } from '@/layouts/app/appNavLinks';
 import { IconButton } from '@/shared/components/IconButton';
@@ -43,6 +44,8 @@ export const AppTopBar = () => {
       >
         <Logo />
       </Link>
+
+      <ProjectSelector className="max-w-[40%] lg:max-w-64" />
 
       {section && SectionIcon ? (
         <p className="hidden min-w-0 items-center gap-2 text-[13px] font-medium text-ink-muted lg:flex">

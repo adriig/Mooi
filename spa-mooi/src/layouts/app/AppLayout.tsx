@@ -4,6 +4,7 @@ import { useAgentConnectionsSync } from '@/features/agents/hooks/useAgentConnect
 import { useGithubConnectionSync } from '@/features/github/hooks/useGithubConnectionSync';
 import { useLiveChannelSync } from '@/features/live/hooks/useLiveChannelSync';
 import { useProjectsSync } from '@/features/projects/hooks/useProjectsSync';
+import { useSelectedProjectSync } from '@/features/projects/hooks/useSelectedProjectSync';
 import { useRecipeMarketplacesSync } from '@/features/recipes/hooks/useRecipeMarketplacesSync';
 import { AppMobileDrawer } from '@/layouts/app/AppMobileDrawer';
 import { AppSidebar } from '@/layouts/app/AppSidebar';
@@ -18,6 +19,7 @@ import { useScrollTopOnNavigate } from '@/layouts/app/useScrollTopOnNavigate';
 export const AppLayout = () => {
   useGithubConnectionSync();
   useProjectsSync();
+  useSelectedProjectSync();
   useAgentConnectionsSync();
   useRecipeMarketplacesSync();
   useLiveChannelSync();
