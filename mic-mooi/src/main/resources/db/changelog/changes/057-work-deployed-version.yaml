@@ -1,0 +1,57 @@
+databaseChangeLog:
+  - changeSet:
+      id: 057-work-deployed-version
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_tasks
+            columns:
+              - column:
+                  name: deployed_version
+                  type: varchar(255)
+              - column:
+                  name: deployed_at
+                  type: timestamptz
+              - column:
+                  name: in_current_release
+                  type: boolean
+        - addColumn:
+            tableName: work_items
+            columns:
+              - column:
+                  name: deployed_version
+                  type: varchar(255)
+              - column:
+                  name: deployed_at
+                  type: timestamptz
+              - column:
+                  name: in_current_release
+                  type: boolean
+        - addColumn:
+            tableName: production_deployments
+            columns:
+              - column:
+                  name: release_sha
+                  type: varchar(40)
+      rollback:
+        - dropColumn:
+            tableName: production_deployments
+            columnName: release_sha
+        - dropColumn:
+            tableName: work_items
+            columnName: in_current_release
+        - dropColumn:
+            tableName: work_items
+            columnName: deployed_at
+        - dropColumn:
+            tableName: work_items
+            columnName: deployed_version
+        - dropColumn:
+            tableName: work_tasks
+            columnName: in_current_release
+        - dropColumn:
+            tableName: work_tasks
+            columnName: deployed_at
+        - dropColumn:
+            tableName: work_tasks
+            columnName: deployed_version

@@ -236,6 +236,13 @@ public class ProjectWorkFeature {
         return work.running();
     }
 
+    @PostMapping("/internal/projects/{projectId}/work/deployment")
+    @Auth.ServiceOnly
+    public WorkPayload recordDeployment(@PathVariable UUID projectId,
+                                        @Valid @RequestBody DeploymentOutcome outcome) {
+        return work.recordDeployment(projectId, outcome);
+    }
+
     @PutMapping("/internal/work/tasks/{taskId}")
     @Auth.ServiceOnly
     public RunnerItem progress(@PathVariable UUID taskId, @Valid @RequestBody TaskProgress progress) {
@@ -295,6 +302,56 @@ public class ProjectWorkFeature {
         private final WorkSettingsRepository settings;
         private final Clock clock;
         private final ObjectMapper json = JsonMapper.shared();
+
+        @Transactional
+        public WorkPayload recordDeployment(UUID projectId, DeploymentOutcome outcome) {
+            if (!projects.existsById(projectId)) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found");
+            }
+            List<ItemPayload> changed = new ArrayList<>();
+            // Stable lock order also serializes overlapping reconciliation requests.
+            for (UUID id : items.findIdsByProjectId(projectId)) {
+                WorkItem item = lockedItem(projectId, id);
+                List<WorkTask> all = tasks.findByItemId(id);
+                for (WorkTask task : all) {
+                    if (task.getMergeSha() == null) continue;
+                    boolean contained = outcome.containedTaskIds().contains(task.getId());
+                    task.setInCurrentRelease(contained);
+                    if (task.getQaOfId() == null && task.getStatus() == TaskStatus.done
+                            && contained && task.getDeployedVersion() == null) {
+                        task.setDeployedVersion(outcome.releaseTag());
+                        task.setDeployedAt(outcome.deployedAt());
+                    }
+                }
+                tasks.saveAll(all);
+                recomputeDeployment(item, all);
+                item.setUpdatedAt(OffsetDateTime.now(clock));
+                items.save(item);
+                changed.add(toPayload(item, all));
+            }
+            return new WorkPayload(changed);
+        }
+
+        private static void recomputeDeployment(WorkItem item, List<WorkTask> all) {
+            List<WorkTask> development = all.stream().filter(task -> task.getQaOfId() == null).toList();
+            item.setInCurrentRelease(development.isEmpty()
+                    || development.stream().anyMatch(task -> task.getInCurrentRelease() == null) ? null
+                    : development.stream().allMatch(task -> Boolean.TRUE.equals(task.getInCurrentRelease())));
+            boolean deployed = item.getStatus() == ItemStatus.done && !development.isEmpty()
+                    && development.stream().allMatch(task -> task.getDeployedVersion() != null);
+            WorkTask latest = deployed ? development.stream()
+                    .max(Comparator.comparing(WorkTask::getDeployedAt).thenComparing(WorkTask::getId)).orElseThrow() : null;
+            item.setDeployedVersion(latest == null ? null : latest.getDeployedVersion());
+            item.setDeployedAt(latest == null ? null : latest.getDeployedAt());
+        }
+
+        private static DeploymentPayload deployment(WorkItem item, List<WorkTask> all) {
+            String state = item.getStatus() != ItemStatus.done ? "none"
+                    : all.stream().anyMatch(task -> task.getQaOfId() == null
+                            && task.getStatus() == TaskStatus.done && task.getMergeSha() == null) ? "unknown"
+                    : item.getDeployedVersion() != null ? "deployed" : "pending";
+            return new DeploymentPayload(state, item.getDeployedVersion(), item.getDeployedAt(), item.getInCurrentRelease());
+        }
 
         @Transactional(readOnly = true)
         public WorkPayload items(UUID playerId, UUID projectId) {
@@ -936,6 +993,7 @@ public class ProjectWorkFeature {
             if (status == ItemStatus.done) {
                 item.setFinishedAt(OffsetDateTime.now(clock));
             }
+            recomputeDeployment(item, tasks.findByItemId(itemId));
             items.save(item);
             return runnerItem(item, tasks.findByItemId(itemId));
         }
@@ -978,6 +1036,7 @@ public class ProjectWorkFeature {
                 item.setFinishedAt(null);
                 // Pending tasks stay cancelled until the player explicitly starts this item.
             }
+            recomputeDeployment(item, all);
             return toPayload(items.save(item), all);
         }
 
@@ -1218,6 +1277,7 @@ public class ProjectWorkFeature {
         }
 
         private WorkItem touch(WorkItem item) {
+            recomputeDeployment(item, tasks.findByItemId(item.getId()));
             item.setUpdatedAt(OffsetDateTime.now(clock));
             return item;
         }
@@ -1232,7 +1292,7 @@ public class ProjectWorkFeature {
         private ItemPayload toPayload(WorkItem item, List<WorkTask> all) {
             return new ItemPayload(item.getId(), item.getProjectId(), item.getKind(), item.getIssueNumber(),
                     item.getTitle(), item.getSpec(), item.getStatus(), item.getDependsOnId(), item.getStartedAt(),
-                    item.getFinishedAt(), item.getCreatedAt(), item.getUpdatedAt(),
+                    item.getFinishedAt(), item.getCreatedAt(), item.getUpdatedAt(), deployment(item, all),
                     all.stream().sorted(Comparator.comparingInt(WorkTask::getPosition)
                                     .thenComparing(task -> task.getQaOfId() != null)
                                     .thenComparing(WorkTask::getCreatedAt, Comparator.nullsLast(Comparator.naturalOrder())))
@@ -1244,7 +1304,8 @@ public class ProjectWorkFeature {
                                      task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
                                      task.getAttempts(), task.getReport(), readQaReport(task.getQaReport()),
                                      task.getFindingId(),
-                                     task.getQaRounds(), task.getMergeSha(), readQaHandoff(task.getQaHandoff()),
+                                     task.getQaRounds(), task.getMergeSha(), task.getDeployedVersion(), task.getDeployedAt(),
+                                     readQaHandoff(task.getQaHandoff()),
                                      List.copyOf(task.getDependsOn()),
                                      task.getStartedAt(), task.getFinishedAt()))
                             .toList());
@@ -1479,6 +1540,15 @@ public class ProjectWorkFeature {
         @Column(name = "issue_closed", nullable = false)
         private boolean issueClosed;
 
+        @Column(name = "deployed_version")
+        private String deployedVersion;
+
+        @Column(name = "deployed_at")
+        private OffsetDateTime deployedAt;
+
+        @Column(name = "in_current_release")
+        private Boolean inCurrentRelease;
+
         @Column(name = "depends_on_id")
         private UUID dependsOnId;
 
@@ -1583,6 +1653,15 @@ public class ProjectWorkFeature {
         /** Full commit from a successful development merge; absent for QA and other completion paths. */
         @Column(name = "merge_sha", length = 40)
         private String mergeSha;
+
+        @Column(name = "deployed_version")
+        private String deployedVersion;
+
+        @Column(name = "deployed_at")
+        private OffsetDateTime deployedAt;
+
+        @Column(name = "in_current_release")
+        private Boolean inCurrentRelease;
 
         /** Compact, reported development evidence for its independent QA task; never a diff or repository. */
         @Column(name = "qa_handoff", columnDefinition = "text")
@@ -1723,6 +1802,9 @@ public class ProjectWorkFeature {
     public interface WorkItemRepository extends JpaRepository<WorkItem, UUID> {
 
         List<WorkItem> findByProjectId(UUID projectId);
+
+        @Query("select item.id from WorkItem item where item.projectId = :projectId order by item.id")
+        List<UUID> findIdsByProjectId(@Param("projectId") UUID projectId);
 
         List<WorkItem> findByStatus(ItemStatus status);
 
@@ -1986,15 +2068,24 @@ public class ProjectWorkFeature {
                                String acceptance, Assignment assignment, List<Assignment> alternatives,
                                boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
                                UUID sessionId, int attempts, String report, Map<String, Object> qaReport,
-                               String findingId, int qaRounds, String mergeSha, Map<String, Object> qaHandoff,
+                               String findingId, int qaRounds, String mergeSha,
+                               String deployedVersion, OffsetDateTime deployedAt, Map<String, Object> qaHandoff,
                                List<UUID> dependsOn,
                                OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
 
     public record ItemPayload(UUID id, UUID projectId, ItemKind kind, Integer issueNumber, String title, String spec,
                               ItemStatus status, UUID dependsOn, OffsetDateTime startedAt, OffsetDateTime finishedAt,
-                              OffsetDateTime createdAt, OffsetDateTime updatedAt, List<TaskPayload> tasks) {
+                              OffsetDateTime createdAt, OffsetDateTime updatedAt, DeploymentPayload deployment,
+                              List<TaskPayload> tasks) {
     }
+
+    public record DeploymentPayload(String state, String version, OffsetDateTime deployedAt, Boolean inCurrentRelease) { }
+
+    public record DeploymentOutcome(@NotBlank @Size(max = 255) String releaseTag,
+                                    @NotNull @Pattern(regexp = "[0-9a-f]{40}") String releaseSha,
+                                    @NotNull OffsetDateTime deployedAt,
+                                    @NotNull Set<@NotNull UUID> containedTaskIds) { }
 
     public record WorkPayload(List<ItemPayload> items) {
     }

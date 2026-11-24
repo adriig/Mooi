@@ -243,13 +243,13 @@ async def write_production_environment(caller: Caller, project_id: UUID, values:
 
 
 async def start_production_deployment(caller: Caller, project_id: UUID, operation_id: UUID,
-                                      session_id: UUID | None, release_tag: str, files: dict) -> None:
+                                      session_id: UUID | None, release_tag: str, release_sha: str, files: dict) -> None:
     try:
         response = await get_http_client().post(
             f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/production/deployments",
             headers=_service_headers(caller),
             json={"operationId": str(operation_id), "sessionId": str(session_id) if session_id else None,
-                  "releaseTag": release_tag, "targets": files.get("targets", []),
+                  "releaseTag": release_tag, "releaseSha": release_sha, "targets": files.get("targets", []),
                   "files": {name: files[name] for name in ("manifest", "script", "statusScript")}})
     except httpx.HTTPError:
         raise ApiException.bad_gateway() from None
@@ -363,6 +363,14 @@ async def send_work(caller: Caller, method: str, project_id: UUID, path: str, pa
 async def fetch_running_work() -> list[dict]:
     """Service-only: every started item of every player, for the runner."""
     return list(((await _send("GET", "/internal/work/running", None, "Not found")) or {}).get("items") or [])
+
+
+async def record_work_deployment(project_id: UUID, release_tag: str, release_sha: str,
+                                  deployed_at: str, contained_task_ids: list[str]) -> dict:
+    """Reconciles first deployment versions and current-release membership under item row locks."""
+    return await _send("POST", f"/internal/projects/{project_id}/work/deployment", None, "Project not found",
+                       {"releaseTag": release_tag, "releaseSha": release_sha, "deployedAt": deployed_at,
+                        "containedTaskIds": contained_task_ids}) or {}
 
 
 async def report_task(task_id: UUID, progress: dict) -> dict:

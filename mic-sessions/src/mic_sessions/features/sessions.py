@@ -2999,6 +2999,8 @@ class ProductionRun:
     logs: list[str] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task[None] | None = None
+    tracking_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    tracking_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
 
 _production_runs: dict[UUID, ProductionRun] = {}
@@ -3382,7 +3384,7 @@ async def _start_production(run: ProductionRun, caller: Caller, project: mooi.Pr
         chat = _production_chat(caller.player_id, project_id)
         try:
             await mooi.start_production_deployment(caller, project_id, snapshot.operationId,
-                                                   chat.id if chat else None, body.tag, files.model_dump())
+                                                   chat.id if chat else None, body.tag, release_sha, files.model_dump())
         except Exception:
             run.snapshot, run.logs = previous, previous_logs
             _publish_production_sync(run)
@@ -3428,6 +3430,11 @@ async def _run_production(run: ProductionRun, caller: Caller, project: mooi.Proj
         if chat is not None:
             chat.platform_tested = True
         await conclude("succeeded", "Production deployment completed")
+        # Independent of deployment success and retained even if the next deployment starts.
+        tracking = asyncio.create_task(_track_work_deployment(
+            caller, project, started.releaseTag, started.releaseCommit, datetime.now(UTC), run.tracking_lock))
+        run.tracking_tasks.add(tracking)
+        tracking.add_done_callback(run.tracking_tasks.discard)
     except asyncio.CancelledError:
         await conclude("failed", "Production deployment interrupted")
         raise
@@ -3444,6 +3451,40 @@ async def _run_production(run: ProductionRun, caller: Caller, project: mooi.Proj
         if checkout is not None:
             with suppress(Exception):
                 await workspaces.get_workspaces().remove_release_checkout(operation_id)
+
+
+async def _track_work_deployment(caller: Caller, project: mooi.Project, release_tag: str, release_sha: str,
+                                  deployed_at: datetime, lock: asyncio.Lock) -> None:
+    """Best effort, ordered per project so a slow comparison cannot undo a later rollback's membership."""
+    try:
+        async with lock, asyncio.timeout(300):
+            work = await mooi.fetch_work(caller, project.id)
+            tasks = [task for item in work.get("items", []) for task in item.get("tasks", [])
+                     if task.get("qaOf") is None and task.get("mergeSha")]
+            capacity = asyncio.Semaphore(4)
+
+            async def contains(merge_sha: str) -> tuple[str, bool]:
+                async with capacity:
+                    comparison = await _github_api(caller, project.full_name, "GET",
+                                                    f"compare/{merge_sha}...{release_sha}")
+                    comparison_status = comparison.get("status")
+                    if comparison_status not in {"identical", "ahead", "behind", "diverged"}:
+                        raise ValueError("GitHub returned an unknown comparison status")
+                    return merge_sha, comparison_status in {"identical", "ahead"}
+
+            # One comparison per distinct merge, including tasks deployed in a previous release.
+            async with asyncio.TaskGroup() as group:
+                comparisons = [group.create_task(contains(sha)) for sha in sorted(
+                    {task["mergeSha"] for task in tasks})]
+            contained = dict(comparison.result() for comparison in comparisons)
+            changed = await mooi.record_work_deployment(
+                project.id, release_tag, release_sha, deployed_at.isoformat(),
+                [task["id"] for task in tasks if contained[task["mergeSha"]]])
+            for item in changed.get("items", []):
+                _channels.publish(caller.player_id, "work.item", {"projectId": item["projectId"], "item": item})
+    except Exception:
+        LOG.warning("Could not track work deployment for project %s release %s",
+                    project.id, release_tag, exc_info=True)
 
 
 @router.post("/production/projects/{project_id}/status")
@@ -3621,6 +3662,10 @@ async def close_productions() -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    tracking = [task for run in _production_runs.values() for task in run.tracking_tasks]
+    for task in tracking:
+        task.cancel()
+    await asyncio.gather(*tracking, return_exceptions=True)
 
 
 # --- backups: project-scoped configuration, backups and restores -------------------------------
