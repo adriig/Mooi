@@ -59,6 +59,36 @@ sync in real time.
 4. **Merge**: bring finished work into the main branch, conflicts handled by the agent.
 5. **Ship**: create a release and deploy it to production; back it up and restore whenever needed.
 
+### 🏭 Software factory: independent QA and task continuity
+
+Starting a feature runs its unblocked tasks autonomously through the deterministic platform runner, including
+when no device is connected. Each development task and its QA task has a separate session, workspace, provider
+trace and selected model. QA starts
+from the integrated default branch and uses its own isolated preview with the project's existing development
+deployment setup. It validates acceptance criteria independently; the development summary and reported checks
+help locate the change but do not establish that it works.
+
+Development reports a compact handoff with the result, next step, changed files, reported verifications,
+preparation for QA and obstacles. When a session is interrupted, a new session can restore the latest valid,
+saved task snapshot and handoff. The platform saves eligible local commits and workspace edits without pushing,
+in revisioned recovery bundles outside the repository and scoped to the user, project, work item, task and
+attempt. Snapshots exclude ignored files, Git configuration, credentials, secret-bearing content and unsafe
+paths; symlinks are rejected. A sudden failure can recover only through the last snapshot actually saved.
+Missing, invalid, incomplete or mismatched evidence sends the task to attention with the reason instead of
+restarting on a clean checkout or claiming unsaved work was recovered. Recovery restores changes into a clean
+workspace at the recorded branch base; it never resumes another provider's runtime. Finalized recovery is
+retired, abandoned snapshots have bounded retention, and snapshots in active use are protected from cleanup.
+
+QA reports either a pass, a separately classified access/credentials/capacity/infrastructure block, or one
+bounded delivery containing prioritized, reproducible in-scope product findings. A block waits for attention,
+creates no fix and uses no correction round. Each finding creates an independent red fix task without its own
+QA; QA waits for every fix to merge before it repeats. Stable delivery and finding IDs make retries idempotent,
+and one grouped delivery uses one correction round. Legacy single-defect and generic blocked reports remain
+supported; when a legacy development record lacks structured handoff, QA is told which evidence is unavailable.
+
+This task-specific continuity complements debt #31 for compacting general briefs and removing their duplicated
+content. It neither repeats that work nor depends on its merge order.
+
 ## 📦 Deployments
 
 Mooi itself ships three ways. Each has its own files; never mix them.

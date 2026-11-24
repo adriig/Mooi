@@ -125,7 +125,14 @@ Each project plans and builds its work as a software factory: agents design it, 
   Categories have fixed colours: UX/UI green, Development yellow, QA blue, Infra/DevOps purple,
   Documentation grey.
 - **QA**: enabling tests on a task adds a separate QA task to its feature, blocked until that task merges,
-  with acceptance criteria and a different model preselected. Developing and testing never share a session.
+  with acceptance criteria and a different model preselected. Development and QA always use independent
+  sessions, workspaces and traces; each session keeps its own provider, model and effort. The deterministic
+  platform runner coordinates them autonomously without a supervisor agent or required subagents, including
+  when no device is connected. QA starts from the
+  integrated default branch and uses its own isolated preview and the existing deployment setup. A development
+  handoff may provide a concise summary, next step, changed files, reported verifications, preparation and
+  obstacles. These are orientation only: QA independently validates the integrated change against acceptance
+  criteria; reported checks and summaries are not proof.
 - **Model assignment**: an assignment expert picks each task's provider, model and effort from the user's
   linked accounts and their remaining quota, with ordered fallbacks, so no account runs out of credits. The
   platform checks quota again when a task launches and falls back to the next alternative when needed.
@@ -146,15 +153,45 @@ Each project plans and builds its work as a software factory: agents design it, 
   - a development task ends with its merge into the default branch: automatic (agentic merge on
     conflicts) or by the user, as the task says. The merge closes the task and its session and unblocks
     its dependants;
-  - a QA task checks the default branch with everything merged through Playwright and ends when its
-    acceptance criteria are met. A defect it finds is added to the feature as a fix task that runs
-    automatically with no QA of its own, and the failed QA runs again after it;
+  - a QA task checks the default branch with everything merged, using its own isolated preview and the
+    existing deployment setup for web applications, and reports an independent result against its acceptance
+    criteria. It keeps exploration within that scope. One delivery may group up to 20 reproducible in-scope
+    product findings, prioritized and each with criterion, reproduction, expected and observed behavior, and
+    redacted evidence. Every finding creates its own red fix task with no QA of its own; the QA task depends on
+    all fixes and runs again only after all have merged. Stable delivery and finding IDs make retries idempotent;
+    one delivery consumes one correction round regardless of finding count. Legacy single-defect reports remain
+    supported. A QA block caused by access, credentials, capacity or infrastructure is reported separately,
+    creates no fix and consumes no correction round; it waits for attention. Legacy generic blocked reports
+    remain supported;
   - a defect or debt item closes its GitHub issue when its work merges.
 - **Factory settings** (per project, from To-dos, the Board or the chat): the quota percent from which an
   account is spared (default 85%), the sessions a task may lose before it waits for the user (3), the
   fix-and-check-again rounds after a failed QA (3; 0 hands every failure to the user) and the agentic merge
   attempts on conflicts (2; 0 leaves conflicts to the user).
 - Managed from UI or chat (session agents use the same platform API); changes stream live to every view.
+
+### Task handoffs and recovery
+
+- A development result is durable task metadata, not only runner memory. Its compact handoff records the reported
+  outcome and summary, next step, changed files, verifications, preparation and obstacles. QA receives the
+  integrated commit SHA and bounded handoff through its task context; a legacy task without structured handoff
+  remains runnable, but missing evidence is stated as unavailable and is never inferred.
+- The runner saves revisioned recovery evidence at a reported handoff/final result, at the end of each agent turn,
+  and before normal workspace removal. It includes eligible local commits and unpublished workspace changes, but
+  does not push. Recovery v1 stores a filtered synthetic commit and manifest outside the repository, scoped by
+  user-ownership scope, project, work item, task and attempt. It excludes ignored files, Git configuration, credentials,
+  secret-bearing content and unsafe paths; symlinks are rejected. Recovery bundles and host-local paths are not
+  exposed in agent handoffs or API responses. Snapshots are validated, revisioned and restored only into a clean
+  workspace at the recorded branch and base; active consumers hold a lease against cleanup.
+- A recovered session is a new session with its own selected provider runtime and trace. The platform restores
+  only the last successfully saved snapshot and compact result; it does not resume another provider's runtime.
+  Abrupt failure guarantees only the latest snapshot already saved. If evidence is absent, invalid, incomplete,
+  mismatched or unsafe, the task moves to attention with a reason; the runner does not relaunch from a clean
+  checkout or claim that unsaved work was recovered. Finalized task recovery is retired; abandoned recovery
+  revisions have bounded retention, while an active consumer is never deleted underneath.
+- This recovery contract complements debt #31, which owns compacting general briefs and removing duplicated
+  brief content. It does not duplicate that work or depend on its merge order; task-specific handoff and recovery
+  remain compatible with old reports and legacy tasks.
 
 ## Development environment variables
 
