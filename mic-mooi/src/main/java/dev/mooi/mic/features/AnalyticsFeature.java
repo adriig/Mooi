@@ -2,6 +2,10 @@ package dev.mooi.mic.features;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -11,20 +15,27 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.hibernate.annotations.Immutable;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.convert.DurationStyle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -56,6 +67,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import dev.mooi.mic.shared.Auth;
 import dev.mooi.mic.shared.Crypto;
+import dev.mooi.mic.shared.GoogleTokens;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EntityManager;
@@ -75,6 +87,7 @@ import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -83,6 +96,7 @@ import tools.jackson.databind.json.JsonMapper;
 @RequiredArgsConstructor
 public class AnalyticsFeature {
     private final AnalyticsService service;
+    private final AnalyticsGoogleService google;
 
     @Bean
     WebMvcConfigurer analyticsCorsConfigurer() {
@@ -232,6 +246,48 @@ public class AnalyticsFeature {
         return service.breakdown(projectId, principal.player().id(), from, to, tz, dimension, limit);
     }
 
+    @GetMapping("/me/projects/{projectId}/analytics/google/properties")
+    @Auth.Authenticated
+    public GooglePropertiesPayload googleProperties(@PathVariable UUID projectId,
+            @RequestParam(required = false) UUID connectionId, Auth.Principal principal) {
+        return google.properties(projectId, principal.player().id(), connectionId);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/search")
+    @Auth.Authenticated
+    public SearchReport search(@PathVariable UUID projectId, @RequestParam String from, @RequestParam String to,
+            @RequestParam(defaultValue = "UTC") String tz, @RequestParam(defaultValue = "query") String dimension,
+            @RequestParam(defaultValue = "25") int limit, Auth.Principal principal) {
+        return google.search(projectId, principal.player().id(), from, to, tz, dimension, limit);
+    }
+
+    @GetMapping("/me/projects/{projectId}/analytics/ga4")
+    @Auth.Authenticated
+    public Ga4Report ga4(@PathVariable UUID projectId, @RequestParam String from, @RequestParam String to,
+            @RequestParam(defaultValue = "UTC") String tz, @RequestParam(defaultValue = "summary") String report,
+            @RequestParam(defaultValue = "20") int limit, Auth.Principal principal) {
+        return google.ga4(projectId, principal.player().id(), from, to, tz, report, limit);
+    }
+
+    public record Ga4PropertyOption(String propertyId, String displayName, String accountName,
+                                    List<String> streamUris, boolean suggested) { }
+    public record SearchConsoleSiteOption(String siteUrl, String permissionLevel, boolean suggested) { }
+    /** A source the connection cannot list carries its error code instead of failing the whole response. */
+    public record GooglePropertiesPayload(UUID connectionId, List<Ga4PropertyOption> ga4Properties, String ga4Error,
+                                          List<SearchConsoleSiteOption> searchConsoleSites, String searchConsoleError,
+                                          String selectedGa4PropertyId, String selectedSearchConsoleSiteUrl,
+                                          Instant fetchedAt) { }
+    /** {@code ctr} is a 0..1 ratio and {@code position} an impression-weighted average, as Google reports them. */
+    public record SearchRow(String key, double clicks, double impressions, double ctr, double position) { }
+    public record SearchReport(String siteUrl, String dimension, String from, String to, String dataUntil,
+                               SearchRow totals, List<SearchRow> rows, Instant fetchedAt) { }
+    /** {@code bounceRate} is a 0..1 ratio and {@code averageSessionDuration} is in seconds, as GA4 reports them. */
+    public record Ga4Metrics(long activeUsers, long sessions, long screenPageViews, long eventCount,
+                             double bounceRate, double averageSessionDuration) { }
+    public record Ga4Row(String key, Ga4Metrics metrics) { }
+    public record Ga4Report(String propertyId, String report, String from, String to, Ga4Metrics totals,
+                            List<Ga4Row> rows, Instant fetchedAt) { }
+
     public record MetricValue(long value, Long previous, Double deltaPercent) { }
     public record OverviewPayload(MetricValue visitors, MetricValue sessions, MetricValue pageviews,
             MetricValue clicks, MetricValue bounceRate, MetricValue avgVisitDurationMs,
@@ -259,12 +315,14 @@ public class AnalyticsFeature {
         service.collect(new String(body, StandardCharsets.UTF_8), request);
     }
 
+    /** Omitted fields stay unchanged; an empty string clears a Google selection. */
     public record SiteUpdate(@Size(max = 20) List<@Size(max = 512) String> allowedOrigins,
                             @Size(max = 255) String ga4PropertyId,
-                            @Size(max = 2048) String searchConsoleSiteUrl) { }
+                            @Size(max = 2048) String searchConsoleSiteUrl,
+                            @Size(max = 64) String googleConnectionId) { }
 
     public record SitePayload(String siteKey, List<String> allowedOrigins, String snippet,
-                              String ga4PropertyId, String searchConsoleSiteUrl) { }
+                              UUID googleConnectionId, String ga4PropertyId, String searchConsoleSiteUrl) { }
 
     public record GeoCompetitor(@NotBlank @Size(max = 255) String name,
                                 @NotBlank @Size(max = 255) String domain) { }
@@ -316,6 +374,7 @@ public class AnalyticsFeature {
         private final AnalyticsEventRepository events;
         private final AnalyticsProjectRepository projects;
         private final AnalyticsProductionRecipeRepository recipes;
+        private final AnalyticsGoogleConnectionRepository googleConnections;
         private final GeoSettingsRepository geoSettings;
         private final GeoPromptRepository geoPrompts;
         private final GeoRunRepository geoRuns;
@@ -331,6 +390,7 @@ public class AnalyticsFeature {
 
         AnalyticsService(AnalyticsSiteRepository sites, AnalyticsEventRepository events,
                          AnalyticsProjectRepository projects, AnalyticsProductionRecipeRepository recipes,
+                         AnalyticsGoogleConnectionRepository googleConnections,
                          GeoSettingsRepository geoSettings, GeoPromptRepository geoPrompts,
                          GeoRunRepository geoRuns, GeoResultRepository geoResults,
                          EntityManager entityManager, Crypto.SecretBox box,
@@ -339,6 +399,7 @@ public class AnalyticsFeature {
             this.events = events;
             this.projects = projects;
             this.recipes = recipes;
+            this.googleConnections = googleConnections;
             this.geoSettings = geoSettings;
             this.geoPrompts = geoPrompts;
             this.geoRuns = geoRuns;
@@ -348,7 +409,7 @@ public class AnalyticsFeature {
             this.publicBaseUrl = stripTrailingSlash(publicBaseUrl);
         }
 
-        private void requireProject(UUID projectId, UUID playerId) {
+        void requireProject(UUID projectId, UUID playerId) {
             if (!projects.existsByIdAndPlayerId(projectId, playerId)) {
                 throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found");
             }
@@ -847,11 +908,26 @@ public class AnalyticsFeature {
                 List<String> origins = normalizeOrigins(update.allowedOrigins());
                 site.setAllowedOrigins(json.writeValueAsString(origins));
             }
+            if (update.googleConnectionId() != null) {
+                String value = cleanNullable(update.googleConnectionId());
+                UUID connectionId = null;
+                if (value != null) {
+                    try {
+                        connectionId = UUID.fromString(value);
+                    } catch (IllegalArgumentException exception) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid Google connection id");
+                    }
+                    if (!googleConnections.existsByIdAndPlayerId(connectionId, playerId)) {
+                        throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Google connection not found");
+                    }
+                }
+                site.setGoogleConnectionId(connectionId);
+            }
             if (update.ga4PropertyId() != null) {
-                site.setGa4PropertyId(cleanNullable(update.ga4PropertyId()));
+                site.setGa4PropertyId(ga4PropertyId(update.ga4PropertyId()));
             }
             if (update.searchConsoleSiteUrl() != null) {
-                site.setSearchConsoleSiteUrl(cleanNullable(update.searchConsoleSiteUrl()));
+                site.setSearchConsoleSiteUrl(searchConsoleSiteUrl(update.searchConsoleSiteUrl()));
             }
             site.setUpdatedAt(Instant.now());
             return payload(sites.save(site));
@@ -878,8 +954,58 @@ public class AnalyticsFeature {
             List<String> effective = configured.isEmpty() ? productionOrigins(site.getProjectId()) : configured;
             String snippet = "<script defer src=\"" + publicBaseUrl + TRACKER_PATH
                     + "\" data-site=\"" + site.getSiteKey() + "\"></script>";
-            return new SitePayload(site.getSiteKey(), effective, snippet,
+            return new SitePayload(site.getSiteKey(), effective, snippet, site.getGoogleConnectionId(),
                     site.getGa4PropertyId(), site.getSearchConsoleSiteUrl());
+        }
+
+        /** GA4 properties are stored as their numeric id; {@code properties/123} is accepted too. */
+        private static String ga4PropertyId(String value) {
+            String cleaned = cleanNullable(value);
+            if (cleaned == null) return null;
+            String id = cleaned.startsWith("properties/") ? cleaned.substring("properties/".length()) : cleaned;
+            if (!id.matches("\\d{1,20}")) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid GA4 property id");
+            }
+            return id;
+        }
+
+        /** Search Console properties are URL prefixes ({@code https://example.com/}) or {@code sc-domain:} hosts. */
+        private static String searchConsoleSiteUrl(String value) {
+            String cleaned = cleanNullable(value);
+            if (cleaned == null) return null;
+            boolean valid;
+            if (cleaned.startsWith("sc-domain:")) {
+                valid = cleaned.substring("sc-domain:".length()).matches("[A-Za-z0-9.-]{1,253}");
+            } else {
+                try {
+                    URI uri = URI.create(cleaned);
+                    valid = uri.getHost() != null && uri.getUserInfo() == null
+                            && ("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()));
+                } catch (IllegalArgumentException exception) {
+                    valid = false;
+                }
+            }
+            if (!valid) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid Search Console property");
+            }
+            return cleaned;
+        }
+
+        /** Hosts of the production targets and configured origins, used to suggest matching Google properties. */
+        @Transactional(readOnly = true)
+        public List<String> siteHosts(UUID projectId) {
+            LinkedHashSet<String> hosts = new LinkedHashSet<>();
+            List<String> origins = new java.util.ArrayList<>(productionOrigins(projectId));
+            sites.findByProjectId(projectId).ifPresent(site -> origins.addAll(readOrigins(site.getAllowedOrigins())));
+            for (String origin : origins) {
+                try {
+                    String host = URI.create(origin).getHost();
+                    if (host != null) hosts.add(host.toLowerCase(Locale.ROOT));
+                } catch (IllegalArgumentException ignored) {
+                    // Origins are normalized on write; a malformed legacy value only loses its suggestion.
+                }
+            }
+            return List.copyOf(hosts);
         }
 
         private List<String> productionOrigins(UUID projectId) {
@@ -1179,6 +1305,492 @@ public class AnalyticsFeature {
                 + "if(!x)return;const a=x.closest('a[href]');const v=x.dataset.mooiTrack||a?.href||x.innerText||x.getAttribute('aria-label')||'';"
                 + "send('click',{target:v.trim().slice(0,80)})},true);"
                 + "addEventListener('pagehide',()=>send('leave',{duration:visible+(shown?Date.now()-shown:0)}))})();";
+    }
+
+    /**
+     * GA4 and Search Console reports read through the player's Google connection. Credentials come only from
+     * {@link GoogleTokens} and never leave the server; responses are cached in memory for 15 minutes.
+     */
+    @Service
+    public static class AnalyticsGoogleService {
+        private static final Duration CACHE_TTL = Duration.ofMinutes(15);
+        private static final int CACHE_SIZE = 512;
+        private static final int MAX_STREAM_LOOKUPS = 25;
+        private static final int MAX_LIST_PAGES = 5;
+        private static final List<String> SEARCH_DIMENSIONS = List.of("query", "page", "country", "device", "date");
+        private static final List<String> GA4_REPORTS = List.of("summary", "pages", "sources", "timeseries");
+        private static final List<String> GA4_METRICS = List.of("activeUsers", "sessions", "screenPageViews",
+                "eventCount", "bounceRate", "averageSessionDuration");
+        private static final Set<String> QUOTA_REASONS = Set.of("rateLimitExceeded", "userRateLimitExceeded",
+                "quotaExceeded", "dailyLimitExceeded", "RATE_LIMIT_EXCEEDED");
+        private static final Ga4Metrics NO_METRICS = new Ga4Metrics(0, 0, 0, 0, 0, 0);
+
+        private final AnalyticsService analytics;
+        private final AnalyticsSiteRepository sites;
+        private final AnalyticsGoogleConnectionRepository connections;
+        private final GoogleTokens tokens;
+        private final Duration timeout;
+        private final HttpClient client;
+        private final String adminApiUri;
+        private final String dataApiUri;
+        private final String searchConsoleApiUri;
+        private final ObjectMapper json = JsonMapper.shared();
+        private final LinkedHashMap<String, CachedReport> cache = new LinkedHashMap<>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, CachedReport> eldest) {
+                return size() > CACHE_SIZE;
+            }
+        };
+
+        AnalyticsGoogleService(AnalyticsService analytics, AnalyticsSiteRepository sites,
+                AnalyticsGoogleConnectionRepository connections, GoogleTokens tokens,
+                @Value("${app.google-oauth.request-timeout}") String timeout,
+                @Value("${app.analytics.google.admin-api-uri:https://analyticsadmin.googleapis.com/v1beta}") String adminApiUri,
+                @Value("${app.analytics.google.data-api-uri:https://analyticsdata.googleapis.com/v1beta}") String dataApiUri,
+                @Value("${app.analytics.google.search-console-api-uri:https://www.googleapis.com/webmasters/v3}") String searchConsoleApiUri) {
+            this.analytics = analytics;
+            this.sites = sites;
+            this.connections = connections;
+            this.tokens = tokens;
+            this.timeout = DurationStyle.detectAndParse(timeout);
+            this.client = HttpClient.newBuilder().connectTimeout(this.timeout)
+                    .followRedirects(HttpClient.Redirect.NEVER).build();
+            this.adminApiUri = AnalyticsService.stripTrailingSlash(adminApiUri);
+            this.dataApiUri = AnalyticsService.stripTrailingSlash(dataApiUri);
+            this.searchConsoleApiUri = AnalyticsService.stripTrailingSlash(searchConsoleApiUri);
+        }
+
+        public GooglePropertiesPayload properties(UUID projectId, UUID playerId, UUID connectionId) {
+            analytics.requireProject(projectId, playerId);
+            AnalyticsSite site = sites.findByProjectId(projectId).orElse(null);
+            UUID chosen = connectionId != null ? connectionId : site == null ? null : site.getGoogleConnectionId();
+            if (chosen == null) throw notConnected();
+            if (!connections.existsByIdAndPlayerId(chosen, playerId)) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Google connection not found");
+            }
+            List<String> hosts = analytics.siteHosts(projectId);
+            String key = "properties|" + projectId + "|" + chosen + "|" + hosts;
+            PropertyListing listing = cached(key, PropertyListing.class);
+            if (listing == null) {
+                listing = listProperties(token(playerId, chosen), hosts);
+                // A partial listing is not cached, so a fixed permission or quota shows up on the next call.
+                if (listing.ga4Error() == null && listing.searchConsoleError() == null) store(key, listing);
+            }
+            return new GooglePropertiesPayload(chosen, listing.ga4(), listing.ga4Error(),
+                    listing.searchConsole(), listing.searchConsoleError(),
+                    site == null ? null : site.getGa4PropertyId(),
+                    site == null ? null : site.getSearchConsoleSiteUrl(), listing.fetchedAt());
+        }
+
+        public SearchReport search(UUID projectId, UUID playerId, String fromText, String toText, String tz,
+                                   String dimension, int limit) {
+            analytics.requireProject(projectId, playerId);
+            if (!SEARCH_DIMENSIONS.contains(dimension)) bad("Invalid dimension");
+            if (limit < 1 || limit > 1000) bad("Invalid limit");
+            DateRange range = dates(fromText, toText, tz);
+            Selection selection = selection(projectId, AnalyticsSite::getSearchConsoleSiteUrl);
+            String key = "search|" + projectId + "|" + selection + "|" + dimension + "|" + range + "|" + limit;
+            SearchReport report = cached(key, SearchReport.class);
+            if (report != null) return report;
+
+            String token = token(playerId, selection.connectionId());
+            String uri = searchConsoleApiUri + "/sites/" + encode(selection.property()) + "/searchAnalytics/query";
+            // The daily series yields both the totals and the last day Google has data for (it lags ~2 days).
+            List<SearchRow> daily = searchRows(call(token, uri, searchQuery(range, "date", 1000)));
+            double clicks = 0, impressions = 0, weightedPosition = 0;
+            for (SearchRow row : daily) {
+                clicks += row.clicks();
+                impressions += row.impressions();
+                weightedPosition += row.position() * row.impressions();
+            }
+            SearchRow totals = new SearchRow(null, clicks, impressions,
+                    impressions == 0 ? 0 : clicks / impressions, impressions == 0 ? 0 : weightedPosition / impressions);
+            String dataUntil = daily.stream().map(SearchRow::key).filter(Objects::nonNull)
+                    .max(Comparator.naturalOrder()).orElse(null);
+            List<SearchRow> rows = dimension.equals("date") ? daily
+                    : searchRows(call(token, uri, searchQuery(range, dimension, limit)));
+            report = new SearchReport(selection.property(), dimension, range.from().toString(), range.to().toString(),
+                    dataUntil, totals, rows, Instant.now());
+            store(key, report);
+            return report;
+        }
+
+        public Ga4Report ga4(UUID projectId, UUID playerId, String fromText, String toText, String tz,
+                             String report, int limit) {
+            analytics.requireProject(projectId, playerId);
+            if (!GA4_REPORTS.contains(report)) bad("Invalid report");
+            if (limit < 1 || limit > 250) bad("Invalid limit");
+            DateRange range = dates(fromText, toText, tz);
+            Selection selection = selection(projectId, AnalyticsSite::getGa4PropertyId);
+            String key = "ga4|" + projectId + "|" + selection + "|" + report + "|" + range + "|" + limit;
+            Ga4Report result = cached(key, Ga4Report.class);
+            if (result != null) return result;
+
+            String dimension = switch (report) {
+                case "pages" -> "pagePath";
+                case "sources" -> "sessionSource";
+                case "timeseries" -> "date";
+                default -> null;
+            };
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("dateRanges", List.of(Map.of("startDate", range.from().toString(),
+                    "endDate", range.to().toString())));
+            body.put("metrics", GA4_METRICS.stream().map(name -> Map.of("name", name)).toList());
+            if (dimension != null) {
+                body.put("dimensions", List.of(Map.of("name", dimension)));
+                body.put("metricAggregations", List.of("TOTAL"));
+                body.put("limit", report.equals("timeseries") ? 1000 : limit);
+                body.put("orderBys", List.of(report.equals("timeseries")
+                        ? Map.of("dimension", Map.of("dimensionName", "date"))
+                        : Map.of("metric", Map.of("metricName", report.equals("pages") ? "screenPageViews" : "sessions"),
+                                "desc", true)));
+            }
+            JsonNode response = call(token(playerId, selection.connectionId()),
+                    dataApiUri + "/properties/" + selection.property() + ":runReport", body);
+            List<String> headers = new ArrayList<>();
+            for (JsonNode header : response.path("metricHeaders")) headers.add(text(header.path("name")));
+            List<Ga4Row> rows = new ArrayList<>();
+            for (JsonNode row : response.path("rows")) {
+                rows.add(new Ga4Row(text(row.path("dimensionValues").path(0).path("value")),
+                        ga4Metrics(headers, row.path("metricValues"))));
+            }
+            Ga4Metrics totals;
+            if (dimension == null) {
+                totals = rows.isEmpty() ? NO_METRICS : rows.get(0).metrics();
+                rows = List.of();
+            } else {
+                JsonNode total = response.path("totals").path(0).path("metricValues");
+                totals = total.isArray() ? ga4Metrics(headers, total) : NO_METRICS;
+            }
+            if (report.equals("timeseries")) rows = dailySeries(range, rows);
+            result = new Ga4Report(selection.property(), report, range.from().toString(), range.to().toString(),
+                    totals, List.copyOf(rows), Instant.now());
+            store(key, result);
+            return result;
+        }
+
+        private PropertyListing listProperties(String token, List<String> hosts) {
+            List<Ga4PropertyOption> ga4 = List.of();
+            List<SearchConsoleSiteOption> searchConsole = List.of();
+            GoogleApiError ga4Error = null, searchConsoleError = null;
+            try {
+                ga4 = ga4Properties(token, hosts);
+            } catch (GoogleApiError error) {
+                ga4Error = error;
+            }
+            try {
+                searchConsole = searchConsoleSites(token, hosts);
+            } catch (GoogleApiError error) {
+                searchConsoleError = error;
+            }
+            // Only one declined or forbidden source is partial; both failing is an error for the whole request.
+            if (ga4Error != null && searchConsoleError != null) throw ga4Error;
+            return new PropertyListing(ga4, ga4Error == null ? null : ga4Error.getReason(),
+                    searchConsole, searchConsoleError == null ? null : searchConsoleError.getReason(), Instant.now());
+        }
+
+        private List<Ga4PropertyOption> ga4Properties(String token, List<String> hosts) {
+            List<Ga4PropertyOption> properties = new ArrayList<>();
+            String pageToken = null;
+            int pages = 0, lookups = 0;
+            do {
+                JsonNode body = call(token, adminApiUri + "/accountSummaries?pageSize=200"
+                        + (pageToken == null ? "" : "&pageToken=" + encode(pageToken)), null);
+                for (JsonNode account : body.path("accountSummaries")) {
+                    String accountName = text(account.path("displayName"));
+                    for (JsonNode property : account.path("propertySummaries")) {
+                        String name = text(property.path("property"));
+                        if (name == null || !name.matches("properties/\\d{1,20}")) continue;
+                        String id = name.substring("properties/".length());
+                        String displayName = text(property.path("displayName"));
+                        List<String> streams = List.of();
+                        if (!hosts.isEmpty() && lookups++ < MAX_STREAM_LOOKUPS) {
+                            try {
+                                streams = streamUris(token, id);
+                            } catch (GoogleApiError ignored) {
+                                // Streams only refine suggestions; the property stays selectable without them.
+                            }
+                        }
+                        boolean suggested = streams.stream().anyMatch(uri -> hostMatches(hostOf(uri), hosts))
+                                || (displayName != null && hosts.stream().anyMatch(host ->
+                                        displayName.toLowerCase(Locale.ROOT).contains(bareHost(host))));
+                        properties.add(new Ga4PropertyOption(id, displayName, accountName, streams, suggested));
+                    }
+                }
+                pageToken = text(body.path("nextPageToken"));
+            } while (pageToken != null && ++pages < MAX_LIST_PAGES);
+            properties.sort(Comparator.comparing((Ga4PropertyOption option) -> !option.suggested()));
+            return List.copyOf(properties);
+        }
+
+        private List<String> streamUris(String token, String propertyId) {
+            JsonNode body = call(token, adminApiUri + "/properties/" + propertyId + "/dataStreams?pageSize=50", null);
+            List<String> uris = new ArrayList<>();
+            for (JsonNode stream : body.path("dataStreams")) {
+                String uri = text(stream.path("webStreamData").path("defaultUri"));
+                if (uri != null) uris.add(uri);
+            }
+            return List.copyOf(uris);
+        }
+
+        private List<SearchConsoleSiteOption> searchConsoleSites(String token, List<String> hosts) {
+            JsonNode body = call(token, searchConsoleApiUri + "/sites", null);
+            List<SearchConsoleSiteOption> result = new ArrayList<>();
+            for (JsonNode entry : body.path("siteEntry")) {
+                String siteUrl = text(entry.path("siteUrl"));
+                String permission = text(entry.path("permissionLevel"));
+                if (siteUrl == null || "siteUnverifiedUser".equals(permission)) continue;
+                result.add(new SearchConsoleSiteOption(siteUrl, permission, searchConsoleMatches(siteUrl, hosts)));
+            }
+            result.sort(Comparator.comparing((SearchConsoleSiteOption option) -> !option.suggested()));
+            return List.copyOf(result);
+        }
+
+        private static Map<String, Object> searchQuery(DateRange range, String dimension, int limit) {
+            return Map.of("startDate", range.from().toString(), "endDate", range.to().toString(),
+                    "dimensions", List.of(dimension), "rowLimit", limit, "type", "web");
+        }
+
+        private static List<SearchRow> searchRows(JsonNode body) {
+            List<SearchRow> rows = new ArrayList<>();
+            for (JsonNode row : body.path("rows")) {
+                rows.add(new SearchRow(text(row.path("keys").path(0)), row.path("clicks").asDouble(),
+                        row.path("impressions").asDouble(), row.path("ctr").asDouble(), row.path("position").asDouble()));
+            }
+            return List.copyOf(rows);
+        }
+
+        private static Ga4Metrics ga4Metrics(List<String> headers, JsonNode values) {
+            Map<String, Double> metrics = new LinkedHashMap<>();
+            for (int i = 0; i < headers.size(); i++) {
+                String value = text(values.path(i).path("value"));
+                try {
+                    metrics.put(headers.get(i), value == null ? 0d : Double.parseDouble(value));
+                } catch (NumberFormatException exception) {
+                    metrics.put(headers.get(i), 0d);
+                }
+            }
+            return new Ga4Metrics(Math.round(metrics.getOrDefault("activeUsers", 0d)),
+                    Math.round(metrics.getOrDefault("sessions", 0d)),
+                    Math.round(metrics.getOrDefault("screenPageViews", 0d)),
+                    Math.round(metrics.getOrDefault("eventCount", 0d)),
+                    metrics.getOrDefault("bounceRate", 0d), metrics.getOrDefault("averageSessionDuration", 0d));
+        }
+
+        /** GA4 omits days without data and keys them {@code yyyyMMdd}: return every day of the range, ISO keyed. */
+        private static List<Ga4Row> dailySeries(DateRange range, List<Ga4Row> rows) {
+            Map<String, Ga4Metrics> byDay = new HashMap<>();
+            for (Ga4Row row : rows) {
+                try {
+                    byDay.put(LocalDate.parse(row.key(), DateTimeFormatter.BASIC_ISO_DATE).toString(), row.metrics());
+                } catch (RuntimeException ignored) {
+                    // GA4 always keys the date dimension yyyyMMdd; anything else is not a day of the series.
+                }
+            }
+            List<Ga4Row> series = new ArrayList<>();
+            for (LocalDate day = range.from(); !day.isAfter(range.to()); day = day.plusDays(1)) {
+                series.add(new Ga4Row(day.toString(), byDay.getOrDefault(day.toString(), NO_METRICS)));
+            }
+            return series;
+        }
+
+        private Selection selection(UUID projectId, java.util.function.Function<AnalyticsSite, String> property) {
+            AnalyticsSite site = sites.findByProjectId(projectId).orElse(null);
+            if (site == null || site.getGoogleConnectionId() == null) throw notConnected();
+            String value = property.apply(site);
+            if (value == null) throw new GoogleApiError(HttpStatus.CONFLICT, "google_property_not_selected");
+            return new Selection(site.getGoogleConnectionId(), value);
+        }
+
+        private String token(UUID playerId, UUID connectionId) {
+            try {
+                return tokens.accessToken(playerId, connectionId);
+            } catch (GoogleTokens.ReauthRequired exception) {
+                throw exception;
+            } catch (ResponseStatusException exception) {
+                // The connection was unlinked after it was chosen for the project.
+                if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) throw notConnected();
+                throw exception;
+            }
+        }
+
+        private JsonNode call(String token, String uri, Object body) {
+            HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(uri)).timeout(timeout)
+                    .header("Authorization", "Bearer " + token)
+                    .header("Accept", "application/json");
+            if (body == null) {
+                request.GET();
+            } else {
+                request.header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body)));
+            }
+            HttpResponse<String> response;
+            try {
+                response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw unavailable();
+            } catch (IOException exception) {
+                throw unavailable();
+            }
+            JsonNode node;
+            try {
+                node = json.readTree(response.body());
+            } catch (RuntimeException exception) {
+                node = null;
+            }
+            if (node != null && !node.isObject()) node = null;
+            if (response.statusCode() / 100 == 2) {
+                if (node == null) throw unavailable();
+                return node;
+            }
+            throw error(response.statusCode(), node);
+        }
+
+        /** Google's error bodies are never forwarded: they are reduced to one of the documented codes. */
+        private static ResponseStatusException error(int status, JsonNode body) {
+            Set<String> reasons = new HashSet<>();
+            String rpcStatus = null;
+            JsonNode error = body == null ? null : body.path("error");
+            if (error != null && error.isObject()) {
+                rpcStatus = text(error.path("status"));
+                for (JsonNode item : error.path("errors")) reasons.add(text(item.path("reason")));
+                for (JsonNode detail : error.path("details")) reasons.add(text(detail.path("reason")));
+            }
+            if (status == 401 || reasons.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT")) {
+                return new GoogleApiError(HttpStatus.CONFLICT, "google_reauth_required");
+            }
+            if (status == 429 || "RESOURCE_EXHAUSTED".equals(rpcStatus)
+                    || reasons.stream().anyMatch(QUOTA_REASONS::contains)) {
+                return new GoogleApiError(HttpStatus.TOO_MANY_REQUESTS, "google_quota_exceeded");
+            }
+            if (reasons.contains("SERVICE_DISABLED") || reasons.contains("accessNotConfigured")) {
+                return new GoogleApiError(HttpStatus.SERVICE_UNAVAILABLE, "google_api_disabled");
+            }
+            if (status == 403 || status == 404) {
+                return new GoogleApiError(HttpStatus.FORBIDDEN, "google_permission_denied");
+            }
+            if (status == 400) {
+                return new GoogleApiError(HttpStatus.BAD_REQUEST, "google_bad_request");
+            }
+            return unavailable();
+        }
+
+        private static ResponseStatusException unavailable() {
+            return new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Google is unavailable. Please try again");
+        }
+
+        private static GoogleApiError notConnected() {
+            return new GoogleApiError(HttpStatus.CONFLICT, "google_not_connected");
+        }
+
+        private static DateRange dates(String fromText, String toText, String tz) {
+            try {
+                ZoneId zone = ZoneId.of(tz);
+                LocalDate from = fromText.length() == 10 ? LocalDate.parse(fromText)
+                        : Instant.parse(fromText).atZone(zone).toLocalDate();
+                // Instants are an exclusive end, like the tracker reports; dates are inclusive.
+                LocalDate to = toText.length() == 10 ? LocalDate.parse(toText)
+                        : Instant.parse(toText).minusNanos(1).atZone(zone).toLocalDate();
+                if (to.isBefore(from) || ChronoUnit.DAYS.between(from, to) > 500) throw new IllegalArgumentException();
+                return new DateRange(from, to);
+            } catch (RuntimeException exception) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid date range or timezone", exception);
+            }
+        }
+
+        private static boolean searchConsoleMatches(String siteUrl, List<String> hosts) {
+            if (siteUrl.startsWith("sc-domain:")) {
+                String domain = siteUrl.substring("sc-domain:".length()).toLowerCase(Locale.ROOT);
+                return hosts.stream().anyMatch(host -> host.equals(domain) || host.endsWith("." + domain));
+            }
+            return hostMatches(hostOf(siteUrl), hosts);
+        }
+
+        private static boolean hostMatches(String host, List<String> hosts) {
+            if (host == null) return false;
+            String bare = bareHost(host);
+            return hosts.stream().map(AnalyticsGoogleService::bareHost).anyMatch(bare::equals);
+        }
+
+        private static String bareHost(String host) {
+            String lower = host.toLowerCase(Locale.ROOT);
+            return lower.startsWith("www.") ? lower.substring(4) : lower;
+        }
+
+        private static String hostOf(String uri) {
+            try {
+                return URI.create(uri.strip()).getHost();
+            } catch (IllegalArgumentException exception) {
+                return null;
+            }
+        }
+
+        private static String text(JsonNode node) {
+            if (node == null || !node.isTextual()) return null;
+            String value = node.asString();
+            return value.isBlank() ? null : value;
+        }
+
+        private static String encode(String value) {
+            return URLEncoder.encode(value, StandardCharsets.UTF_8);
+        }
+
+        private static void bad(String message) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+        }
+
+        private <T> T cached(String key, Class<T> type) {
+            synchronized (cache) {
+                CachedReport entry = cache.get(key);
+                if (entry == null) return null;
+                if (entry.expiresAt().isBefore(Instant.now())) {
+                    cache.remove(key);
+                    return null;
+                }
+                return type.isInstance(entry.value()) ? type.cast(entry.value()) : null;
+            }
+        }
+
+        private void store(String key, Object value) {
+            synchronized (cache) {
+                cache.put(key, new CachedReport(value, Instant.now().plus(CACHE_TTL)));
+            }
+        }
+
+        @Scheduled(fixedDelayString = "${app.analytics.memory-cleanup-ms:300000}")
+        public void purgeExpiredReports() {
+            Instant now = Instant.now();
+            synchronized (cache) {
+                cache.values().removeIf(entry -> entry.expiresAt().isBefore(now));
+            }
+        }
+
+        private record DateRange(LocalDate from, LocalDate to) { }
+        private record Selection(UUID connectionId, String property) { }
+        private record CachedReport(Object value, Instant expiresAt) { }
+        private record PropertyListing(List<Ga4PropertyOption> ga4, String ga4Error,
+                                       List<SearchConsoleSiteOption> searchConsole, String searchConsoleError,
+                                       Instant fetchedAt) { }
+    }
+
+    /** A Google failure reduced to a stable code in the API error {@code message}. */
+    static final class GoogleApiError extends ResponseStatusException {
+        GoogleApiError(HttpStatus status, String code) {
+            super(status, code);
+        }
+    }
+
+    @Getter @Immutable @NoArgsConstructor
+    @Entity(name = "AnalyticsGoogleConnection")
+    @Table(name = "google_connections")
+    public static class AnalyticsGoogleConnection {
+        @Id @Column(name = "id") private UUID id;
+        @Column(name = "player_id") private UUID playerId;
+    }
+
+    public interface AnalyticsGoogleConnectionRepository extends JpaRepository<AnalyticsGoogleConnection, UUID> {
+        boolean existsByIdAndPlayerId(UUID id, UUID playerId);
     }
 
     @Getter @Setter @NoArgsConstructor

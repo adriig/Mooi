@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 051-analytics-site-google-connection
+      author: mooi
+      changes:
+        # Unlinking a Google account detaches it from every analytics site instead of leaving a dangling id.
+        - sql:
+            sql: >-
+              update analytics_sites set google_connection_id = null
+              where google_connection_id is not null
+              and google_connection_id not in (select id from google_connections)
+        - addForeignKeyConstraint:
+            constraintName: fk_analytics_sites_google_connection
+            baseTableName: analytics_sites
+            baseColumnNames: google_connection_id
+            referencedTableName: google_connections
+            referencedColumnNames: id
+            onDelete: SET NULL

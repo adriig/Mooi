@@ -50,3 +50,34 @@ accepts an already-revoked token; transient revocation failures retain the row f
 
 Migration `049-create-google-connections.yaml` is registered in the master changelog; coordinate
 its numbering with the separate analytics-site migration at merge time.
+
+## Project reporting
+
+`AnalyticsFeature` reads GA4 and Search Console for a project through the connection chosen on
+its analytics site. Unlinking a connection clears it from every site (`051` foreign key,
+`ON DELETE SET NULL`). All routes require the project owner; unowned projects and foreign
+connections return 404.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| PATCH | `/me/projects/{projectId}/analytics/site` | `googleConnectionId`, `ga4PropertyId` (numeric or `properties/N`), `searchConsoleSiteUrl` (URL prefix or `sc-domain:`); empty string clears |
+| GET | `/me/projects/{projectId}/analytics/google/properties?connectionId=` | GA4 properties (`accountSummaries` + web stream URIs) and Search Console sites, `suggested` when they match production target hosts; defaults to the site's connection |
+| GET | `/me/projects/{projectId}/analytics/search?from&to&tz&dimension=query\|page\|country\|device\|date&limit` | Search Analytics rows `{key, clicks, impressions, ctr, position}`, `totals` and `dataUntil` (last day with data; Search Console lags ~2 days) |
+| GET | `/me/projects/{projectId}/analytics/ga4?from&to&tz&report=summary\|pages\|sources\|timeseries&limit` | GA4 `runReport` rows and totals: `activeUsers`, `sessions`, `screenPageViews`, `eventCount`, `bounceRate` (0..1), `averageSessionDuration` (seconds) |
+
+`from`/`to` accept `YYYY-MM-DD` (inclusive) or ISO instants (exclusive end, resolved in `tz`).
+Responses are cached in memory per project, connection, property and parameters for 15 minutes
+(bounded to 512 entries); `fetchedAt` tells when Google was read. A properties listing where only
+one source fails returns the other with `ga4Error` or `searchConsoleError`.
+
+Errors carry a stable code in the API error `message`:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 409 | `google_not_connected` | No connection chosen for the project, or it was unlinked |
+| 409 | `google_property_not_selected` | The GA4 property or Search Console site is not chosen yet |
+| 409 | `google_reauth_required` | The grant was revoked, expired or lacks the reporting scope: link again |
+| 403 | `google_permission_denied` | The Google account cannot read that property or site |
+| 429 | `google_quota_exceeded` | Google API quota or rate limit reached |
+| 503 | `google_api_disabled` | The API is not enabled on the instance's Google Cloud project |
+| 400 | `google_bad_request` | Google rejected the report request |

@@ -99,3 +99,5 @@ databaseChangeLog:
       file: db/changelog/changes/049-create-google-connections.yaml
   - include:
       file: db/changelog/changes/050-analytics-geo-visibility.yaml
+  - include:
+      file: db/changelog/changes/051-analytics-site-google-connection.yaml
