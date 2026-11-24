@@ -488,16 +488,22 @@ def display_name(name: Any, model_id: str) -> str:
     return _NAMESPACE.sub("", text.strip()) or text.strip()
 
 
-def catalog(session: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+def catalog(session: Mapping[str, Any], mode: str) -> tuple[list[dict[str, Any]], str | None]:
     option = model_option(session)
     if option is None:
         return [], None
+    namespace = {
+        API_KEY_MODE: "opencode/",
+        ACCOUNT_MODE: "opencode-go/",
+    }.get(mode)
+    if namespace is None:
+        raise OpenCodeError("the OpenCode credential is invalid", f"unsupported mode {mode}")
     entries = option.get("options")
     models = [{"id": entry["value"], "label": display_name(entry.get("name"), entry["value"]), "efforts": [],
                **({"description": entry["description"]} if entry.get("description") else {})}
               for entry in entries or [] if isinstance(entry, dict)
               and isinstance(entry.get("value"), str)
-              and entry["value"].strip()]
+              and entry["value"].startswith(namespace)]
     # Models of the Go subscription and of Zen can share a display name: keep them apart.
     labels = [model["label"] for model in models]
     for model in models:
@@ -530,7 +536,7 @@ async def models(credential: Credential, binary: str, scratch: Path,
     try:
         await acp.start()
         session = await acp.request("session/new", {"cwd": str(workspace), "mcpServers": []})
-        result, default = catalog(session or {})
+        result, default = catalog(session or {}, credential.mode)
     finally:
         await acp.close()
     if not result:
