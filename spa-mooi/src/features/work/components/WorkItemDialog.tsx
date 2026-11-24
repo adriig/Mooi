@@ -10,10 +10,12 @@ import {
 } from '@/features/work/api/workApi';
 import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
+import { CommitLink } from '@/features/work/components/CommitLink';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
 import { taskStyle } from '@/features/work/lib/taskCategories';
 import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
+import { entryDeployment } from '@/features/work/lib/workEntries';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
 import { ITEM_STATUS, TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
@@ -22,11 +24,14 @@ import { Badge } from '@/shared/components/Badge';
 import { Button } from '@/shared/components/Button';
 import { Modal } from '@/shared/components/Modal';
 import { cn } from '@/shared/utils/cn';
+import { formatRelativeTime } from '@/shared/utils/formatRelativeTime';
 
 const MarkdownContent = lazy(() => import('@/features/sessions/components/chat/MarkdownContent'));
 
 interface WorkItemDialogProps {
   projectId: string;
+  /** `owner/name` on GitHub, for the commit links. */
+  repository?: string | null;
   entry: WorkEntry;
   /** Every feature of the project, to pick the one this feature waits for. */
   features: WorkItem[];
@@ -40,7 +45,7 @@ interface WorkItemDialogProps {
  * task's settings, and the control that starts it. Defects and debt show their GitHub issue; the
  * item that runs one is created the first time its settings are opened.
  */
-export const WorkItemDialog = ({ projectId, entry, features, connections, work, onClose }: WorkItemDialogProps) => {
+export const WorkItemDialog = ({ projectId, repository, entry, features, connections, work, onClose }: WorkItemDialogProps) => {
   const { run, busy, actionError } = work;
   const item = entry.item;
   const [openTask, setOpenTask] = useState<string | null>(null);
@@ -53,6 +58,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
   const tasks = item?.tasks ?? [];
   const done = tasks.filter((task) => task.status === 'done').length;
   const status = item ? ITEM_STATUS[item.status] : entry.issue?.state === 'closed' ? ITEM_STATUS.done : ITEM_STATUS.planned;
+  const deployment = entryDeployment(entry);
   const hasReassignableTasks = tasks.some((task) =>
     task.status === 'planned' || task.status === 'queued'
     || (task.status === 'attention' && task.sessionId === null));
@@ -82,6 +88,18 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={kind.tone} icon={kind.icon}>{kind.label}</Badge>
           <Badge tone={status.tone}>{status.label}</Badge>
+          {deployment ? (
+            <Badge tone={deployment.state === 'deployed' ? 'success' : 'neutral'}>
+              {deployment.state === 'deployed' && deployment.version ? `Deployed ${deployment.version}`
+                : deployment.state === 'unknown' ? 'Unknown version' : 'Pending to deploy'}
+            </Badge>
+          ) : null}
+          {deployment?.state === 'deployed' && deployment.deployedAt ? (
+            <span className="text-xs text-ink-subtle">{formatRelativeTime(deployment.deployedAt)}</span>
+          ) : null}
+          {deployment?.state === 'deployed' && deployment.inCurrentRelease === false ? (
+            <Badge tone="warning">Not in current release</Badge>
+          ) : null}
           {entry.issue?.htmlUrl ? (
             <a href={entry.issue.htmlUrl} target="_blank" rel="noreferrer"
               className="inline-flex items-center gap-1 text-xs font-semibold text-ink-muted hover:text-ink">
@@ -204,6 +222,14 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
                           Blocked{blocker.category ? ` · ${QA_BLOCKER_LABEL[blocker.category]}` : ''}
                         </Badge>
                       ) : <Badge tone={state.tone}>{state.label}</Badge>}
+                      {task.mergeSha ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <CommitLink repository={repository} sha={task.mergeSha} />
+                          {task.deployedVersion ? <Badge tone="success">{task.deployedVersion}</Badge>
+                            : deployment?.state === 'unknown' ? <Badge tone="neutral">Unknown</Badge>
+                              : <Badge tone="neutral">Pending</Badge>}
+                        </span>
+                      ) : null}
                       {findings.length > 0 ? (
                         <Badge tone="danger">{findings.length} finding{findings.length === 1 ? '' : 's'}</Badge>
                       ) : null}

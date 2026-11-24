@@ -66,6 +66,9 @@ export interface WorkTask {
   findingId?: string | null;
   /** The commit that merged this task into the default branch, when available. */
   mergeSha?: string | null;
+  /** The first production release containing the merge commit; null until deployed. */
+  deployedVersion?: string | null;
+  deployedAt?: string | null;
   /** Task-scoped handoff; absent on legacy work items. */
   qaHandoff?: QaTaskHandoff | null;
   dependsOn: string[];

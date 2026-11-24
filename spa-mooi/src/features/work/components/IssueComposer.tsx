@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Plus } from 'lucide-react';
+import type { Project } from '@/features/projects/types/Project';
 import { issueDraft } from '@/features/work/lib/issueDraft';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
 import { Button } from '@/shared/components/Button';
@@ -9,6 +10,9 @@ import { useAuthStore } from '@/stores/authStore';
 interface IssueComposerProps {
   disabled: boolean;
   projectId: string;
+  /** The projects an issue can be opened on; a picker shows when there are several. */
+  projects: Project[];
+  onProjectChange: (projectId: string) => void;
   onCreate: (draft: { kind: 'defect' | 'debt'; title: string; body: string }) => Promise<unknown>;
 }
 
@@ -16,7 +20,7 @@ interface IssueComposerProps {
  * Opens a defect or debt issue on GitHub straight from To-dos. Features are not created here: they
  * are designed by a session agent, which breaks them into tasks.
  */
-export const IssueComposer = ({ disabled, projectId, onCreate }: IssueComposerProps) => {
+export const IssueComposer = ({ disabled, projectId, projects, onProjectChange, onCreate }: IssueComposerProps) => {
   const playerId = useAuthStore((state) => state.player?.id);
   const [draft, setDraft] = useState(() => issueDraft.read(playerId, projectId));
   useEffect(() => setDraft(issueDraft.read(playerId, projectId)), [playerId, projectId]);
@@ -43,6 +47,12 @@ export const IssueComposer = ({ disabled, projectId, onCreate }: IssueComposerPr
 
   return (
     <form onSubmit={(event) => { void submit(event); }} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      {projects.length > 1 ? (
+        <select value={projectId} onChange={(event) => onProjectChange(event.target.value)} aria-label="Project" disabled={disabled || sending}
+          className="h-11 min-w-0 shrink-0 rounded-control border border-line bg-surface px-3 text-[13px] font-medium text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand sm:max-w-48">
+          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        </select>
+      ) : null}
       <div role="group" aria-label="Kind" className="inline-flex shrink-0 gap-0.5 rounded-control border border-line bg-surface-2 p-0.5">
         {(['defect', 'debt'] as const).map((id) => {
           const { label, icon: Icon } = WORK_KINDS[id];

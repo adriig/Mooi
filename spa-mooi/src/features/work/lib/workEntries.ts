@@ -1,40 +1,67 @@
+import type { WorkColumn } from '@/features/work/types/WorkColumn';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
-import type { WorkEntryStatus } from '@/features/work/types/WorkEntryStatus';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
-import type { WorkItem } from '@/features/work/types/WorkItem';
+import type { WorkItem, WorkItemDeployment } from '@/features/work/types/WorkItem';
 
-const itemStatus = (item: WorkItem): WorkEntryStatus => {
-  if (item.status === 'done') return 'done';
-  if (item.status === 'running' || item.status === 'paused') {
-    return 'inProgress';
+export const WORK_COLUMNS: { id: WorkColumn; label: string }[] = [
+  { id: 'defined', label: 'Defined' },
+  { id: 'inProgress', label: 'In progress' },
+  { id: 'pendingDeploy', label: 'Pending to deploy' },
+  { id: 'deployed', label: 'Deployed' },
+];
+
+const UNKNOWN: WorkItemDeployment = { state: 'unknown', version: null, deployedAt: null, inCurrentRelease: null };
+
+const itemColumn = (item: WorkItem): WorkColumn => {
+  if (item.status === 'running' || item.status === 'paused') return 'inProgress';
+  if (item.status === 'done') {
+    const state = item.deployment?.state;
+    return state === 'deployed' || state === 'unknown' ? 'deployed' : 'pendingDeploy';
   }
-  return 'open';
+  return 'defined';
 };
 
-const ORDER: Record<WorkEntryStatus, number> = { inProgress: 0, open: 1, done: 2 };
+/** The deployment an entry shows: a closed issue without a Mooi item is a legacy, unknown one. */
+export const entryDeployment = (entry: WorkEntry): WorkItemDeployment | null =>
+  entry.item ? entry.item.deployment ?? null : entry.issue?.state === 'closed' ? UNKNOWN : null;
 
-/**
- * The To-dos rows: every feature, and every defect and debt issue joined with the item that runs it.
- * Work under way comes first, then what is to do, newest on top, and done at the bottom.
- */
+/** The To-dos cards: every feature, and every defect and debt issue joined with the item that runs it. */
 export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[] => {
   const byIssue = new Map(items.filter((item) => item.issueNumber !== null).map((item) => [item.issueNumber, item]));
   const features: WorkEntry[] = items.filter((item) => item.kind === 'feature').map((item) => ({
-    key: item.id, kind: 'feature', title: item.title, status: itemStatus(item), item, issue: null,
+    key: item.id, kind: 'feature', title: item.title, column: itemColumn(item), item, issue: null,
   }));
   const tracked: WorkEntry[] = issues.map((issue) => {
     const item = byIssue.get(issue.number) ?? null;
-    const status: WorkEntryStatus = item ? itemStatus(item) : issue.state === 'closed' ? 'done' : 'open';
-    return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, status, item, issue };
+    const column: WorkColumn = item ? itemColumn(item) : issue.state === 'closed' ? 'deployed' : 'defined';
+    return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, column, item, issue };
   });
-  const rank = (entry: WorkEntry) => Date.parse(entry.item?.createdAt ?? entry.issue?.createdAt ?? '') || 0;
-  return [...features, ...tracked].sort((a, b) => ORDER[a.status] - ORDER[b.status] || rank(b) - rank(a));
+  return [...features, ...tracked];
 };
 
-export type WorkCounts = Record<WorkEntryStatus, number>;
+const time = (value: string | null | undefined): number => Date.parse(value ?? '') || 0;
+const needsPlayer = (entry: WorkEntry): boolean =>
+  entry.item?.tasks.some((task) => task.status === 'attention' || task.status === 'review') ?? false;
+const finished = (entry: WorkEntry): number => time(entry.item?.finishedAt ?? entry.issue?.closedAt);
 
-export const countWork = (entries: WorkEntry[]): WorkCounts => {
-  const counts: WorkCounts = { open: 0, inProgress: 0, done: 0 };
-  for (const entry of entries) counts[entry.status] += 1;
-  return counts;
+/** Each column's order: newest first; items needing the player lead in progress; unknown versions trail. */
+export const sortColumn = (column: WorkColumn, entries: WorkEntry[]): WorkEntry[] => {
+  const sorted = [...entries];
+  switch (column) {
+    case 'defined':
+      return sorted.sort((a, b) => time(b.item?.createdAt ?? b.issue?.createdAt) - time(a.item?.createdAt ?? a.issue?.createdAt));
+    case 'inProgress':
+      return sorted.sort((a, b) => Number(needsPlayer(b)) - Number(needsPlayer(a))
+        || time(b.item?.startedAt) - time(a.item?.startedAt));
+    case 'pendingDeploy':
+      return sorted.sort((a, b) => finished(b) - finished(a));
+    case 'deployed':
+      return sorted.sort((a, b) => {
+        const known = (entry: WorkEntry) => entryDeployment(entry)?.state === 'deployed';
+        if (known(a) !== known(b)) return known(a) ? -1 : 1;
+        return known(a)
+          ? time(entryDeployment(b)?.deployedAt) - time(entryDeployment(a)?.deployedAt)
+          : finished(b) - finished(a);
+      });
+  }
 };

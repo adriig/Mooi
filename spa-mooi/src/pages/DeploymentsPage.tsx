@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { FolderGit2, History, LoaderCircle, Rocket } from 'lucide-react';
 import { deploymentPath } from '@/app/paths';
