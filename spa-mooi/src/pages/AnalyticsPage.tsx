@@ -7,6 +7,7 @@ import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections
 import { AnalyticsPanel } from '@/features/analytics/components/AnalyticsPanel';
 import { lastAnalyticsProject } from '@/features/analytics/lib/lastAnalyticsProject';
 import { useProjects } from '@/features/projects/hooks/useProjects';
+import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
 import { NewSessionDialog } from '@/features/sessions/components/NewSessionDialog';
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
 import { Button } from '@/shared/components/Button';
@@ -24,8 +25,10 @@ export const AnalyticsPage = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { projects, status, error, reload } = useProjects();
+  const { projectId: globalProjectId } = useSelectedProject();
   const webProjects = useMemo(() => projects.filter((project) => project.webApplication), [projects]);
   const project = webProjects.find((item) => item.id === projectId);
+  const globalProject = projects.find((item) => item.id === globalProjectId);
   const { busy, actionError, create, clearActionError } = useProjectSessions(project?.id);
   const { connections, reload: reloadConnections } = useAgentConnections();
   const [fixRequest, setFixRequest] = useState<string | null>(null);
@@ -61,6 +64,18 @@ export const AnalyticsPage = () => {
     </div>
   );
 
+  if (!project && !projectId && status === 'ready' && globalProject) {
+    if (globalProject.webApplication) {
+      return <Navigate to={{ pathname: analyticsPath(globalProject.id), search: searchParams.toString() }} replace />;
+    }
+    return shell(
+      <EmptyState icon={ChartLine} title="Analytics is unavailable for this project"
+        description={`${globalProject.fullName} is not configured as a web application. Choose a web application in the project selector to view production analytics.`}>
+        <Link to={ROUTES.analytics} className={buttonStyles('secondary', 'md')}><FolderGit2 className="size-4" />Choose another project</Link>
+      </EmptyState>,
+    );
+  }
+
   if (!project) {
     if ((status === 'loading' || status === 'idle') && projects.length === 0) {
       return shell(<Card className="h-44 animate-pulse-soft" />);
@@ -85,7 +100,13 @@ export const AnalyticsPage = () => {
     }
     // No project chosen, or one that is gone or no longer a web app: open the remembered one or the first.
     const remembered = lastAnalyticsProject.read();
-    const fallback = webProjects.find((item) => item.id === remembered) ?? webProjects[0];
+    const fallback = globalProject && !globalProject.webApplication
+      ? null
+      : webProjects.find((item) => item.id === remembered) ?? webProjects[0];
+    if (!fallback) {
+      return shell(<EmptyState icon={ChartLine} title="No web applications available"
+        description="Choose a web application in the project selector to view production analytics." />);
+    }
     return <Navigate to={{ pathname: analyticsPath(fallback.id), search: searchParams.toString() }} replace />;
   }
 

@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { backupPath } from '@/app/paths';
 import { DatabaseBackup, FolderGit2, History, LoaderCircle } from 'lucide-react';
 import { BackupDetailDialog } from '@/features/backups/components/BackupDetailDialog';
 import { BackupHistoryList } from '@/features/backups/components/BackupHistoryList';
@@ -7,6 +8,7 @@ import { BackupProjectCard } from '@/features/backups/components/BackupProjectCa
 import { useBackups } from '@/features/backups/hooks/useBackups';
 import type { Backup } from '@/features/backups/types/Backup';
 import { useProjects } from '@/features/projects/hooks/useProjects';
+import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
@@ -21,11 +23,19 @@ const HISTORY_TAB = 'history';
  */
 export const BackupsPage = () => {
   const { projects, status, error: projectsError, reload: reloadProjects } = useProjects();
+  const { projectId } = useSelectedProject();
+  const navigate = useNavigate();
   const history = useBackups();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Backup | null>(null);
   const tab = searchParams.get('tab') === HISTORY_TAB ? HISTORY_TAB : 'projects';
+
+  useEffect(() => {
+    if (projectId && status === 'ready' && projects.some((project) => project.id === projectId) && tab === 'projects') {
+      navigate({ pathname: backupPath(projectId), search: searchParams.toString() }, { replace: true });
+    }
+  }, [projectId, tab, navigate, searchParams, status, projects]);
 
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const byProject = useMemo(() => {

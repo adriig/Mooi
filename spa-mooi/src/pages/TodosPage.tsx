@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ChevronsDownUp, ChevronsUpDown, FolderGit2 } from 'lucide-react';
 import { useProjects } from '@/features/projects/hooks/useProjects';
+import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { ProjectWorkSection } from '@/features/work/components/ProjectWorkSection';
 import { WorkProjectFilter } from '@/features/work/components/WorkProjectFilter';
@@ -29,6 +30,7 @@ const Stat = ({ label, value }: { label: string; value: number }) => (
  */
 export const TodosPage = () => {
   const { projects, status, error, reload } = useProjects();
+  const { projectId } = useSelectedProject();
   const work = useLiveStore((live) => live.work);
   const { connections } = useAgentConnections();
   const playerId = useAuthStore((state) => state.player?.id);
@@ -36,7 +38,7 @@ export const TodosPage = () => {
   const select = useTodoProjectSelectionStore((state) => state.select);
   const [expanded, setExpanded] = useState(() => new Set(expandedWorkProjects.read()));
 
-  const selectedIds = useMemo(() => new Set(selection ?? projects.map((project) => project.id)), [selection, projects]);
+  const selectedIds = useMemo(() => new Set(projectId ? [projectId] : selection ?? projects.map((project) => project.id)), [projectId, selection, projects]);
   const visibleProjects = useMemo(() => projects.filter((project) => selectedIds.has(project.id)), [projects, selectedIds]);
 
   // Projects read so far: each one is read once its row nears the screen.
@@ -68,7 +70,7 @@ export const TodosPage = () => {
           <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Workspace</p>
           <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">To-dos</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-muted">
-            Features, defects and improvements of every project. Expand a project to open its work and start it.
+            {projectId ? 'Features, defects and improvements for this project.' : 'Features, defects and improvements of every project. Expand a project to open its work and start it.'}
           </p>
         </div>
         <dl className="flex gap-6">
@@ -84,7 +86,7 @@ export const TodosPage = () => {
         </div>
       ) : null}
 
-      {projects.length > 0 ? (
+      {projects.length > 0 && !projectId ? (
         <div className="flex flex-wrap items-center gap-2">
           <WorkProjectFilter projects={projects} selectedIds={selectedIds}
             onChange={(ids) => { if (playerId) select(playerId, ids); }} />

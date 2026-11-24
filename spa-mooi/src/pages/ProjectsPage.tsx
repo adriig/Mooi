@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react';
+import { Navigate } from 'react-router-dom';
+import { projectPath } from '@/app/paths';
 import { FolderGit2, Plus, RefreshCw, Search } from 'lucide-react';
 import { GithubGateCard } from '@/features/github/components/GithubGateCard';
 import { useGithubLinked } from '@/features/github/hooks/useGithubLinked';
@@ -7,6 +9,7 @@ import { CreateProjectDialog } from '@/features/projects/components/CreateProjec
 import { ProjectGrid } from '@/features/projects/components/ProjectGrid';
 import { ProjectsHeader } from '@/features/projects/components/ProjectsHeader';
 import { useProjects } from '@/features/projects/hooks/useProjects';
+import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
 import { Button } from '@/shared/components/Button';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Eyebrow } from '@/shared/components/Eyebrow';
@@ -31,9 +34,14 @@ const Skeleton = () => (
 export const ProjectsPage = () => {
   const { linked, resolved } = useGithubLinked();
   const { projects, status, error, reload } = useProjects();
+  const { projectId } = useSelectedProject();
   const [query, setQuery] = useState('');
   const [isDialogOpen, setDialogOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+
+  if (projectId && status === 'ready' && projects.some((project) => project.id === projectId)) {
+    return <Navigate to={projectPath(projectId)} replace />;
+  }
 
   const visibleProjects = useMemo(() => {
     const needle = query.trim().toLowerCase();

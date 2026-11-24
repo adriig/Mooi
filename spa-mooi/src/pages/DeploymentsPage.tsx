@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { FolderGit2, History, LoaderCircle, Rocket } from 'lucide-react';
 import { deploymentPath } from '@/app/paths';
 import { useProjects } from '@/features/projects/hooks/useProjects';
+import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
 import { deleteProductionDeployment } from '@/features/production/api/productionApi';
 import { ProductionDeploymentDetailDialog } from '@/features/production/components/ProductionDeploymentDetailDialog';
 import { ProductionHistoryList } from '@/features/production/components/ProductionHistoryList';
@@ -24,11 +25,18 @@ const HISTORY_TAB = 'history';
 export const DeploymentsPage = () => {
   const navigate = useNavigate();
   const { projects, status, error: projectsError, reload: reloadProjects } = useProjects();
+  const { projectId } = useSelectedProject();
   const history = useProductionDeployments(true);
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<ProductionDeployment | null>(null);
   const tab = searchParams.get('tab') === HISTORY_TAB ? HISTORY_TAB : 'projects';
+
+  useEffect(() => {
+    if (projectId && status === 'ready' && projects.some((project) => project.id === projectId) && tab === 'projects') {
+      navigate({ pathname: deploymentPath(projectId), search: searchParams.toString() }, { replace: true });
+    }
+  }, [projectId, tab, navigate, searchParams, status, projects]);
 
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const latestByProject = useMemo(() => {
