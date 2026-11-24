@@ -22,9 +22,6 @@ interface AppSidebarProps {
   onNavigate?: () => void;
 }
 
-/** Quiet projects shown at most; projects with open conversations are always listed on top. */
-const SIDEBAR_PROJECTS = 6;
-
 export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
   const player = useAuthStore((state) => state.player);
   const projects = useProjectsStore((state) => state.projects);
@@ -37,7 +34,7 @@ export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
   );
   const links = appNavLinks.filter((link) => !link.adminOnly || player?.role === 'admin');
   const sidebarProjects = useMemo(
-    () => recentProjects(projects, sessions, SIDEBAR_PROJECTS, work),
+    () => recentProjects(projects, sessions, work),
     [projects, sessions, work],
   );
 
@@ -86,7 +83,7 @@ export const AppSidebar = ({ className, onNavigate }: AppSidebarProps) => {
           player has not created yet. */}
       {sidebarProjects.length > 0 ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-7 pb-3">
-          <Eyebrow className="px-2.5">Recent projects</Eyebrow>
+          <Eyebrow className="px-2.5">Recent sessions</Eyebrow>
           <div className="mt-2 flex flex-col gap-0.5">
             {sidebarProjects.map((entry) => (
               <AppRecentProject key={entry.project.id} entry={entry} onNavigate={onNavigate} />
