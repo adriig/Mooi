@@ -204,7 +204,8 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
           onClose={() => setOpenTaskId(null)}>
           <TaskEditor projectId={projectId} task={openTask} tasks={tasks} connections={connections} busy={busy}
             onSave={(update) => run(() => updateWorkTask(projectId, feature.id, openTask.id, update))}
-            onDelete={() => { void run(() => deleteWorkTask(projectId, feature.id, openTask.id)); setOpenTaskId(null); }} />
+            onDelete={() => { void run(() => deleteWorkTask(projectId, feature.id, openTask.id)); setOpenTaskId(null); }}
+            onOpenTask={(target) => setOpenTaskId(target.id)} />
         </Modal>
       ) : null}
       <Modal open={confirmReassign} title="Recalculate task assignments"

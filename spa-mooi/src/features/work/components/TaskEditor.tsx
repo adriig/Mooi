@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowUpRight, Trash2 } from 'lucide-react';
 import { sessionPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
+import { QaTaskDetails } from '@/features/work/components/QaTaskDetails';
 import { TaskAssignmentFields } from '@/features/work/components/TaskAssignmentFields';
 import { EDITABLE_CATEGORIES, TASK_CATEGORIES } from '@/features/work/lib/taskCategories';
 import { TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
@@ -22,6 +23,7 @@ interface TaskEditorProps {
   busy: boolean;
   onSave: (update: WorkTaskUpdate) => Promise<unknown>;
   onDelete: () => void;
+  onOpenTask: (task: WorkTask) => void;
 }
 
 const input = 'w-full min-w-0 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-70';
@@ -49,7 +51,7 @@ const dependants = (taskId: string, tasks: WorkTask[]): Set<string> => {
  * Everything about one task, as the orchestrator prefilled it: what to do, how to check it, who
  * runs it and what it waits for. Editable until its session starts; afterwards it shows how it went.
  */
-export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete }: TaskEditorProps) => {
+export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete, onOpenTask }: TaskEditorProps) => {
   const editable = taskEditable(task);
   const qa = task.qaOf !== null;
   const [title, setTitle] = useState(task.title);
@@ -96,12 +98,13 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
           </Link>
         ) : null}
       </div>
-      {task.report ? (
+      {task.report && !qa ? (
         <p className={cn('rounded-control border px-3 py-2 text-[13px] leading-relaxed whitespace-pre-line',
           task.status === 'attention' ? 'border-danger/30 bg-danger-soft text-ink' : 'border-line bg-surface-2 text-ink-muted')}>
           {task.report}
         </p>
       ) : null}
+      <QaTaskDetails task={task} tasks={tasks} onOpenTask={onOpenTask} />
 
       <div className="grid gap-3 sm:grid-cols-[1fr_12rem]">
         <label className="flex min-w-0 flex-col gap-1.5">

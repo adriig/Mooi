@@ -13,6 +13,7 @@ import { TaskQuickControls } from '@/features/work/components/TaskQuickControls'
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
 import { taskStyle } from '@/features/work/lib/taskCategories';
+import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
 import { ITEM_STATUS, TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
@@ -165,6 +166,12 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
                 const state = TASK_STATUS[taskState(task, tasks)];
                 const open = openTask === task.id;
                 const Icon = category.icon;
+                const blocker = qaBlocker(task);
+                const findings = qaFindings(task);
+                const qaOrigin = task.fixOf ? tasks.find((candidate) => candidate.id === task.fixOf) : null;
+                const findingTitle = qaOrigin
+                  ? qaFindings(qaOrigin).find((finding) => finding.id === task.findingId)?.title
+                  : null;
                 return (
                   <li key={task.id} className={cn('overflow-hidden rounded-card border bg-surface', open ? 'border-line-strong shadow-raised' : 'border-line')}>
                     <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:flex-nowrap">
@@ -173,11 +180,33 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
                         <ChevronRight className={cn('size-4 shrink-0 text-ink-subtle transition-transform', open && 'rotate-90')} />
                         <span className={cn('inline-flex size-7 shrink-0 items-center justify-center rounded-chip border', category.chip)}
                           title={category.label}><Icon className="size-3.5" /></span>
-                        <span className={cn('min-w-0 truncate text-sm font-semibold text-ink', task.status === 'done' && 'text-ink-muted line-through decoration-ink-subtle')}>
-                          {task.title}
+                        <span className="flex min-w-0 flex-1 flex-col gap-1">
+                          <span className={cn('truncate text-sm font-semibold text-ink', task.status === 'done' && 'text-ink-muted line-through decoration-ink-subtle')}>
+                            {task.title}
+                          </span>
+                          {blocker ? (
+                            <span title={blocker.cause} className="line-clamp-2 text-[11px] leading-relaxed text-warning">
+                              {blocker.category ? `${QA_BLOCKER_LABEL[blocker.category]} blocker: ` : 'QA blocker: '}{blocker.cause}
+                            </span>
+                          ) : findings.length > 0 ? (
+                            <span className="line-clamp-2 text-[11px] leading-relaxed text-danger">
+                              {findings.map((finding) => `${finding.priority}: ${finding.title}`).join(' · ')}
+                            </span>
+                          ) : task.fixOf ? (
+                            <span className="line-clamp-1 text-[11px] text-danger">
+                              {findingTitle ? `Fixes: ${findingTitle}` : 'QA fix'}
+                            </span>
+                          ) : null}
                         </span>
                       </button>
-                      <Badge tone={state.tone}>{state.label}</Badge>
+                      {blocker ? (
+                        <Badge tone="warning">
+                          Blocked{blocker.category ? ` · ${QA_BLOCKER_LABEL[blocker.category]}` : ''}
+                        </Badge>
+                      ) : <Badge tone={state.tone}>{state.label}</Badge>}
+                      {findings.length > 0 ? (
+                        <Badge tone="danger">{findings.length} finding{findings.length === 1 ? '' : 's'}</Badge>
+                      ) : null}
                       <TaskQuickControls task={task} connections={connections} editable={taskEditable(task) && !busy}
                         onUpdate={(update) => { void run(() => updateWorkTask(projectId, item.id, task.id, update)); }} />
                     </div>
@@ -185,7 +214,8 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
                       <div className="animate-fade-in border-t border-line px-4 py-4">
                         <TaskEditor projectId={projectId} task={task} tasks={tasks} connections={connections} busy={busy}
                           onSave={(update) => run(() => updateWorkTask(projectId, item.id, task.id, update))}
-                          onDelete={() => { void run(() => deleteWorkTask(projectId, item.id, task.id)); }} />
+                          onDelete={() => { void run(() => deleteWorkTask(projectId, item.id, task.id)); }}
+                          onOpenTask={(target) => setOpenTask(target.id)} />
                       </div>
                     ) : null}
                   </li>
