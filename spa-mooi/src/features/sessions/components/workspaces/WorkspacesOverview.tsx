@@ -163,7 +163,7 @@ const PendingFeatures = ({ projectId, features, loading, error, onReload }: Pend
           return (
             <li key={feature.id}>
               <Link
-                to={`${projectPath(projectId)}?tab=todos&work=${encodeURIComponent(feature.id)}`}
+                to={`${projectPath(projectId)}?tab=board&feature=${encodeURIComponent(feature.id)}`}
                 className="group flex h-full min-w-0 flex-col gap-3 rounded-card border border-line bg-surface px-4 py-3 transition hover:border-brand/40 hover:bg-surface-2/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
               >
                 <span className="flex min-w-0 items-start gap-2.5">

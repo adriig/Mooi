@@ -12,7 +12,7 @@ interface WorkPanelProps {
 }
 
 /**
- * The project's To-dos tab: its features, defects and debt. Changes made anywhere else (another
+ * One project's features, defects and debt within the workspace To-dos page. Changes made anywhere else (another
  * device, an agent, the runner) show up live. Mounted only while its tab is open.
  */
 export const WorkPanel = ({ projectId, connections }: WorkPanelProps) => {

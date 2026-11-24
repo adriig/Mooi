@@ -1,6 +1,6 @@
 import { lazy, Suspense, useMemo, useState } from 'react';
 import { Navigate, useNavigate, useParams, useSearchParams, Link } from 'react-router-dom';
-import { Compass, FolderGit2, ListTodo, MessagesSquare, Network, Plus } from 'lucide-react';
+import { Compass, FolderGit2, MessagesSquare, Network, Plus } from 'lucide-react';
 import { ROUTES } from '@/app/routes';
 import { analyticsPath, sessionPath } from '@/app/paths';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
@@ -17,8 +17,6 @@ import { WorkspacesOverview } from '@/features/sessions/components/workspaces/Wo
 import { useProjectSessions } from '@/features/sessions/hooks/useProjectSessions';
 import { useProjectWorkspaces } from '@/features/sessions/hooks/useProjectWorkspaces';
 import { useProjectWork } from '@/features/work/hooks/useProjectWork';
-import { WorkPanel } from '@/features/work/components/WorkPanel';
-import { workEntries } from '@/features/work/lib/workEntries';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
 import { Button } from '@/shared/components/Button';
@@ -32,17 +30,16 @@ import { useLiveStore } from '@/stores/liveStore';
  * Deploy and preview live inside each session; whether sessions offer them is a project setting,
  * edited from the header.
  *
- * The active tab lives in `?tab=` so a reload lands back on the same view. To-dos lists the project's
- * features, defects and debt; Board maps one feature's tasks and their dependencies. Analytics lives on
+ * The active tab lives in `?tab=` so a reload lands back on the same view. Board maps one feature's
+ * tasks and their dependencies. Analytics lives on
  * its own page in the main menu; the former `?tab=analytics` links land there.
  */
 // The graph library only loads with the Board.
 const WorkBoard = lazy(() => import('@/features/work/components/WorkBoard').then((module) => ({ default: module.WorkBoard })));
 
 const WORKSPACES_TAB = 'workspaces';
-const TODOS_TAB = 'todos';
 const BOARD_TAB = 'board';
-const TABS = new Set([WORKSPACES_TAB, TODOS_TAB, BOARD_TAB]);
+const TABS = new Set([WORKSPACES_TAB, BOARD_TAB]);
 
 export const ProjectPage = () => {
   const { projectId } = useParams();
@@ -65,10 +62,8 @@ export const ProjectPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedTab = searchParams.get('tab');
   const tab = requestedTab && TABS.has(requestedTab) ? requestedTab : 'sessions';
-  const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
   const projectWork = useProjectWork(project?.id ?? '', tab === WORKSPACES_TAB && Boolean(project));
-  const openWork = useMemo(() => (work?.items && work.issues
-    ? workEntries(work.items, work.issues).filter((entry) => entry.status !== 'done').length : undefined), [work]);
+  const work = useLiveStore((live) => (projectId ? live.work[projectId] : undefined));
   const features = work?.items?.filter((item) => item.kind === 'feature' && item.status !== 'done').length;
   const sessionsRevision = useMemo(
     () => sessions.map((session) => `${session.id}:${session.status}:${session.deployment.state}:${session.workspacePath ?? ''}`).join('|'),
@@ -81,6 +76,10 @@ export const ProjectPage = () => {
 
   if (project && requestedTab === 'analytics') {
     return <Navigate to={analyticsPath(project.id)} replace />;
+  }
+
+  if (project && requestedTab === 'todos') {
+    return <Navigate to={ROUTES.todos} replace />;
   }
 
   if (!project) {
@@ -150,20 +149,11 @@ export const ProjectPage = () => {
             icon: FolderGit2,
             count: sessions.filter((session) => session.workspacePath).length,
           },
-          {
-            id: TODOS_TAB,
-            label: 'To-dos',
-            icon: ListTodo,
-            // Once read: the tab never reaches GitHub before it is opened.
-            count: openWork,
-          },
           { id: BOARD_TAB, label: 'Board', icon: Network, count: features },
         ]}
       />
 
-      {tab === TODOS_TAB ? (
-        <WorkPanel projectId={project.id} connections={connections} />
-      ) : tab === BOARD_TAB ? (
+      {tab === BOARD_TAB ? (
         <Suspense fallback={<Card className="h-[60vh] animate-pulse-soft" />}>
           <WorkBoard projectId={project.id} connections={connections} />
         </Suspense>

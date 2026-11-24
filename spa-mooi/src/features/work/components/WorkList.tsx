@@ -25,7 +25,7 @@ interface WorkListProps {
 /**
  * Features, defects and debt of one project: filtered by kind and status, defects and debt opened
  * right here, each row opening its breakdown and starting with one click. Shared by the project's
- * To-dos tab and the workspace To-dos page.
+ * Workspace To-dos page.
  */
 export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
   const { items, issues, issuesError, actionError, busy, run } = work;

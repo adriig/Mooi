@@ -24,9 +24,8 @@ const Stat = ({ label, value }: { label: string; value: number }) => (
 );
 
 /**
- * Every project's features, defects and debt on one page, each expanding into the same list as the
- * project's own To-dos tab, so the player follows and starts work across the workspace without
- * switching projects.
+ * Every project's features, defects and debt on one page, so the player follows and starts work
+ * across the workspace without switching projects.
  */
 export const TodosPage = () => {
   const { projects, status, error, reload } = useProjects();

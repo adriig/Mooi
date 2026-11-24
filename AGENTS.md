@@ -136,11 +136,10 @@ Each project plans and builds its work as a software factory: agents design it, 
 - **Model assignment**: an assignment expert picks each task's provider, model and effort from the user's
   linked accounts and their remaining quota, with ordered fallbacks, so no account runs out of credits. The
   platform checks quota again when a task launches and falls back to the next alternative when needed.
-- **To-dos tab** (per project): features, defects and debt. Opening a feature shows its task breakdown and
-  every task's settings; defects and debt offer the same settings. Status filters show their counts in
-  compact pills (`1.2K`) that never overflow. A **To-dos** entry in the main menu gathers every project on
-  one page, filtered by a project dropdown with checkboxes remembered per user on the current device;
-  projects load only as they come into view.
+- **To-dos** entry in the main menu gathers features, defects and debt from every project on one page.
+  Opening an item shows its task breakdown and every task's settings. Status filters show their counts
+  in compact pills (`1.2K`) that never overflow. Projects are filtered by a dropdown with checkboxes
+  remembered per user on the current device; projects load only as they come into view.
 - **Board tab** (per project and feature): pick a feature and see its tasks as a left-to-right dependency
   graph of coloured nodes. Without opening a task, each node shows and changes auto-merge (robot icon),
   provider and model, and tests. Defects detected by QA appear as fix tasks in red, with a defect icon

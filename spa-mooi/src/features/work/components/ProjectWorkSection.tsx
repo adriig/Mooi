@@ -74,7 +74,7 @@ export const ProjectWorkSection = ({ project, connections, expanded, onToggle }:
             </span>
           ) : null}
         </button>
-        <Link to={`${projectPath(project.id)}?tab=todos`} aria-label={`Open ${project.name}`} title="Open project" className={headerAction}>
+        <Link to={projectPath(project.id)} aria-label={`Open ${project.name}`} title="Open project" className={headerAction}>
           <ArrowUpRight className="size-4" />
         </Link>
       </div>
