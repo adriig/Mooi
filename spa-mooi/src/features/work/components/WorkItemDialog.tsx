@@ -94,7 +94,7 @@ export const WorkItemDialog = ({ projectId, entry, features, connections, work, 
             </Button>
           ) : null}
           {item && entry.kind === 'feature' ? (
-            <Link to={`${projectPath(projectId)}?tab=board&feature=${item.id}`}
+            <Link to={`${projectPath(projectId)}?tab=board&feature=${item.id}${item.status === 'done' ? '&completed=1' : ''}`}
               className="inline-flex items-center gap-1 text-xs font-semibold text-brand underline-offset-4 hover:underline">
               <Network className="size-3.5" /> Open in Board
             </Link>
