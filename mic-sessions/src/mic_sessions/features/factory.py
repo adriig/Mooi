@@ -54,7 +54,7 @@ from mic_sessions.features.sessions import (
     get_registry,
 )
 from mic_sessions.shared import mooi, workspaces
-from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED
+from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED, STATUS_READY
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared.web import ApiException
@@ -481,7 +481,6 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
         raise ApiException.bad_request("Explain the blocker in `blockerCause` or `summary`")
     if report.outcome in ("done", "passed") and not report.summary.strip():
         raise ApiException.bad_request("Provide a summary of the completed work")
-    await _persist_recovery(run, session, report=report)
     if run.qa:
         persisted = await mooi.report_task(run.task_id, {
             "status": "running",
@@ -491,6 +490,7 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
             "qaReport": report.model_dump(exclude_none=True, by_alias=True),
         })
         _publish_item(run.player_id, persisted.get("item"))
+    await _persist_recovery(run, session, report=report)
     run.outcome = report
 
 
@@ -711,6 +711,8 @@ class TaskRun:
     # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for the player's merge).
     phase: str = "working"
     status: str = "running"
+    recovered: bool = False
+    recovery_expected: bool = False
     # The project's factory limits as of the latest tick (see `DEFAULT_LIMITS`).
     limits: Json = field(default_factory=lambda: dict(DEFAULT_LIMITS))
     recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -774,6 +776,47 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
     return answer.get("item") or {}
 
 
+async def _task_recovery(task_id: UUID, attempt: int) -> Json | None:
+    try:
+        recovery = await mooi.fetch_task_recovery(task_id, attempt)
+    except ApiException as failure:
+        if failure.status_code == 404:
+            return None
+        raise
+    if str(recovery.get("taskId")) != str(task_id) or recovery.get("attempt") != attempt:
+        return {**recovery, "snapshotValid": False,
+                "validityReason": "Saved recovery metadata does not match this task attempt"}
+    return recovery
+
+
+async def _retire_task_recovery(owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID,
+                                attempts: int) -> None:
+    for attempt in range(attempts + 1):
+        with suppress(Exception):
+            await workspaces.delete_recovery_attempt(owner_id, project_id, item_id, task_id, attempt)
+
+
+def _recovery_problem(recovery: Json | None) -> str | None:
+    if recovery is None:
+        return "No saved recovery snapshot is available; the task was not restarted to avoid losing work."
+    if not recovery.get("snapshotValid"):
+        reason = _handoff_text(str(recovery.get("validityReason") or "The saved snapshot is marked unusable"))
+        return f"The saved task state cannot be restored safely: {reason}"
+    if not all(recovery.get(key) for key in ("branch", "baseCommit", "snapshotRevision")):
+        return "The saved task state is incomplete and cannot be restored safely."
+    return None
+
+
+def _recovery_context(recovery: Json, item: Json, task: Json, player_id: UUID) -> Json:
+    return {
+        **recovery,
+        "ownerId": str(player_id),
+        "projectId": item["projectId"],
+        "itemId": item["id"],
+        "taskId": task["id"],
+    }
+
+
 async def _runner_loop() -> None:
     global _wake_event, _last_recovery_cleanup
     _wake_event = asyncio.Event()
@@ -835,24 +878,92 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
         return
     registry = get_registry()
     tasks = item["tasks"]
+    recoveries: dict[str, Json] = {}
 
-    # Sessions that are gone (a restart, closed by hand) take their task back to the line.
+    # A missing session is resumable only from a validated durable snapshot. Never turn a lost
+    # workspace into a clean launch: the user gets an explicit attention state instead.
     for task in tasks:
         session_id = task.get("sessionId")
         if task["status"] not in ("running", "merging", "review", "attention") or not session_id:
             continue
         live = registry.get(UUID(session_id))
+        if live is not None and live.closing:
+            # close_session keeps the session registered until its recovery handoff and workspace
+            # removal finish, so wait rather than racing a launch against the old checkout.
+            continue
         if live is not None and not live.closing:
+            if live.status == STATUS_FAILED:
+                run = _runs.get(live.id)
+                if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
+                    try:
+                        report = TaskReport.model_validate(task["qaReport"])
+                    except Exception:
+                        LOG.warning("Could not restore saved QA report for task %s", task["id"], exc_info=True)
+                        item = await _report(task, "attention", session_id=None,
+                                             report="Its saved QA result is invalid and needs attention")
+                    else:
+                        answer = await mooi.report_defect(UUID(task["id"]), _qa_delivery_payload(report))
+                        item = answer.get("item") or item
+                        _publish_item(player_id, item)
+                        await _retire_task_recovery(player_id, UUID(item["projectId"]), UUID(item["id"]),
+                                                    UUID(task["id"]), task["attempts"])
+                    if run is not None:
+                        await _close(run)
+                    else:
+                        await sessions.close_session(live.id)
+                    tasks = item.get("tasks", tasks)
+                    continue
+                recovery_failure = bool(run and run.recovery_expected)
+                if recovery_failure:
+                    reason = live.detail or "The saved task state could not be restored"
+                    item = await _report(task, "attention", session_id=None, attempts=task["attempts"],
+                                         report=f"Task recovery could not be restored safely: {reason}")
+                    await _close(run)
+                    tasks = item.get("tasks", tasks)
+                else:
+                    # Let normal close lifecycle save this workspace, then the next tick will restore
+                    # only that durable handoff. A provisioning failure before cloning yields attention.
+                    await sessions.close_session(live.id)
+                    _runs.pop(live.id, None)
+                continue
             if UUID(session_id) not in _runs:
                 _adopt(item, task, live, player_id, limits)
             continue
+        if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
+            # QA's structured delivery is durable on the task itself. It can be committed safely
+            # without reopening the read-only QA workspace; delivery IDs make replay idempotent.
+            _runs.pop(UUID(session_id), None)
+            try:
+                report = TaskReport.model_validate(task["qaReport"])
+            except Exception:
+                LOG.warning("Could not restore saved QA report for task %s", task["id"], exc_info=True)
+                item = await _report(task, "attention", session_id=None,
+                                     report="Its saved QA result is invalid and needs attention")
+            else:
+                answer = await mooi.report_defect(UUID(task["id"]), _qa_delivery_payload(report))
+                item = answer.get("item") or item
+                _publish_item(player_id, item)
+                await _retire_task_recovery(player_id, UUID(item["projectId"]), UUID(item["id"]),
+                                            UUID(task["id"]), task["attempts"])
+            tasks = item.get("tasks", tasks)
+            continue
         _runs.pop(UUID(session_id), None)
+        recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
         attempts = task["attempts"] + 1
         if attempts > limits["maxAttempts"]:
+            problem = _recovery_problem(recovery)
+            detail = "Its session ended several times before finishing. Start the item again to retry."
+            if problem:
+                detail = f"{detail} {problem}"
             item = await _report(task, "attention", attempts=attempts,
-                                 report="Its session ended several times before finishing. Start the item again to retry.")
+                                 report=detail)
+        elif (problem := _recovery_problem(recovery)) is not None:
+            item = await _report(task, "attention", attempts=attempts,
+                                 report=f"Task recovery needs attention: {problem}")
         else:
-            item = await _report(task, "planned", attempts=attempts)
+            item = await _report(task, task["status"] if task["status"] in ("review", "merging") else "planned",
+                                 attempts=attempts)
+            recoveries[task["id"]] = recovery
         tasks = item.get("tasks", tasks)
 
     if item.get("dependsOn") and not await _dependency_done(caller, item):
@@ -860,13 +971,14 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
     done = {task["id"] for task in tasks if task["status"] == "done"}
     if item.get("status") != "running":
         return
-    ready = [task for task in tasks if task["status"] in ("planned", "queued") and not task.get("sessionId")
+    ready = [task for task in tasks if task["status"] in ("planned", "queued", "review", "merging")
+             and not task.get("sessionId")
              and all(dependency in done for dependency in task["dependsOn"])]
     for task in ready:
         if not await _has_room(caller, player_id, limits):
             await _wait(task, "Waiting for a free session")
             continue
-        await _launch(item, task, caller, player_id, limits)
+        await _launch(item, task, caller, player_id, limits, recovery=recoveries.get(task["id"]))
 
 
 async def _dependency_done(caller: Caller, item: Json) -> bool:
@@ -883,18 +995,32 @@ async def _has_room(caller: Caller, player_id: UUID, limits: dict[UUID, int]) ->
             and registry.owned(player_id) < limits[player_id])
 
 
-def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Json) -> TaskRun:
+def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Json, *,
+           recovery: Json | None = None) -> TaskRun:
     run = TaskRun(session_id=session.id, item_id=UUID(item["id"]), task_id=UUID(task["id"]),
                   project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
                   title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
                   attempts=task["attempts"],
                   qa_rounds=task.get("qaRounds", 0),
-                  status=task["status"], phase="review" if task["status"] == "review" else "working", limits=limits)
-    if run.qa and isinstance(task.get("qaReport"), dict):
+                  status=task["status"], phase="review" if task["status"] == "review" else "working", limits=limits,
+                  recovered=recovery is not None, recovery_expected=recovery is not None)
+    if run.qa and task.get("status") not in ("planned", "queued") and isinstance(task.get("qaReport"), dict):
         try:
             run.outcome = TaskReport.model_validate(task["qaReport"])
         except Exception:
             LOG.warning("Could not restore saved QA report for task %s", run.task_id, exc_info=True)
+    elif run.qa and recovery and recovery.get("reportedOutcome") in ("passed", "blocked"):
+        summary = recovery.get("reportedSummary") or recovery.get("summary") or ""
+        run.outcome = TaskReport(
+            outcome=recovery["reportedOutcome"], summary=summary,
+            blockerCause=summary if recovery["reportedOutcome"] == "blocked" else None,
+        )
+    elif recovery and recovery.get("reportedOutcome") == "done":
+        run.outcome = TaskReport(
+            outcome="done", summary=recovery.get("reportedSummary") or recovery.get("summary") or "",
+            nextStep=recovery.get("nextStep") or "", files=recovery.get("files") or [],
+            verifications=recovery.get("verifications") or [], obstacles=recovery.get("obstacles") or [],
+        )
     _runs[session.id] = run
     return run
 
@@ -905,7 +1031,22 @@ async def _wait(task: Json, reason: str) -> None:
         await _report(task, "queued", report=reason)
 
 
-async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json) -> None:
+async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json, *,
+                  recovery: Json | None = None) -> None:
+    if recovery is None and not (task.get("qaOf") and task["status"] in ("planned", "queued")):
+        source_attempt = max(0, task["attempts"] - 1) if task["attempts"] else 0
+        recovery = await _task_recovery(UUID(task["id"]), source_attempt)
+    if recovery is not None:
+        problem = _recovery_problem(recovery)
+        if problem:
+            await _report(task, "attention", session_id=None,
+                          report=f"Task recovery needs attention: {problem}")
+            return
+        if (task.get("qaOf") and recovery.get("reportedOutcome") == "defect"
+                and not isinstance(task.get("qaReport"), dict)):
+            await _report(task, "attention", session_id=None,
+                          report="Saved QA findings are incomplete; they cannot be safely recreated from the summary.")
+            return
     assignment = await _assign(caller, task, _quota_limit(limits))
     if assignment is None:
         await _wait(task, "Waiting for an account with the requested model and quota left")
@@ -916,16 +1057,25 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
                                     f"/issues/{item['issueNumber']}/item", github=True) or {}
         _publish_item(player_id, item)
         task = next((row for row in item.get("tasks", []) if row["id"] == task["id"]), {})
-        if (item.get("status") != "running" or task.get("status") not in ("planned", "queued")
+        if (item.get("status") != "running"
+                or task.get("status") not in ("planned", "queued", "review", "merging")
                 or task.get("sessionId")):
             return
     key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
-    branch = f"factory/{key}-{uuid4().hex[:6]}"
+    branch = recovery["branch"] if recovery else f"factory/{key}-{uuid4().hex[:6]}"
+    recovery_context = _recovery_context(recovery, item, task, player_id) if recovery else None
+    qa_report_pending = bool(task.get("qaOf") and task["status"] not in ("planned", "queued")
+                             and task.get("sessionId") and isinstance(task.get("qaReport"), dict))
+    recovered_outcome = ((task.get("qaReport") or {}).get("outcome")
+                         if qa_report_pending else (recovery or {}).get("reportedOutcome"))
+    completed_report = recovered_outcome in ("done", "passed", "defect") or (
+        task.get("qaOf") and recovered_outcome == "blocked")
+    initial_message = None if completed_report else _brief(item, task, recovery)
     try:
         session = await sessions._open_session(CreateSessionRequest(
             projectId=UUID(item["projectId"]), provider=assignment["provider"],
             connectionId=UUID(assignment["connectionId"]), branch=branch, model=assignment.get("model"),
-            effort=assignment.get("effort"), initialMessage=_brief(item, task)), caller)
+            effort=assignment.get("effort"), initialMessage=initial_message), caller, recovery=recovery_context)
     except ApiException as failure:
         if failure.status_code == status.HTTP_409_CONFLICT:
             await _wait(task, failure.message)
@@ -933,8 +1083,15 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
         await _report(task, "attention", report=f"Its session could not start: {failure.message}")
         return
     # Registered before provisioning builds the agent's instructions, which read it.
-    run = _adopt(item, {**task, "status": "running"}, session, player_id, limits)
-    updated = await _report(task, "running", session_id=session.id, attempts=task["attempts"], assignment=assignment)
+    launch_status = task["status"] if task["status"] in ("review", "merging") else "running"
+    run_task = {**task, "status": launch_status}
+    if task["status"] in ("planned", "queued"):
+        run_task["qaReport"] = None
+    run = _adopt(item, run_task, session, player_id, limits, recovery=recovery)
+    updated = await _report(task, launch_status, session_id=session.id, attempts=task["attempts"],
+                            assignment=assignment,
+                            report=(f"Resuming saved progress: {_handoff_text(recovery.get('summary') or recovery.get('nextStep') or 'restored task state')}"
+                                    if recovery else None))
     saved = next((row for row in updated.get("tasks", []) if row["id"] == task["id"]), {})
     if saved.get("sessionId") != str(session.id):
         # Closure can race another service's write: explicitly close a session whose launch was rejected.
@@ -1042,7 +1199,7 @@ def _spec_sections(spec: str) -> list[tuple[str, str]]:
     return sections
 
 
-def _brief(item: Json, task: Json) -> str:
+def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
     spec = item.get("spec") or ""
     kind = {"feature": "Feature", "defect": "Defect", "debt": "Debt"}[item["kind"]]
     issue = f" (GitHub issue #{item['issueNumber']})" if item.get("issueNumber") else ""
@@ -1102,7 +1259,18 @@ def _brief(item: Json, task: Json) -> str:
         block("Description", task.get("description"))
         block("Acceptance criteria", task.get("acceptance"), "(none given)")
         lines += ["", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
-                       "else than this task.")]
+                        "else than this task.")]
+    if recovery:
+        lines += ["", "## Saved task handoff", "",
+                  ("Continue from this restored workspace and the last saved progress below. Do not discard or "
+                   "recreate existing changes. Treat the saved summary as progress context, not proof that acceptance "
+                   "criteria pass; verify any remaining work and report the current result.")]
+        block("Last progress", recovery.get("summary"))
+        block("Next step", recovery.get("nextStep"))
+        block("Files in the saved change", "\n".join(f"- {path}" for path in recovery.get("files", [])))
+        block("Verifications already reported", "\n".join(
+            f"- {value}" for value in recovery.get("verifications", [])))
+        block("Known obstacles", "\n".join(f"- {value}" for value in recovery.get("obstacles", [])))
     return "\n".join(lines)
 
 
@@ -1114,6 +1282,11 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
     if run is None:
         return
     if type_ == EVENT_TURN_RESULT:
+        _background(_after_turn(run))
+    elif (type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_READY
+          and run.recovered and run.outcome is not None):
+        # Durable results are settled by the deterministic runner after the restored workspace is ready;
+        # do not send the implementation brief again or ask the model to repeat completed work.
         _background(_after_turn(run))
     elif type_ in (EVENT_QUESTION_REQUEST, EVENT_PERMISSION_REQUEST):
         _background(_set_status(run, "attention", "The agent is waiting for your answer in its session"))
@@ -1163,16 +1336,22 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
     mistake missing/corrupt data for a recoverable workspace.
     """
     async with run.recovery_lock:
-        summary = report.summary if report else (final_summary or "")
+        summary = (report.summary or report.blockerCause or "") if report else (final_summary or "")
         next_step = report.next_step if report else ""
         files = _handoff_files(report.files if report else [])
         verifications = [_handoff_text(value)[:2000] for value in report.verifications[:200]] if report else []
         obstacles = [_handoff_text(value)[:2000] for value in report.obstacles[:200]] if report else []
+        if report and report.outcome == "blocked" and report.blockerCause:
+            category = report.blockerCategory or "unspecified"
+            obstacles.insert(0, _handoff_text(f"Blocked ({category}): {report.blockerCause}")[:2000])
+            obstacles = obstacles[:200]
         outcome = report.outcome if report else final_outcome
         title = report.title if report else None
         safe_summary = _handoff_text(summary)
         reported_summary = safe_summary if outcome else None
         safe_next_step = _handoff_text(next_step)
+        branch = session.branch
+        base_commit = session.base_commit or "0" * 40
         try:
             snapshot = await workspaces.capture_recovery(
                 session.workspace, owner_id=run.player_id, project_id=run.project_id, item_id=run.item_id,
@@ -1206,20 +1385,26 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             if not safe_summary:
                 safe_summary = "Workspace snapshot captured at turn end; no new handoff report was submitted."
         if not valid and existing and existing.get("snapshotValid"):
-            # Keep the last known-good snapshot intact; the latest reported result is a separate field.
+            # Keep the last known-good snapshot and its matching result intact; a report from an
+            # uncaptured workspace must never be attached to older code.
             revision = existing["snapshotRevision"]
             head_commit = existing["headCommit"]
+            branch = existing["branch"]
+            base_commit = existing["baseCommit"]
             saved_files = existing.get("files") or []
             safe_summary = existing.get("summary") or ""
             safe_next_step = existing.get("nextStep") or ""
             verifications = existing.get("verifications") or []
             obstacles = existing.get("obstacles") or []
+            outcome = existing.get("reportedOutcome")
+            title = existing.get("reportedTitle")
+            reported_summary = existing.get("reportedSummary")
             valid = True
             reason = existing.get("validityReason")
         await mooi.save_task_recovery(run.task_id, {
             "attempt": run.attempts,
-            "branch": session.branch,
-            "baseCommit": session.base_commit or "0" * 40,
+            "branch": branch,
+            "baseCommit": base_commit,
             "headCommit": head_commit,
             "snapshotRevision": revision,
             "previousRevision": (existing or {}).get("snapshotRevision"),
@@ -1239,7 +1424,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
 async def _before_workspace_cleanup(session: Session) -> None:
     """Last chance to preserve an active factory workspace before normal session removal."""
     run = _runs.get(session.id)
-    if run is not None:
+    if run is not None and not session.recovery_failed:
         await _persist_recovery(run, session, report=run.outcome)
 
 
@@ -1290,6 +1475,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
         if run.qa:
             answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
             _publish_item(run.player_id, answer.get("item"))
+            await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
             run.outcome = None
             await _close(run)
         else:
@@ -1299,6 +1485,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
         if run.qa:
             answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
             _publish_item(run.player_id, answer.get("item"))
+            await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
             run.outcome = None
             await _close(run)
         else:
@@ -1307,6 +1494,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
     elif report.outcome == "defect":
         answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
         _publish_item(run.player_id, answer.get("item"))
+        await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
         run.outcome = None
         await _close(run)
     elif run.auto_merge:
@@ -1358,11 +1546,7 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
         await _persist_recovery(run, session, final_summary=report,
                                 final_outcome="passed" if run.qa else "done")
     item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None)
-    for attempt in range(run.attempts + 1):
-        with suppress(Exception):
-            await workspaces.delete_recovery_attempt(
-                run.player_id, run.project_id, run.item_id, run.task_id, attempt,
-            )
+    await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
     await _close(run)
     if run.issue_number and item.get("status") == "done":
         # A merge titled by the player may not name the issue: closing it here is idempotent.

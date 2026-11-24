@@ -297,7 +297,7 @@ class Workspaces:
             raise ApiException.bad_request("Invalid branch name")
 
     async def create_workspace(
-        self, project: Project, session_id: UUID, branch: str, token: str,
+        self, project: Project, session_id: UUID, branch: str, token: str, *, base_commit: str | None = None,
     ) -> SessionWorkspace:
         await self.validate_branch(branch)
         await self.validate_branch(project.default_branch)
@@ -312,6 +312,27 @@ class Workspaces:
             await self._git(*_NO_CREDENTIAL_HELPER, "clone", "--no-checkout", url, str(path), auth=token)
             remote = f"refs/remotes/origin/{branch}"
             default = f"refs/remotes/origin/{project.default_branch}"
+            if base_commit is not None:
+                if not re.fullmatch(r"[0-9a-f]{40,64}", base_commit):
+                    raise ApiException.bad_request("Invalid recovery base revision")
+                if await self._git_ok("-C", str(path), "cat-file", "-e", f"{base_commit}^{{commit}}"):
+                    await self._git("-C", str(path), "checkout", "--no-track", "-b", branch, base_commit)
+                    base_commit = (await self._git("-C", str(path), "rev-parse", "HEAD")).strip()
+                elif not (await self._git("-C", str(path), "for-each-ref", "--count=1", "refs/remotes")).strip() \
+                        and (await self._empty_tree(path)) == base_commit:
+                    await self._git("-C", str(path), "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+                    LOG.info("Workspace %s created on recovered empty repository", session_id)
+                    return SessionWorkspace(path=path, base_commit=base_commit)
+                else:
+                    await self._git(*_NO_CREDENTIAL_HELPER, "-C", str(path), "fetch", "--no-tags", "origin",
+                                    base_commit, auth=token)
+                    fetched = (await self._git("-C", str(path), "rev-parse", "FETCH_HEAD^{commit}")).strip()
+                    if fetched != base_commit:
+                        raise ApiException.conflict("Recovery base revision changed while preparing the workspace")
+                    await self._git("-C", str(path), "checkout", "--no-track", "-b", branch, fetched)
+                    base_commit = fetched
+                LOG.info("Workspace %s created on recovery base %s", session_id, base_commit[:7])
+                return SessionWorkspace(path=path, base_commit=base_commit)
             if await self._git_ok("-C", str(path), "show-ref", "--verify", "--quiet", remote):
                 await self._git("-C", str(path), "checkout", "-B", branch, "--track", f"origin/{branch}")
             elif await self._git_ok("-C", str(path), "show-ref", "--verify", "--quiet", default):
@@ -1231,9 +1252,9 @@ def get_workspaces() -> Workspaces:
 
 
 async def create_workspace(
-    project: Project, session_id: UUID, branch: str, token: str,
+    project: Project, session_id: UUID, branch: str, token: str, *, base_commit: str | None = None,
 ) -> SessionWorkspace:
-    return await get_workspaces().create_workspace(project, session_id, branch, token)
+    return await get_workspaces().create_workspace(project, session_id, branch, token, base_commit=base_commit)
 
 
 async def remove_workspace(session_id: UUID) -> None:

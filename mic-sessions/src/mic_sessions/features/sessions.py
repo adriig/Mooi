@@ -929,6 +929,8 @@ class Session:
     # Side questions being answered right now; they never enter the log.
     asides: int = 0
     interactions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Recovery failed before this clone was safe to use; cleanup must retain the source handoff.
+    recovery_failed: bool = False
     # Messages waiting for the current turn to end, oldest first, and the task delivering the next one.
     queue: list[QueuedMessage] = field(default_factory=list)
     queue_task: asyncio.Task[None] | None = None
@@ -1472,12 +1474,14 @@ async def _cleanup_workspace(session: Session) -> None:
 
 async def _close_registered_session(session: Session) -> None:
     """Close a session while its operation lock is held."""
-    removed = await get_registry().remove(session.id)
-    if removed is None:
+    if session.closing:
         return
     session.closing = True
     _record_status(session, "closed", "This session was closed")
-    await _teardown(session)
+    try:
+        await _teardown(session)
+    finally:
+        await get_registry().remove(session.id)
     LOG.info("Session %s closed", session.id)
 
 
@@ -1501,7 +1505,8 @@ async def create_session(
     return (await _open_session(body, caller)).to_payload()
 
 
-async def _open_session(body: CreateSessionRequest, caller: Caller) -> Session:
+async def _open_session(body: CreateSessionRequest, caller: Caller, *,
+                        recovery: dict[str, Any] | None = None) -> Session:
     """Opens any chat, from the UI or handed over by another chat's agent: the same path either way."""
     descriptor = describe(body.provider)
     registry = get_registry()
@@ -1543,12 +1548,13 @@ async def _open_session(body: CreateSessionRequest, caller: Caller) -> Session:
             if session.kind == "production" else (await _backup_documents(caller, body.projectId)).active
     await registry.add(session, caller)
     _record_status(session, STATUS_PROVISIONING, "Preparing the workspace")
-    _spawn(session, _provision(session, caller, project, body.initialMessage))
+    _spawn(session, _provision(session, caller, project, body.initialMessage, recovery=recovery))
     return session
 
 
 async def _provision(session: Session, caller: Caller, project: mooi.Project,
-                     initial_message: str | None = None) -> None:
+                     initial_message: str | None = None, *,
+                     recovery: dict[str, Any] | None = None) -> None:
     descriptor = describe(session.provider)
     started_at = time.perf_counter()
     try:
@@ -1562,9 +1568,19 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
             mooi.fetch_github_token(caller),
         )
         _record_status(session, STATUS_PROVISIONING, f"Cloning {project.full_name}")
-        workspace = await workspaces.create_workspace(project, session.id, session.branch, github_token)
+        workspace = await workspaces.create_workspace(
+            project, session.id, session.branch, github_token,
+            base_commit=recovery["baseCommit"] if recovery else None,
+        )
         session.workspace = workspace.path
         session.base_commit = workspace.base_commit
+        if recovery:
+            await workspaces.restore_recovery(
+                session.workspace, owner_id=UUID(recovery["ownerId"]), project_id=session.project_id,
+                item_id=UUID(recovery["itemId"]), task_id=UUID(recovery["taskId"]),
+                attempt=recovery["attempt"], revision=recovery["snapshotRevision"],
+                expected_branch=session.branch, expected_base=recovery["baseCommit"],
+            )
         _sync_deployment_configured(session)
 
         _record_status(session, STATUS_PROVISIONING, f"Starting {descriptor.adapter(session.adapter).label}")
@@ -1594,15 +1610,21 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
                     with suppress(ApiException):
                         await _deliver(session, runtime, initial_message)
     except asyncio.CancelledError:
+        if recovery:
+            session.recovery_failed = True
         await _cleanup_workspace(session)
         raise
-    except Exception:
+    except Exception as failure:
         if session.closing:
             return
         LOG.exception("Session %s could not be provisioned", session.id)
+        session.recovery_failed = recovery is not None
         await _cleanup_workspace(session)
         record(session, "error", {"message": "The session could not be started. Check provider and repository access."})
-        _record_status(session, STATUS_FAILED, "Workspace provisioning failed")
+        detail = "Workspace provisioning failed"
+        if recovery and isinstance(failure, ApiException):
+            detail = "Task recovery could not be restored safely; the saved branch or snapshot is unavailable."
+        _record_status(session, STATUS_FAILED, detail)
     finally:
         LOG.info("Session %s provisioning finished in %.0f ms", session.id, (time.perf_counter() - started_at) * 1000)
 
