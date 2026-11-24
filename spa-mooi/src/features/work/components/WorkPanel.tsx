@@ -34,7 +34,7 @@ export const WorkPanel = ({ projectId, connections }: WorkPanelProps) => {
       <div className="flex items-center gap-3 border-b border-line pb-3">
         <div className="min-w-0 flex-1">
           <Eyebrow>Software factory</Eyebrow>
-          <p className="mt-1 text-[12.5px] text-ink-subtle">Features live in Mooi; defects and debt are the repository's GitHub issues.</p>
+          <p className="mt-1 text-[12.5px] text-ink-subtle">Features live in Mooi; defects and improvements are the repository's GitHub issues.</p>
         </div>
         <button type="button" onClick={work.reload} aria-label="Reload" title="Reload"
           className="inline-flex size-8 items-center justify-center rounded-control border border-line text-ink-muted transition hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">

@@ -39,7 +39,7 @@ export const WorkSettingsButton = ({ projectId }: WorkSettingsButtonProps) => {
         <Settings2 className="size-3.5" />
       </button>
       <Modal open={open} onClose={() => setOpen(false)} title="Factory settings"
-        description="Limits the platform applies while it runs this project's features, defects and debt."
+        description="Limits the platform applies while it runs this project's features, defects and improvements."
         footer={(
           <>
             <Button variant="secondary" onClick={() => setOpen(false)}>Cancel</Button>

@@ -17,7 +17,6 @@ interface WorkEntryRowProps {
 /** One feature, defect or debt: what it is, how far it got, and Start. */
 export const WorkEntryRow = ({ entry, busy, onOpen, onStart, onPause }: WorkEntryRowProps) => {
   const kind = WORK_KINDS[entry.kind];
-  const Icon = kind.icon;
   const tasks = entry.item?.tasks ?? [];
   const done = tasks.filter((task) => task.status === 'done').length;
   const attention = tasks.filter((task) => task.status === 'attention' || task.status === 'review').length;
@@ -30,11 +29,6 @@ export const WorkEntryRow = ({ entry, busy, onOpen, onStart, onPause }: WorkEntr
     <li className="group flex items-center gap-2 rounded-card border border-line bg-surface py-2 pr-2 pl-2 transition hover:border-line-strong sm:gap-3 sm:pr-3">
       <button type="button" onClick={onOpen}
         className="flex min-h-12 min-w-0 flex-1 items-center gap-3 rounded-control px-1.5 py-1 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
-        <span className={cn('inline-flex size-8 shrink-0 items-center justify-center rounded-control border',
-          { brand: 'border-brand/25 bg-brand-soft text-brand-strong', danger: 'border-danger/25 bg-danger-soft text-danger', accent: 'border-accent/25 bg-accent-soft text-accent' }[kind.tone])}
-          title={kind.label}>
-          <Icon className="size-4" />
-        </span>
         <span className="flex min-w-0 flex-1 flex-col gap-1">
           <span className={cn('truncate text-[14px] font-semibold tracking-[-0.01em] text-ink', closed && 'text-ink-muted line-through decoration-ink-subtle')}>
             {entry.title}

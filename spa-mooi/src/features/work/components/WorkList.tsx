@@ -75,7 +75,7 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
         <SegmentedControl value={kind} onChange={(id) => setKind(id as WorkKindFilter)} className="w-full lg:w-auto"
           items={[{ id: 'all', label: 'All' }, ...(['feature', 'defect', 'debt'] as const).map((id) => (
-            { id, label: WORK_KINDS[id].plural, icon: WORK_KINDS[id].icon }))]} />
+            { id, label: WORK_KINDS[id].plural }))]} />
         <div className="flex items-center gap-2">
           <WorkFilters value={filter} counts={counts} onChange={setFilter} />
           <WorkSettingsButton projectId={projectId} />
@@ -88,7 +88,7 @@ export const WorkList = ({ projectId, work, connections }: WorkListProps) => {
         Features are designed in a session: describe one to its agent and it breaks it into tasks here, ready to Start.
       </p>
       {actionError && !open ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
-      {issuesError ? <p role="status" className="rounded-control border border-warning/30 bg-warning-soft px-3 py-2 text-[13px] text-ink">Defects and debt unavailable: {issuesError}</p> : null}
+      {issuesError ? <p role="status" className="rounded-control border border-warning/30 bg-warning-soft px-3 py-2 text-[13px] text-ink">Defects and improvements unavailable: {issuesError}</p> : null}
 
       {visible.length > 0 ? (
         <ul aria-label="Work items" className="flex flex-col gap-2">

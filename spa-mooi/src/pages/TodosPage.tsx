@@ -24,7 +24,7 @@ const Stat = ({ label, value }: { label: string; value: number }) => (
 );
 
 /**
- * Every project's features, defects and debt on one page, so the player follows and starts work
+ * Every project's features, defects and improvements on one page, so the player follows and starts work
  * across the workspace without switching projects.
  */
 export const TodosPage = () => {
@@ -68,7 +68,7 @@ export const TodosPage = () => {
           <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Workspace</p>
           <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">To-dos</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-muted">
-            Features, defects and debt of every project. Expand a project to open its work and start it.
+            Features, defects and improvements of every project. Expand a project to open its work and start it.
           </p>
         </div>
         <dl className="flex gap-6">

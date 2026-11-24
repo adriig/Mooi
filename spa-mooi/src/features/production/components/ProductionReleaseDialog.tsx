@@ -148,7 +148,7 @@ export const ProductionReleaseDialog = ({
     const groups = [
       { kind: 'feature' as const, title: 'Feature' },
       { kind: 'defect' as const, title: 'Defect' },
-      { kind: 'debt' as const, title: 'Debt' },
+      { kind: 'debt' as const, title: 'Improvement' },
     ].map((group) => {
       const includedShas = new Set<string>();
       workItems.filter((item) => item.kind === group.kind).forEach((item) => item.tasks.forEach((task) => {

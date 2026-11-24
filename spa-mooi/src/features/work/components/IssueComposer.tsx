@@ -58,8 +58,8 @@ export const IssueComposer = ({ disabled, projectId, onCreate }: IssueComposerPr
       <label className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-control border border-line bg-surface px-3 shadow-card transition focus-within:border-brand/60 focus-within:ring-4 focus-within:ring-brand/12">
         <Plus className="size-4 shrink-0 text-ink-subtle" />
         <input value={title} onChange={(event) => updateDraft({ ...draft, title: event.target.value })} disabled={disabled || sending} maxLength={300}
-          placeholder={kind === 'defect' ? 'Describe what does not work…' : 'Describe the debt to pay back…'}
-          aria-label={kind === 'defect' ? 'New defect' : 'New debt'}
+          placeholder={kind === 'defect' ? 'Describe what does not work…' : 'Describe the improvement…'}
+          aria-label={kind === 'defect' ? 'New defect' : 'New improvement'}
           className="h-10 w-full min-w-0 bg-transparent text-sm font-medium text-ink placeholder:text-ink-subtle focus:outline-none" />
       </label>
       <Button type="submit" disabled={disabled || sending || !text} className="h-11">Open issue</Button>
