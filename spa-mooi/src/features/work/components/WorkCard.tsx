@@ -121,7 +121,7 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
 
       {showRun ? (
         <div className="flex justify-end gap-2 px-1">
-          {onViewBoard && entry.kind === 'feature' && entry.item?.status === 'planned' ? (
+          {onViewBoard && entry.kind === 'feature' ? (
             <Button size="sm" variant="secondary" disabled={busy} onClick={onViewBoard}>
               <Network className="size-4" /> View board
             </Button>

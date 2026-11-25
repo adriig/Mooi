@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { projectPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import type { Project } from '@/features/projects/types/Project';
 import { WorkBoardCard } from '@/features/work/components/WorkBoardCard';
 import { WorkEntryDialog } from '@/features/work/components/WorkEntryDialog';
-import { WorkFeatureGraphDialog } from '@/features/work/components/WorkFeatureGraphDialog';
 import { sortColumn, workEntries, WORK_COLUMNS } from '@/features/work/lib/workEntries';
 import type { WorkColumn } from '@/features/work/types/WorkColumn';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
-import type { WorkItem } from '@/features/work/types/WorkItem';
 import type { WorkKindFilter } from '@/features/work/types/WorkKindFilter';
 import { Button } from '@/shared/components/Button';
 import { Tabs } from '@/shared/components/Tabs';
@@ -39,8 +38,8 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
   const work = useLiveStore((live) => live.work);
   const [tab, setTab] = useState<WorkColumn>('new');
   const [openKey, setOpenKey] = useState<string | null>(null);
-  const [graphItem, setGraphItem] = useState<WorkItem | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const requestedWork = searchParams.get('work');
 
   const loaded = projects.length > 0 && projects.every((project) => work[project.id]?.items && work[project.id]?.issues);
@@ -118,8 +117,8 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
                   {rows.map(({ project, entry }) => (
                     <WorkBoardCard key={entryKey(project, entry)} project={project} entry={entry}
                       onOpen={() => setOpenKey(entryKey(project, entry))}
-                      onViewBoard={entry.kind === 'feature' && entry.item?.status === 'planned'
-                        ? () => setGraphItem(entry.item)
+                      onViewBoard={entry.kind === 'feature' && entry.item && ['planned', 'running', 'paused'].includes(entry.item.status)
+                        ? () => navigate(`${projectPath(project.id)}?tab=board&feature=${entry.item!.id}`)
                         : undefined} />
                   ))}
                 </ul>
@@ -134,7 +133,6 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
         })}
       </div>
       {open ? <WorkEntryDialog project={open.project} entry={open.entry} connections={connections} onClose={close} /> : null}
-      {graphItem ? <WorkFeatureGraphDialog item={graphItem} onClose={() => setGraphItem(null)} /> : null}
     </div>
   );
 };
