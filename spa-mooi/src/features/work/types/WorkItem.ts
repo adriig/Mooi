@@ -18,6 +18,8 @@ export interface WorkItem {
   title: string;
   spec: string;
   status: WorkItemStatus;
+  /** Features are always defined; issues require an accepted definition before Start. */
+  definitionState?: 'NEW' | 'DEFINED';
   /** Why the platform paused it on its own (e.g. its factory credential was revoked); null for a manual pause. */
   pauseReason?: string | null;
   /** Another item of the project that must be done first. */

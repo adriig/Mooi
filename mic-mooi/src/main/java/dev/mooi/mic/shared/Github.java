@@ -803,6 +803,24 @@ public class Github {
             return issues;
         }
 
+        /** Exhaustive lookup for retrying an external create, independent of the bounded UI list. */
+        public Optional<Issue> findIssueByBodyMarker(String owner, String name, String marker, String accessToken) {
+            String base = "/repos/" + encode(owner) + "/" + encode(name)
+                    + "/issues?state=all&sort=created&direction=asc&per_page=" + PAGE_SIZE;
+            for (int page = 1; ; page++) {
+                JsonNode body = readJson(issueCall(repositoryRequest(base + "&page=" + page, accessToken).GET().build(),
+                        "GET definition issues"));
+                if (!body.isArray()) throw GithubException.unavailable("GET issues returned no list");
+                for (JsonNode node : body) {
+                    if (!node.has("pull_request")) {
+                        Issue issue = toIssue(node);
+                        if (issue.body().contains(marker)) return Optional.of(issue);
+                    }
+                }
+                if (body.size() < PAGE_SIZE) return Optional.empty();
+            }
+        }
+
         public Issue fetchIssue(String owner, String name, int number, String accessToken) {
             JsonNode node = readJson(issueCall(repositoryRequest("/repos/" + encode(owner) + "/" + encode(name)
                     + "/issues/" + number, accessToken).GET().build(), "GET issue"));

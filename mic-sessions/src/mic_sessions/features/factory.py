@@ -75,6 +75,7 @@ EVENT_WORK_ITEM = "work.item"
 EVENT_WORK_REMOVED = "work.removed"
 EVENT_WORK_ISSUE = "work.issue"
 EVENT_WORK_SETTINGS = "work.settings"
+EVENT_WORK_DEFINITION = "work.definition"
 
 Json = dict[str, Any]
 
@@ -185,6 +186,21 @@ async def _create_issue(caller: Caller, project_id: UUID, draft: Json) -> Json:
     _issue_sync_at.pop(project_id, None)
     wake()
     return created
+
+
+async def _change_definition(caller: Caller, project_id: UUID, number: int, action: str, payload: Json) -> Json:
+    """Views and definition agents share proposal persistence; acceptance belongs to the user."""
+    async with _lock_for(_project_locks, project_id):
+        result = await mooi.send_work(caller, "PUT" if action == "proposal" else "POST", project_id,
+                                      f"/issues/{number}/definition/{action}", payload, github=True) or {}
+        for issue in result.get("issues", []):
+            _publish_issue(caller.player_id, project_id, issue)
+        for item in result.get("items", []):
+            _publish_item(caller.player_id, item)
+        sessions._channels.publish(caller.player_id, EVENT_WORK_DEFINITION, {
+            "projectId": str(project_id), "number": number, "definition": result.get("definition"),
+        })
+        return result
 
 
 async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
@@ -340,6 +356,30 @@ async def issue_item(project_id: UUID, number: int, caller: Annotated[Caller, De
     """The item that runs an issue, created on first use so its settings can be edited."""
     return _publish_item(caller.player_id,
                          await mooi.send_work(caller, "PUT", project_id, f"/issues/{number}/item", github=True)) or {}
+
+
+@router.get("/projects/{project_id}/work/issues/{number}/definition")
+async def issue_definition(project_id: UUID, number: int,
+                           caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await mooi.send_work(caller, "GET", project_id, f"/issues/{number}/definition", github=True) or {}
+
+
+@router.put("/projects/{project_id}/work/issues/{number}/definition/proposal")
+async def propose_issue_definition(project_id: UUID, number: int, proposal: Annotated[Json, Body()],
+                                   caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_definition(caller, project_id, number, "proposal", proposal)
+
+
+@router.post("/projects/{project_id}/work/issues/{number}/definition/accept")
+async def accept_issue_definition(project_id: UUID, number: int, revision: Annotated[Json, Body()],
+                                  caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_definition(caller, project_id, number, "accept", revision)
+
+
+@router.post("/projects/{project_id}/work/issues/{number}/definition/reopen")
+async def reopen_issue_definition(project_id: UUID, number: int, revision: Annotated[Json, Body()],
+                                  caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_definition(caller, project_id, number, "reopen", revision)
 
 
 # --- session agents ------------------------------------------------------------------------------
@@ -520,6 +560,19 @@ async def agent_delete_task(session_id: UUID, item_id: UUID, task_id: UUID, requ
 async def agent_create_issue(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
     return await _create_issue(caller, session.project_id, draft)
+
+
+@router.get("/sessions/{session_id}/work/agent/issues/{number}/definition")
+async def agent_issue_definition(session_id: UUID, number: int, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await mooi.send_work(caller, "GET", session.project_id, f"/issues/{number}/definition", github=True) or {}
+
+
+@router.put("/sessions/{session_id}/work/agent/issues/{number}/definition/proposal")
+async def agent_propose_issue_definition(session_id: UUID, number: int, request: Request,
+                                         proposal: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    return await _change_definition(caller, session.project_id, number, "proposal", proposal)
 
 
 @router.get("/sessions/{session_id}/work/agent/settings")

@@ -99,6 +99,38 @@ public class ProjectWorkFeature {
     private final WorkService work;
     private final IssueService issues;
 
+    @GetMapping("/me/projects/{projectId}/work/issues/{number}/definition")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public DefinitionPayload definition(@PathVariable UUID projectId, @PathVariable int number,
+                                         Auth.Principal principal) {
+        return issues.definition(principal.player().id(), projectId, number);
+    }
+
+    @PutMapping("/me/projects/{projectId}/work/issues/{number}/definition/proposal")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public DefinitionResult propose(@PathVariable UUID projectId, @PathVariable int number,
+                                      @Valid @RequestBody DefinitionProposal proposal, Auth.Principal principal) {
+        return issues.propose(principal.player().id(), projectId, number, proposal);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/issues/{number}/definition/accept")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public DefinitionResult accept(@PathVariable UUID projectId, @PathVariable int number,
+                                     @Valid @RequestBody DefinitionRevision revision, Auth.Principal principal) {
+        return issues.accept(principal.player().id(), projectId, number, revision);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/issues/{number}/definition/reopen")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public DefinitionResult reopen(@PathVariable UUID projectId, @PathVariable int number,
+                                     @Valid @RequestBody DefinitionRevision revision, Auth.Principal principal) {
+        return issues.reopen(principal.player().id(), projectId, number, revision);
+    }
+
     @GetMapping("/me/projects/{projectId}/work")
     @Auth.Authenticated
     @Auth.ServiceCall
@@ -303,6 +335,7 @@ public class ProjectWorkFeature {
         private final TaskRecoveryRepository recoveries;
         private final WorkQaDeliveryRepository qaDeliveries;
         private final WorkSettingsRepository settings;
+        private final IssueDefinitionRepository definitions;
         private final Auth.FactoryCredentials credentials;
         private final Clock clock;
         private final ObjectMapper json = JsonMapper.shared();
@@ -561,6 +594,9 @@ public class ProjectWorkFeature {
             UUID credential = credentials.factoryCredential(playerId);
             WorkItem item = lockedItem(projectId, itemId);
             List<WorkTask> all = tasks.findByItemId(itemId);
+            if (definitionState(item) != DefinitionState.DEFINED || !executable(item)) {
+                throw conflict("Accept this issue's definition before starting it");
+            }
             if (item.getStatus() == ItemStatus.done) {
                 throw conflict("This work is already done");
             }
@@ -615,6 +651,7 @@ public class ProjectWorkFeature {
                     .collect(Collectors.toMap(WorkSettings::getProjectId, WorkService::toPayload));
             return new RunningPayload(rows.stream()
                     .filter(item -> owners.containsKey(item.getProjectId()))
+                    .filter(item -> definitionState(item) == DefinitionState.DEFINED && executable(item))
                     .map(item -> new RunnerItem(owners.get(item.getProjectId()), item.getRunnerAuthSessionId(),
                             limits.getOrDefault(item.getProjectId(), WorkSettingsPayload.DEFAULTS),
                             toPayload(item, byItem.getOrDefault(item.getId(), List.of()))))
@@ -661,6 +698,9 @@ public class ProjectWorkFeature {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             task = tasks.findLockedById(taskId).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
             List<WorkTask> all = tasks.findByItemId(item.getId());
+            if (definitionState(item) != DefinitionState.DEFINED || !executable(item)) {
+                throw conflict("Accept this issue's definition before running its tasks");
+            }
             if (item.getStatus() == ItemStatus.done) {
                 return runnerItem(item, all);
             }
@@ -1011,6 +1051,9 @@ public class ProjectWorkFeature {
                     || (authSessionId != null && !authSessionId.equals(item.getRunnerAuthSessionId()))) {
                 return runnerItem(item, tasks.findByItemId(itemId));
             }
+            if (status == ItemStatus.running && (definitionState(item) != DefinitionState.DEFINED || !executable(item))) {
+                throw conflict("Accept this issue's definition before running it");
+            }
             item.setStatus(status);
             item.setPauseReason(status == ItemStatus.paused && pauseReason != null && !pauseReason.isBlank()
                     ? pauseReason.strip() : null);
@@ -1319,6 +1362,7 @@ public class ProjectWorkFeature {
                     item.getStatus() == ItemStatus.paused ? item.getPauseReason() : null, item.getDependsOnId(),
                     item.getStartedAt(),
                     item.getFinishedAt(), item.getCreatedAt(), item.getUpdatedAt(), deployment(item, all),
+                    definitionState(item),
                     all.stream().sorted(Comparator.comparingInt(WorkTask::getPosition)
                                     .thenComparing(task -> task.getQaOfId() != null)
                                     .thenComparing(WorkTask::getCreatedAt, Comparator.nullsLast(Comparator.naturalOrder())))
@@ -1336,6 +1380,19 @@ public class ProjectWorkFeature {
                                      List.copyOf(task.getDependsOn()),
                                      task.getStartedAt(), task.getFinishedAt()))
                             .toList());
+        }
+
+        private DefinitionState definitionState(WorkItem item) {
+            return item.getKind() == ItemKind.feature ? DefinitionState.DEFINED
+                    : definitions.findByProjectIdAndIssueNumber(item.getProjectId(), item.getIssueNumber())
+                            .map(IssueDefinition::getState).orElse(DefinitionState.NEW);
+        }
+
+        private boolean executable(WorkItem item) {
+            if (item.getKind() == ItemKind.feature) return true;
+            return definitions.findByProjectIdAndIssueNumber(item.getProjectId(), item.getIssueNumber())
+                    .map(row -> row.getAccepted() == null || json.readValue(row.getAccepted(), DefinitionProposal.class)
+                            .executable()).orElse(false);
         }
 
         private static boolean isActive(TaskStatus status) {
@@ -1414,10 +1471,270 @@ public class ProjectWorkFeature {
 
         private final WorkService work;
         private final WorkItemRepository items;
+        private final WorkTaskRepository tasks;
+        private final WorkProjectRepository projects;
+        private final IssueDefinitionRepository definitions;
+        private final DefinitionProposalRepository proposals;
         private final WorkGithubConnectionRepository connections;
         private final Github.OAuthClient github;
         private final Crypto.SecretBox secretBox;
         private final Clock clock;
+
+        private final ObjectMapper json = JsonMapper.shared();
+
+        @Transactional(readOnly = true)
+        public DefinitionPayload definition(UUID playerId, UUID projectId, int number) {
+            WorkProject project = work.project(playerId, projectId);
+            // Even metadata-free issues must exist in this owner's project and have a factory label.
+            kindOf(github.fetchIssue(project.getOwner(), project.getName(), number, accessToken(playerId)));
+            return definitionPayload(definitions.findByProjectIdAndIssueNumber(projectId, number).orElse(null));
+        }
+
+        @Transactional
+        public DefinitionResult propose(UUID playerId, UUID projectId, int number, DefinitionProposal proposal) {
+            WorkProject project = lockProject(playerId, projectId);
+            Github.Issue issue = github.fetchIssue(project.getOwner(), project.getName(), number, accessToken(playerId));
+            kindOf(issue);
+            IssueDefinition row = definitionRow(projectId, number);
+            Optional<DefinitionProposalRow> replay = proposals.findByDefinitionIdAndProposalId(row.getId(), proposal.proposalId());
+            if (replay.isPresent()) {
+                if (!json.readValue(replay.get().getContent(), DefinitionProposal.class).equals(proposal)) {
+                    throw WorkService.conflict("Proposal id already has different content");
+                }
+                return definitionSnapshot(projectId, issue, row);
+            }
+            if (row.getProposal() != null) {
+                DefinitionProposal current = json.readValue(row.getProposal(), DefinitionProposal.class);
+                if (!current.proposalId().equals(proposal.previousProposalId())) {
+                    throw WorkService.conflict("Definition proposal has changed; reload it before proposing");
+                }
+            } else if (proposal.previousProposalId() != null) {
+                throw WorkService.conflict("There is no previous proposal");
+            }
+            if (row.getState() != DefinitionState.NEW || !"open".equals(issue.state())) {
+                throw WorkService.conflict("Reopen the definition of an open issue before proposing changes");
+            }
+            validateProposal(proposal);
+            requireIdle(projectId, number);
+            row.setProposal(json.writeValueAsString(proposal));
+            definitions.save(row);
+            saveProposal(row, proposal);
+            return definitionSnapshot(projectId, issue, row);
+        }
+
+        @Transactional
+        public DefinitionResult reopen(UUID playerId, UUID projectId, int number, DefinitionRevision revision) {
+            WorkProject project = lockProject(playerId, projectId);
+            Github.Issue issue = github.fetchIssue(project.getOwner(), project.getName(), number, accessToken(playerId));
+            kindOf(issue);
+            IssueDefinition row = definitionRow(projectId, number);
+            requireRevision(row, revision);
+            requireIdle(projectId, number);
+            row.setState(DefinitionState.NEW);
+            definitions.save(row);
+            return definitionSnapshot(projectId, issue, row);
+        }
+
+        @Transactional
+        public DefinitionResult accept(UUID playerId, UUID projectId, int number, DefinitionRevision revision) {
+            WorkProject project = lockProject(playerId, projectId);
+            IssueDefinition row = definitionRow(projectId, number);
+            Optional<DefinitionProposalRow> replay = revision.proposalId() == null ? Optional.empty()
+                    : proposals.findByDefinitionIdAndProposalId(row.getId(), revision.proposalId());
+            if (replay.isPresent() && replay.get().getResult() != null) {
+                return refreshResult(project, row, json.readValue(replay.get().getResult(), DefinitionResult.class),
+                        accessToken(playerId));
+            }
+            requireRevision(row, revision);
+            if (row.getProposal() == null) throw WorkService.conflict("There is no proposal to accept");
+            DefinitionProposal proposal = json.readValue(row.getProposal(), DefinitionProposal.class);
+            if (row.getState() != DefinitionState.NEW) throw WorkService.conflict("Definition is already accepted");
+            validateProposal(proposal);
+            requireIdle(projectId, number);
+            String token = accessToken(playerId);
+            Github.Issue source = github.fetchIssue(project.getOwner(), project.getName(), number, token);
+            kindOf(source);
+            List<IssuePayload> changedIssues = new ArrayList<>();
+            List<ItemPayload> changedItems = new ArrayList<>();
+            List<Integer> numbers = new ArrayList<>();
+            row.setFeatureId(null);
+            if (proposal.feature() != null) {
+                ItemPayload feature = work.createFeature(playerId, projectId, proposal.feature());
+                row.setFeatureId(feature.id());
+                changedItems.add(feature);
+            } else if (Boolean.TRUE.equals(proposal.valid()) && proposal.breakdown() != null && !proposal.breakdown().isEmpty()) {
+                int index = 0;
+                for (DefinitionPart part : proposal.breakdown()) {
+                    String marker = "<!-- mooi-definition:" + projectId + ":" + proposal.proposalId() + ":" + index++ + " -->";
+                    // GitHub cannot join our transaction. A stable marker recovers a create whose
+                    // response was lost, including a previous partially completed acceptance.
+                    Github.Issue child = github.findIssueByBodyMarker(project.getOwner(), project.getName(), marker, token)
+                            .orElseGet(() -> {
+                                ensureLabel(project, part.kind(), token);
+                                return github.createIssue(project.getOwner(), project.getName(), part.title(),
+                                        part.description() + "\n\n" + marker, List.of(LABELS.get(part.kind())[0]), token);
+                            });
+                    IssueDefinition childRow = definitionRow(projectId, child.number());
+                    requireIdle(projectId, child.number());
+                    if (childRow.getProposal() != null) {
+                        throw WorkService.conflict("A split issue has since been defined separately; review the proposal");
+                    }
+                    DefinitionProposal childProposal = new DefinitionProposal(proposal.proposalId(), null,
+                            part.title(), part.description(), true, part.acceptance(), part.kind(), part.category(), null, null);
+                    childRow.setState(DefinitionState.DEFINED);
+                    childRow.setProposal(json.writeValueAsString(childProposal));
+                    childRow.setAccepted(json.writeValueAsString(childProposal));
+                    definitions.save(childRow);
+                    DefinitionProposalRow childRevision = saveProposal(childRow, childProposal);
+                    ItemPayload item = applyDefinition(projectId, child, childProposal);
+                    changedItems.add(item);
+                    changedIssues.add(toPayload(projectId, child, part.kind()));
+                    numbers.add(child.number());
+                    childRevision.setResult(json.writeValueAsString(new DefinitionResult(definitionPayload(childRow),
+                            List.of(toPayload(projectId, child, part.kind())), List.of(item))));
+                    proposals.save(childRevision);
+                }
+            }
+            ensureLabel(project, proposal.kind(), token);
+            List<String> labels = new ArrayList<>(source.labels().stream()
+                    .filter(label -> !label.equals("defect") && !label.equals("debt")).toList());
+            labels.add(LABELS.get(proposal.kind())[0]);
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("title", proposal.title());
+            fields.put("body", proposal.description());
+            fields.put("labels", labels);
+            if (!proposal.executable()) fields.put("state", "closed");
+            source = github.updateIssue(project.getOwner(), project.getName(), number, fields, token);
+            row.setState(DefinitionState.DEFINED);
+            row.setAccepted(row.getProposal());
+            row.setIssueNumbers(json.writeValueAsString(numbers));
+            definitions.save(row);
+            if (proposal.executable()) {
+                changedItems.add(applyDefinition(projectId, source, proposal));
+            } else {
+                Github.Issue acceptedSource = source;
+                items.findLockedByProjectIdAndIssueNumber(projectId, number).ifPresent(item -> {
+                    item.setKind(proposal.kind());
+                    changedItems.add(work.reconcileIssue(item.getId(), acceptedSource));
+                });
+            }
+            changedIssues.add(toPayload(projectId, source, proposal.kind()));
+            DefinitionResult result = new DefinitionResult(definitionPayload(row), changedIssues, changedItems);
+            DefinitionProposalRow acceptedRevision = proposals.findByDefinitionIdAndProposalId(row.getId(), proposal.proposalId())
+                    .orElseThrow(() -> WorkService.conflict("The saved proposal revision is missing"));
+            acceptedRevision.setResult(json.writeValueAsString(result));
+            proposals.save(acceptedRevision);
+            return result;
+        }
+
+        private DefinitionProposalRow saveProposal(IssueDefinition row, DefinitionProposal proposal) {
+            DefinitionProposalRow revision = new DefinitionProposalRow();
+            revision.setId(UUID.randomUUID());
+            revision.setDefinitionId(row.getId());
+            revision.setProposalId(proposal.proposalId());
+            revision.setContent(json.writeValueAsString(proposal));
+            return proposals.save(revision);
+        }
+
+        private DefinitionResult refreshResult(WorkProject project, IssueDefinition row, DefinitionResult result, String token) {
+            List<IssuePayload> currentIssues = result.issues().stream().map(issue -> {
+                Github.Issue current = github.fetchIssue(project.getOwner(), project.getName(), issue.number(), token);
+                return toPayload(project.getId(), current, kindOf(current));
+            }).toList();
+            List<ItemPayload> currentItems = result.items().stream().map(item -> items.findById(item.id()))
+                    .flatMap(Optional::stream).map(work::payload).toList();
+            return new DefinitionResult(definitionPayload(row), currentIssues, currentItems);
+        }
+
+        private WorkProject lockProject(UUID playerId, UUID projectId) {
+            return projects.findLockedByIdAndPlayerId(projectId, playerId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found"));
+        }
+
+        private void requireIdle(UUID projectId, int number) {
+            items.findLockedByProjectIdAndIssueNumber(projectId, number).ifPresent(item -> {
+                if (item.getStatus() == ItemStatus.running || tasks.findByItemId(item.getId()).stream()
+                        .anyMatch(task -> WorkService.isActive(task.getStatus())
+                                || (task.getSessionId() != null && task.getStatus() != TaskStatus.done))) {
+                    throw WorkService.conflict("Finish the active task sessions before defining this issue");
+                }
+            });
+        }
+
+        private IssueDefinition definitionRow(UUID projectId, int number) {
+            return definitions.findByProjectIdAndIssueNumber(projectId, number).orElseGet(() -> {
+                IssueDefinition row = new IssueDefinition();
+                row.setId(UUID.randomUUID());
+                row.setProjectId(projectId);
+                row.setIssueNumber(number);
+                row.setState(DefinitionState.NEW);
+                row.setIssueNumbers("[]");
+                return row;
+            });
+        }
+
+        private void requireRevision(IssueDefinition row, DefinitionRevision revision) {
+            UUID current = row.getProposal() == null ? null
+                    : json.readValue(row.getProposal(), DefinitionProposal.class).proposalId();
+            if (!java.util.Objects.equals(current, revision.proposalId())) {
+                throw WorkService.conflict("Definition proposal has changed; reload it before accepting or reopening");
+            }
+        }
+
+        private static void validateProposal(DefinitionProposal proposal) {
+            if (proposal.kind() == ItemKind.feature || proposal.category() == TaskCategory.qa) {
+                throw WorkService.badRequest("An issue must be defect or debt with a development category");
+            }
+            boolean split = proposal.breakdown() != null && !proposal.breakdown().isEmpty();
+            if ((split && proposal.feature() != null)
+                    || (!proposal.valid() && (split || proposal.feature() != null))) {
+                throw WorkService.badRequest("Choose one resolution: invalid, one issue, split issues or feature");
+            }
+            if (proposal.valid() && (proposal.description().isBlank() || proposal.acceptance().isBlank())) {
+                throw WorkService.badRequest("Valid definitions need a description and verifiable acceptance criteria");
+            }
+            if (split && proposal.breakdown().stream().anyMatch(part -> part.kind() == ItemKind.feature
+                    || part.category() == TaskCategory.qa)) {
+                throw WorkService.badRequest("Split issues must be defects or debt with development categories");
+            }
+        }
+
+        private void ensureLabel(WorkProject project, ItemKind kind, String token) {
+            String[] label = LABELS.get(kind);
+            github.ensureLabel(project.getOwner(), project.getName(), label[0], label[1], label[2], token);
+        }
+
+        private ItemPayload applyDefinition(UUID projectId, Github.Issue issue, DefinitionProposal proposal) {
+            WorkItem item = items.findLockedByProjectIdAndIssueNumber(projectId, issue.number()).orElseGet(() ->
+                    items.save(work.newItem(projectId, proposal.kind(), issue.number(), issue.title(), issue.body())));
+            item.setKind(proposal.kind());
+            List<WorkTask> all = tasks.findByItemId(item.getId());
+            if (all.isEmpty()) all = work.issueTasks(item, issue, null);
+            for (WorkTask task : all) {
+                if (task.getQaOfId() == null && task.getFixOfId() == null) {
+                    task.setTitle(proposal.title());
+                    task.setDescription(proposal.description());
+                    task.setCategory(proposal.category());
+                    task.setAcceptance(proposal.acceptance());
+                }
+            }
+            tasks.saveAll(all);
+            return work.reconcileIssue(item.getId(), issue);
+        }
+
+        private DefinitionPayload definitionPayload(IssueDefinition row) {
+            return row == null ? new DefinitionPayload(DefinitionState.NEW, null, null, List.of(), null)
+                    : new DefinitionPayload(row.getState(),
+                            row.getProposal() == null ? null : json.readValue(row.getProposal(), DefinitionProposal.class),
+                            row.getAccepted() == null ? null : json.readValue(row.getAccepted(), DefinitionProposal.class),
+                            json.readValue(row.getIssueNumbers(), new TypeReference<List<Integer>>() { }), row.getFeatureId());
+        }
+
+        private DefinitionResult definitionSnapshot(UUID projectId, Github.Issue issue, IssueDefinition row) {
+            List<ItemPayload> existing = items.findLockedByProjectIdAndIssueNumber(projectId, issue.number())
+                    .map(item -> List.of(work.payload(item))).orElse(List.of());
+            return new DefinitionResult(definitionPayload(row), List.of(toPayload(projectId, issue, kindOf(issue))), existing);
+        }
 
         public IssuesPayload list(UUID playerId, UUID projectId) {
             WorkProject project = work.project(playerId, projectId);
@@ -1427,7 +1744,7 @@ public class ProjectWorkFeature {
             for (ItemKind kind : List.of(ItemKind.defect, ItemKind.debt)) {
                 for (Github.Issue issue : github.listIssues(project.getOwner(), project.getName(), LABELS.get(kind)[0],
                         token)) {
-                    byNumber.putIfAbsent(issue.number(), toPayload(issue, kind));
+                    byNumber.putIfAbsent(issue.number(), toPayload(projectId, issue, kind));
                     observed.putIfAbsent(issue.number(), issue);
                 }
             }
@@ -1440,7 +1757,7 @@ public class ProjectWorkFeature {
                 Github.Issue issue = observed.containsKey(item.getIssueNumber())
                         ? observed.get(item.getIssueNumber())
                         : github.fetchIssue(project.getOwner(), project.getName(), item.getIssueNumber(), token);
-                byNumber.putIfAbsent(issue.number(), toPayload(issue, item.getKind()));
+                byNumber.putIfAbsent(issue.number(), toPayload(projectId, issue, item.getKind()));
                 reconciled.add(work.reconcileIssue(item.getId(), issue));
             }
             return new IssuesPayload(byNumber.values().stream()
@@ -1464,7 +1781,7 @@ public class ProjectWorkFeature {
             WorkItem item = items.save(work.newItem(projectId, draft.kind(), issue.number(), issue.title(),
                     issue.body()));
             work.issueTasks(item, issue, draft.task());
-            return new IssueItemPayload(toPayload(issue, draft.kind()), work.payload(item));
+            return new IssueItemPayload(toPayload(projectId, issue, draft.kind()), work.payload(item));
         }
 
         @Transactional
@@ -1484,7 +1801,7 @@ public class ProjectWorkFeature {
                     accessToken(playerId));
             ItemKind kind = kindOf(issue);
             Optional<WorkItem> item = items.findLockedByProjectIdAndIssueNumber(projectId, number);
-            return new IssueItemPayload(toPayload(issue, kind),
+            return new IssueItemPayload(toPayload(projectId, issue, kind),
                     item.map(row -> work.reconcileIssue(row.getId(), issue, update.state() == IssueState.open))
                             .orElse(null));
         }
@@ -1513,9 +1830,10 @@ public class ProjectWorkFeature {
             throw WorkService.badRequest("Issue #" + issue.number() + " is labelled neither defect nor debt");
         }
 
-        private static IssuePayload toPayload(Github.Issue issue, ItemKind kind) {
+        private IssuePayload toPayload(UUID projectId, Github.Issue issue, ItemKind kind) {
             return new IssuePayload(issue.number(), kind, issue.title(), issue.body(), issue.state(), issue.htmlUrl(),
-                    issue.createdAt(), issue.closedAt());
+                    issue.createdAt(), issue.closedAt(), definitions.findByProjectIdAndIssueNumber(projectId, issue.number())
+                            .map(IssueDefinition::getState).orElse(DefinitionState.NEW));
         }
 
         /** Read-only like every non-owning feature: mic-sessions renews the grant before calling here. */
@@ -1532,6 +1850,59 @@ public class ProjectWorkFeature {
 
     // --- persistence ---
 
+    /** Definition metadata is independent of executable items: proposing creates no work. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "IssueDefinition")
+    @Table(name = "work_issue_definitions")
+    public static class IssueDefinition extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "project_id", nullable = false, updatable = false)
+        private UUID projectId;
+        @Column(name = "issue_number", nullable = false, updatable = false)
+        private Integer issueNumber;
+        @Enumerated(EnumType.STRING)
+        @Column(nullable = false)
+        private DefinitionState state;
+        @Column(columnDefinition = "text")
+        private String proposal;
+        @Column(columnDefinition = "text")
+        private String accepted;
+        @Column(name = "issue_numbers", nullable = false, columnDefinition = "text")
+        private String issueNumbers;
+        @Column(name = "feature_id")
+        private UUID featureId;
+    }
+
+    public interface IssueDefinitionRepository extends JpaRepository<IssueDefinition, UUID> {
+        Optional<IssueDefinition> findByProjectIdAndIssueNumber(UUID projectId, Integer issueNumber);
+    }
+
+    /** Immutable proposal content plus its acceptance receipt, retained across later revisions. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "DefinitionProposalRow")
+    @Table(name = "work_definition_proposals")
+    public static class DefinitionProposalRow extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "definition_id", nullable = false, updatable = false)
+        private UUID definitionId;
+        @Column(name = "proposal_id", nullable = false, updatable = false)
+        private UUID proposalId;
+        @Column(nullable = false, updatable = false, columnDefinition = "text")
+        private String content;
+        @Column(columnDefinition = "text")
+        private String result;
+    }
+
+    public interface DefinitionProposalRepository extends JpaRepository<DefinitionProposalRow, UUID> {
+        Optional<DefinitionProposalRow> findByDefinitionIdAndProposalId(UUID definitionId, UUID proposalId);
+    }
+
     @Getter
     @Setter
     @NoArgsConstructor
@@ -1547,7 +1918,7 @@ public class ProjectWorkFeature {
         private UUID projectId;
 
         @Enumerated(EnumType.STRING)
-        @Column(name = "kind", nullable = false, updatable = false)
+        @Column(name = "kind", nullable = false)
         private ItemKind kind;
 
         @Column(name = "issue_number", updatable = false)
@@ -1922,6 +2293,9 @@ public class ProjectWorkFeature {
 
     public interface WorkProjectRepository extends JpaRepository<WorkProject, UUID> {
 
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        Optional<WorkProject> findLockedByIdAndPlayerId(UUID id, UUID playerId);
+
         /** Scoped by player on purpose: an id alone must never be enough to reach somebody's work. */
         Optional<WorkProject> findByIdAndPlayerId(UUID id, UUID playerId);
     }
@@ -1956,6 +2330,36 @@ public class ProjectWorkFeature {
     // --- contracts ---
 
     public enum ItemKind { feature, defect, debt }
+
+    public enum DefinitionState { NEW, DEFINED }
+
+    /** The client owns the revision id; retries must send identical content and the same id. */
+    public record DefinitionProposal(@NotNull UUID proposalId, UUID previousProposalId,
+                                      @NotBlank @Size(max = 300) String title,
+                                      @NotNull @Size(max = 50_000) String description,
+                                      @NotNull Boolean valid,
+                                      @NotNull @Size(max = 20_000) String acceptance,
+                                      @NotNull ItemKind kind, @NotNull TaskCategory category,
+                                      @Size(max = 20) List<@Valid @NotNull DefinitionPart> breakdown,
+                                      @Valid FeatureDraft feature) {
+        boolean executable() {
+            return Boolean.TRUE.equals(valid) && feature == null && (breakdown == null || breakdown.isEmpty());
+        }
+    }
+
+    public record DefinitionPart(@NotBlank @Size(max = 300) String title,
+                                  @NotBlank @Size(max = 50_000) String description,
+                                  @NotBlank @Size(max = 20_000) String acceptance,
+                                  @NotNull ItemKind kind, @NotNull TaskCategory category) { }
+
+    /** proposalId is null only when reopening an issue that has no proposal yet. */
+    public record DefinitionRevision(UUID proposalId) { }
+
+    public record DefinitionPayload(DefinitionState state, DefinitionProposal proposal,
+                                     DefinitionProposal accepted, List<Integer> issueNumbers, UUID featureId) { }
+
+    public record DefinitionResult(DefinitionPayload definition, List<IssuePayload> issues,
+                                    List<ItemPayload> items) { }
 
     /**
      * {@code planned}: not started; {@code running}: the runner works on it;
@@ -2131,6 +2535,7 @@ public class ProjectWorkFeature {
                               ItemStatus status, String pauseReason, UUID dependsOn, OffsetDateTime startedAt,
                               OffsetDateTime finishedAt,
                               OffsetDateTime createdAt, OffsetDateTime updatedAt, DeploymentPayload deployment,
+                              DefinitionState definitionState,
                               List<TaskPayload> tasks) {
     }
 
@@ -2145,7 +2550,7 @@ public class ProjectWorkFeature {
     }
 
     public record IssuePayload(int number, ItemKind kind, String title, String body, String state, String htmlUrl,
-                               OffsetDateTime createdAt, OffsetDateTime closedAt) {
+                               OffsetDateTime createdAt, OffsetDateTime closedAt, DefinitionState definitionState) {
     }
 
     public record IssuesPayload(List<IssuePayload> issues, List<ItemPayload> items) {

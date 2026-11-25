@@ -1,0 +1,50 @@
+databaseChangeLog:
+  - changeSet:
+      id: 058-work-issue-definitions
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE work_issue_definitions (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                issue_number integer NOT NULL CHECK (issue_number > 0),
+                state varchar(16) NOT NULL CHECK (state IN ('NEW', 'DEFINED')),
+                proposal text,
+                accepted text,
+                issue_numbers text NOT NULL DEFAULT '[]',
+                feature_id uuid REFERENCES work_items(id) ON DELETE SET NULL,
+                created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL,
+                UNIQUE (project_id, issue_number)
+              );
+              CREATE TABLE work_definition_proposals (
+                id uuid PRIMARY KEY,
+                definition_id uuid NOT NULL REFERENCES work_issue_definitions(id) ON DELETE CASCADE,
+                proposal_id uuid NOT NULL,
+                content text NOT NULL,
+                result text,
+                created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL,
+                UNIQUE (definition_id, proposal_id)
+              );
+              -- Preserve already executed work and fully specified legacy execution settings.
+              -- Everything else, including untracked GitHub issues, defaults to NEW forever:
+              -- editing task settings alone cannot implicitly accept a definition.
+              INSERT INTO work_issue_definitions (id, project_id, issue_number, state, created_at, updated_at)
+              SELECT i.id, i.project_id, i.issue_number, 'DEFINED', i.created_at, i.updated_at
+              FROM work_items i
+              WHERE i.kind <> 'feature' AND (
+                i.started_at IS NOT NULL OR i.status IN ('running', 'paused', 'done') OR (
+                  EXISTS (SELECT 1 FROM work_tasks t WHERE t.item_id = i.id AND t.qa_of_id IS NULL)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM work_tasks t WHERE t.item_id = i.id AND t.qa_of_id IS NULL
+                    AND (trim(t.description) = '' OR trim(t.acceptance) = '')
+                  )
+                )
+              );
+      rollback:
+        - dropTable:
+            tableName: work_definition_proposals
+        - dropTable:
+            tableName: work_issue_definitions

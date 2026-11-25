@@ -130,7 +130,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                 {entry.issue.state === 'open' ? 'Close issue' : 'Reopen issue'}
               </Button>
             ) : null}
-            {entry.issue?.state !== 'closed' || item?.status === 'running' ? (
+            {entry.column !== 'new' && (entry.issue?.state !== 'closed' || item?.status === 'running') ? (
               <WorkRunButton item={item} busy={busy} onStart={() => { void start(); }}
                 onPause={() => { if (item) void run(() => pauseWorkItem(projectId, item.id)); }} />
             ) : null}

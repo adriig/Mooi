@@ -119,6 +119,14 @@ Each project plans and builds its work as a software factory: agents design it, 
   - **Defect** and **Debt**: a GitHub issue of the project labelled `defect` or `debt` (created when
     missing). GitHub Issues hold only these two kinds, never features; their execution settings live in the
     platform. A single task asked in a session is developed in that session and never becomes a work item.
+    Debt is presented as **Improvement**. Open issues without an accepted definition are **NEW** and
+    cannot start. **Define** creates or reopens an associated session with read-only repository access
+    and an economical model/effort selected from the owner's available accounts within quota. The agent
+    proposes title, description, validity, acceptance criteria, kind, category and any split or feature
+    promotion. Proposals change no issues or executable work. Only user acceptance applies them and moves
+    the issue to **DEFINED**; splits create separate issues and promotion uses the feature contract.
+    Proposal, acceptance and reopening are revisioned and idempotent; reopening returns it to **NEW**.
+    Features bypass NEW. Existing items with complete execution settings remain defined.
 - **Tasks** belong to one feature and carry a title, a category, a description, acceptance criteria, the
   provider, account, model and effort to run with, **auto-merge** (on or off) and **tests** (on or off),
   all prefilled by the orchestrator and editable. Dependencies are blocking and stay inside the feature.
@@ -150,7 +158,8 @@ Each project plans and builds its work as a software factory: agents design it, 
   access and economical model/effort choices that respect the user's accounts and quotas. In that
   session the user and agent validate the report, clarify scope and verifiable acceptance criteria,
   choose defect or improvement, and decide whether to split issues or raise a feature. The agent
-  presents a reviewable proposal; only user acceptance persists changes and moves the item to DEFINED.
+  persists a reviewable proposal without changing issues or executable work; only user acceptance
+  applies those changes and moves the item to DEFINED.
   Before acceptance, issues and work items are not changed and subtasks/features are not created.
   Items with existing complete execution criteria remain defined; features never enter NEW. Headers
   show counts in compact pills (`1.2K`). Cards offer Start, Pause or Resume (Start only on DEFINED)

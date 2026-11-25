@@ -34,9 +34,10 @@ export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[]
   }));
   const tracked: WorkEntry[] = issues.map((issue) => {
     const item = byIssue.get(issue.number) ?? null;
-    const column: WorkColumn = item ? itemColumn(item)
-      : issue.state === 'closed' ? 'deployed'
-        : issue.definitionStatus === 'defined' ? 'defined' : 'new';
+    const definitionState = item?.definitionState ?? issue.definitionState;
+    const column: WorkColumn = issue.state === 'open' && definitionState !== 'DEFINED' ? 'new'
+      : item ? itemColumn(item)
+        : issue.state === 'closed' ? 'deployed' : 'defined';
     return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, column, item, issue };
   });
   return [...features, ...tracked];

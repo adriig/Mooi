@@ -118,6 +118,8 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/058-work-task-attempts-base.yaml
   - include:
+      file: db/changelog/changes/058-work-issue-definitions.yaml
+  - include:
       file: db/changelog/changes/059-work-context-stall-settings.yaml
   - include:
       file: db/changelog/changes/060-factory-runner-credential.yaml
