@@ -1,3 +1,4 @@
+import type { WorkChangeRequest } from '@/features/work/types/WorkChangeRequest';
 import type { WorkItemKind } from '@/features/work/types/WorkItemKind';
 import type { WorkItemStatus } from '@/features/work/types/WorkItemStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
@@ -31,4 +32,6 @@ export interface WorkItem {
   tasks: WorkTask[];
   /** Where the item stands on its way to production; `none` until it is done. */
   deployment?: WorkItemDeployment | null;
+  /** Change requests on an ongoing feature; absent on legacy payloads and on defects and debt. */
+  changeRequests?: WorkChangeRequest[];
 }

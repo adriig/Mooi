@@ -45,7 +45,8 @@ export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[]
 
 const time = (value: string | null | undefined): number => Date.parse(value ?? '') || 0;
 const needsPlayer = (entry: WorkEntry): boolean =>
-  entry.item?.tasks.some((task) => task.status === 'attention' || task.status === 'review') ?? false;
+  (entry.item?.tasks.some((task) => task.status === 'attention' || task.status === 'review') ?? false)
+  || (entry.item?.changeRequests?.some((change) => change.status === 'awaiting_confirmation') ?? false);
 const finished = (entry: WorkEntry): number => time(entry.item?.finishedAt ?? entry.issue?.closedAt);
 
 /** Each column's order: newest first; items needing the player lead in progress; unknown versions trail. */

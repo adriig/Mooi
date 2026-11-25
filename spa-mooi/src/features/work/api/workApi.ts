@@ -47,6 +47,16 @@ export const reassignWorkTasks = (projectId: string, itemId: string) =>
 export const deleteWorkTask = (projectId: string, itemId: string, taskId: string) =>
   send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}`), 'DELETE', 'Could not remove this task.');
 
+/** Queues a change on an ongoing feature; the platform analyzes it at a safe point without pausing it. */
+export const requestWorkChange = (projectId: string, itemId: string, request: string) =>
+  send<WorkItem>(workPath(projectId, `/items/${itemId}/change-requests`), 'POST',
+    'Could not queue this change request.', { request });
+
+/** The user's explicit decision on a proposal awaiting confirmation; acceptance applies it. */
+export const decideWorkChange = (projectId: string, itemId: string, changeId: string, decision: 'accept' | 'reject') =>
+  send<WorkItem>(workPath(projectId, `/items/${itemId}/change-requests/${changeId}/decision`), 'POST',
+    'Could not decide this change request.', { decision });
+
 /** Hands the item to the platform, which runs every task in its own session from now on. */
 export const startWorkItem = (projectId: string, itemId: string) =>
   send<WorkItem>(workPath(projectId, `/items/${itemId}/start`), 'POST', 'Could not start this work.');

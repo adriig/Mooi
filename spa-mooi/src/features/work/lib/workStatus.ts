@@ -1,4 +1,5 @@
 import type { Tone } from '@/shared/types/Tone';
+import type { WorkChangeStatus } from '@/features/work/types/WorkChangeRequest';
 import type { WorkItemStatus } from '@/features/work/types/WorkItemStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import type { WorkTaskStatus } from '@/features/work/types/WorkTaskStatus';
@@ -19,6 +20,14 @@ export const TASK_STATUS: Record<WorkTaskStatus | 'blocked', { label: string; to
   review: { label: 'Awaiting merge', tone: 'warning' },
   attention: { label: 'Needs you', tone: 'danger' },
   done: { label: 'Done', tone: 'success' },
+};
+
+export const CHANGE_STATUS: Record<WorkChangeStatus, { label: string; tone: Tone }> = {
+  queued: { label: 'Queued', tone: 'accent' },
+  analyzing: { label: 'Analyzing', tone: 'info' },
+  awaiting_confirmation: { label: 'Awaiting confirmation', tone: 'warning' },
+  applied: { label: 'Applied', tone: 'success' },
+  rejected: { label: 'Rejected', tone: 'neutral' },
 };
 
 /** A planned task whose dependencies are not all done yet reads as blocked. */

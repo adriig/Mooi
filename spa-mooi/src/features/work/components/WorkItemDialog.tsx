@@ -11,6 +11,7 @@ import {
 import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
 import { CommitLink } from '@/features/work/components/CommitLink';
+import { WorkChangeRequests } from '@/features/work/components/WorkChangeRequests';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
 import { taskStyle } from '@/features/work/lib/taskCategories';
@@ -62,6 +63,8 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
   const hasReassignableTasks = tasks.some((task) =>
     task.status === 'planned' || task.status === 'queued'
     || (task.status === 'attention' && task.sessionId === null));
+  const canRequestChange = entry.kind === 'feature' && !!item && (item.status === 'running' || item.status === 'paused');
+  const showChangeRequests = canRequestChange || (entry.kind === 'feature' && (item?.changeRequests?.length ?? 0) > 0);
 
   const recalculateAssignments = async () => {
     if (!item) return;
@@ -252,6 +255,10 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
               })}
             </ul>
           </section>
+        ) : null}
+
+        {item && showChangeRequests ? (
+          <WorkChangeRequests projectId={projectId} item={item} canRequest={canRequestChange} busy={busy} run={run} />
         ) : null}
 
         <Modal open={confirmReassign} title="Refresh model assignment"

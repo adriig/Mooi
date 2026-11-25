@@ -32,6 +32,7 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
   const tasks = entry.item?.tasks ?? [];
   const done = tasks.filter((task) => task.status === 'done').length;
   const attention = tasks.filter((task) => task.status === 'attention' || task.status === 'review').length;
+  const pendingChanges = (entry.item?.changeRequests ?? []).filter((change) => change.status === 'awaiting_confirmation').length;
   const running = tasks.filter((task) => task.status === 'running' || task.status === 'merging').length;
   const commits = entry.column === 'pendingDeploy' || entry.column === 'deployed' ? mergeCommits(entry.item) : [];
   const deployment = entry.column === 'deployed' ? entryDeployment(entry) : null;
@@ -56,6 +57,9 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
           {tasks.length > 0 ? <span>{done}/{tasks.length} tasks</span> : null}
           {running > 0 ? <span className="text-info">{running} running</span> : null}
           {attention > 0 ? <span className="font-semibold text-danger">{attention} need{attention === 1 ? 's' : ''} you</span> : null}
+          {pendingChanges > 0 ? (
+            <span className="font-semibold text-danger">{pendingChanges} change{pendingChanges === 1 ? '' : 's'} need{pendingChanges === 1 ? 's' : ''} you</span>
+          ) : null}
         </span>
       </button>
 
