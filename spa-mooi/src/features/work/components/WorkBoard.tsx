@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Background, Controls, MarkerType, MiniMap, ReactFlow, type Edge } from '@xyflow/react';
+import { Background, Controls, MarkerType, MiniMap, ReactFlow, useNodesInitialized, useReactFlow, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Maximize, Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -36,9 +36,23 @@ interface TaskGraphProps {
   edges: Edge[];
   theme: string;
   className: string;
+  centerOnOpen?: boolean;
 }
 
-const TaskGraph = ({ nodes, edges, theme, className }: TaskGraphProps) => (
+const CenterGraphOnOpen = ({ enabled }: { enabled: boolean }) => {
+  const nodesInitialized = useNodesInitialized();
+  const { fitView } = useReactFlow();
+
+  useEffect(() => {
+    if (!enabled || !nodesInitialized) return;
+    const frame = requestAnimationFrame(() => { void fitView({ padding: 0.15 }); });
+    return () => cancelAnimationFrame(frame);
+  }, [enabled, fitView, nodesInitialized]);
+
+  return null;
+};
+
+const TaskGraph = ({ nodes, edges, theme, className, centerOnOpen = false }: TaskGraphProps) => (
   <div className={className}>
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.15 }}
       nodesConnectable={false} nodesDraggable={false} edgesFocusable={false} minZoom={0.2} maxZoom={1.5}
@@ -47,6 +61,7 @@ const TaskGraph = ({ nodes, edges, theme, className }: TaskGraphProps) => (
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable className="!hidden sm:!block"
         nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
+      <CenterGraphOnOpen enabled={centerOnOpen} />
     </ReactFlow>
   </div>
 );
@@ -197,7 +212,8 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
 
       <Modal open={boardExpanded} size="full" title={feature.title} description="Task dependency board"
         onClose={() => setBoardExpanded(false)}>
-        <TaskGraph nodes={nodes} edges={edges} theme={theme} className="h-full min-h-0 overflow-hidden rounded-card border border-line bg-surface-2/40" />
+        <TaskGraph nodes={nodes} edges={edges} theme={theme} centerOnOpen={boardExpanded}
+          className="h-full min-h-0 overflow-hidden rounded-card border border-line bg-surface-2/40" />
       </Modal>
       {openTask ? (
         <Modal open size="lg" title={openTask.title} description={taskStyle(openTask).label}
