@@ -98,6 +98,47 @@ public class ProjectWorkFeature {
 
     private final WorkService work;
     private final IssueService issues;
+    private final ProjectDefinitionService projectDefinitions;
+
+    @GetMapping("/me/projects/{projectId}/work/definition")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProjectDefinitionPayload projectDefinition(@PathVariable UUID projectId, Auth.Principal principal) {
+        return projectDefinitions.definition(principal.player().id(), projectId);
+    }
+
+    @PutMapping("/me/projects/{projectId}/work/definition/proposal")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProjectDefinitionResult proposeProject(@PathVariable UUID projectId,
+                                                  @Valid @RequestBody ProjectProposal proposal, Auth.Principal principal) {
+        return projectDefinitions.propose(principal.player().id(), projectId, proposal);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/definition/accept")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProjectDefinitionResult acceptProject(@PathVariable UUID projectId,
+                                                 @Valid @RequestBody DefinitionRevision revision, Auth.Principal principal) {
+        return projectDefinitions.accept(principal.player().id(), projectId, revision);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/definition/reopen")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProjectDefinitionResult reopenProject(@PathVariable UUID projectId,
+                                                 @Valid @RequestBody DefinitionRevision revision, Auth.Principal principal) {
+        return projectDefinitions.reopen(principal.player().id(), projectId, revision);
+    }
+
+    /** Links a roadmap entry to the feature an orchestrator designed for it; a null feature unlinks it. */
+    @PutMapping("/me/projects/{projectId}/work/definition/roadmap/{key}")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ProjectDefinitionResult linkRoadmap(@PathVariable UUID projectId, @PathVariable String key,
+                                               @Valid @RequestBody RoadmapLink link, Auth.Principal principal) {
+        return projectDefinitions.link(principal.player().id(), projectId, key, link);
+    }
 
     @GetMapping("/me/projects/{projectId}/work/issues/{number}/definition")
     @Auth.Authenticated
@@ -2129,7 +2170,314 @@ public class ProjectWorkFeature {
         }
     }
 
+    /**
+     * The definition of a whole project: vision, architecture, decisions, an ordered roadmap of features
+     * and the Foundations feature (Feature 0) that lays the technical base. Same contract as issue
+     * definitions: immutable proposals by stable UUID, compare-and-set on {@code previousProposalId},
+     * acceptance receipts per revision and transitions serialized by the project's row lock. Proposing
+     * creates no work; only the player's acceptance creates Foundations (once) and saves the roadmap.
+     */
+    @Service
+    @RequiredArgsConstructor
+    public static class ProjectDefinitionService {
+
+        private final WorkService work;
+        private final WorkItemRepository items;
+        private final WorkProjectRepository projects;
+        private final ProjectDefinitionRepository definitions;
+        private final ProjectProposalRepository proposals;
+        private final RoadmapEntryRepository roadmap;
+
+        private final ObjectMapper json = JsonMapper.shared();
+
+        @Transactional(readOnly = true)
+        public ProjectDefinitionPayload definition(UUID playerId, UUID projectId) {
+            work.project(playerId, projectId);
+            return payload(definitions.findByProjectId(projectId).orElse(null));
+        }
+
+        @Transactional
+        public ProjectDefinitionResult propose(UUID playerId, UUID projectId, ProjectProposal proposal) {
+            lockProject(playerId, projectId);
+            ProjectDefinition row = definitionRow(projectId);
+            Optional<ProjectProposalRow> replay = proposals.findByDefinitionIdAndProposalId(row.getId(), proposal.proposalId());
+            if (replay.isPresent()) {
+                if (!json.readValue(replay.get().getContent(), ProjectProposal.class).equals(proposal)) {
+                    throw WorkService.conflict("Proposal id already has different content");
+                }
+                return new ProjectDefinitionResult(payload(row), List.of());
+            }
+            if (row.getProposal() != null) {
+                if (!current(row).proposalId().equals(proposal.previousProposalId())) {
+                    throw WorkService.conflict("Project definition proposal has changed; reload it before proposing");
+                }
+            } else if (proposal.previousProposalId() != null) {
+                throw WorkService.conflict("There is no previous proposal");
+            }
+            if (row.getState() != DefinitionState.NEW) {
+                throw WorkService.conflict("Reopen the project definition before proposing changes");
+            }
+            validate(proposal);
+            row.setProposal(json.writeValueAsString(proposal));
+            row = definitions.save(row);
+            saveProposal(row, proposal);
+            return new ProjectDefinitionResult(payload(row), List.of());
+        }
+
+        @Transactional
+        public ProjectDefinitionResult reopen(UUID playerId, UUID projectId, DefinitionRevision revision) {
+            lockProject(playerId, projectId);
+            ProjectDefinition row = definitionRow(projectId);
+            requireRevision(row, revision);
+            row.setState(DefinitionState.NEW);
+            row = definitions.save(row);
+            return new ProjectDefinitionResult(payload(row), List.of());
+        }
+
+        @Transactional
+        public ProjectDefinitionResult accept(UUID playerId, UUID projectId, DefinitionRevision revision) {
+            lockProject(playerId, projectId);
+            ProjectDefinition row = definitionRow(projectId);
+            Optional<ProjectProposalRow> replay = revision.proposalId() == null ? Optional.empty()
+                    : proposals.findByDefinitionIdAndProposalId(row.getId(), revision.proposalId());
+            if (replay.isPresent() && replay.get().getResult() != null) {
+                // A repeated acceptance, even after a reopen, returns its receipt and never redefines.
+                ProjectDefinitionResult receipt = json.readValue(replay.get().getResult(), ProjectDefinitionResult.class);
+                return new ProjectDefinitionResult(payload(row), receipt.items().stream()
+                        .map(item -> items.findById(item.id())).flatMap(Optional::stream).map(work::payload).toList());
+            }
+            requireRevision(row, revision);
+            if (row.getProposal() == null) throw WorkService.conflict("There is no proposal to accept");
+            if (row.getState() != DefinitionState.NEW) throw WorkService.conflict("Project definition is already accepted");
+            ProjectProposal proposal = current(row);
+            validate(proposal);
+            List<ItemPayload> changed = new ArrayList<>();
+            // Accepting again after a reopen keeps the Foundations already created: it is edited as a feature.
+            Optional<WorkItem> existing = Optional.ofNullable(row.getFeatureId()).flatMap(items::findById)
+                    .filter(item -> item.getProjectId().equals(projectId));
+            if (existing.isPresent()) {
+                changed.add(work.payload(existing.get()));
+            } else {
+                ItemPayload foundations = work.createFeature(playerId, projectId, proposal.foundations());
+                row.setFeatureId(foundations.id());
+                changed.add(foundations);
+            }
+            row.setState(DefinitionState.DEFINED);
+            row.setAccepted(row.getProposal());
+            row = definitions.save(row);
+            saveRoadmap(row, proposal.roadmap());
+            ProjectDefinitionResult result = new ProjectDefinitionResult(payload(row), changed);
+            ProjectProposalRow accepted = proposals.findByDefinitionIdAndProposalId(row.getId(), proposal.proposalId())
+                    .orElseThrow(() -> WorkService.conflict("The saved proposal revision is missing"));
+            accepted.setResult(json.writeValueAsString(result));
+            proposals.save(accepted);
+            return result;
+        }
+
+        @Transactional
+        public ProjectDefinitionResult link(UUID playerId, UUID projectId, String key, RoadmapLink link) {
+            lockProject(playerId, projectId);
+            ProjectDefinition row = definitions.findByProjectId(projectId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Roadmap entry not found"));
+            List<RoadmapEntry> entries = roadmap.findByDefinitionIdOrderByPositionAsc(row.getId());
+            RoadmapEntry entry = entries.stream().filter(candidate -> candidate.getEntryKey().equals(key)).findFirst()
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Roadmap entry not found"));
+            if (link.featureId() != null) {
+                WorkItem feature = items.findById(link.featureId())
+                        .filter(item -> item.getProjectId().equals(projectId) && item.getKind() == ItemKind.feature)
+                        .orElseThrow(() -> WorkService.badRequest("The feature is not part of this project"));
+                if (feature.getId().equals(row.getFeatureId()) || entries.stream().anyMatch(other ->
+                        other != entry && feature.getId().equals(other.getFeatureId()))) {
+                    throw WorkService.conflict("This feature is already linked to another roadmap entry");
+                }
+            }
+            entry.setFeatureId(link.featureId());
+            roadmap.save(entry);
+            return new ProjectDefinitionResult(payload(row), List.of());
+        }
+
+        private void saveRoadmap(ProjectDefinition row, List<RoadmapEntryDraft> drafts) {
+            Map<String, RoadmapEntry> previous = new LinkedHashMap<>();
+            roadmap.findByDefinitionIdOrderByPositionAsc(row.getId()).forEach(entry -> previous.put(entry.getEntryKey(), entry));
+            List<RoadmapEntry> saved = new ArrayList<>();
+            for (RoadmapEntryDraft draft : drafts) {
+                RoadmapEntry entry = previous.remove(draft.key());
+                if (entry == null) {
+                    entry = new RoadmapEntry();
+                    entry.setId(UUID.randomUUID());
+                    entry.setDefinitionId(row.getId());
+                    entry.setEntryKey(draft.key());
+                }
+                entry.setTitle(draft.title().strip());
+                entry.setGoal(draft.goal().strip());
+                entry.setDependsOn(new ArrayList<>(new LinkedHashSet<>(draft.dependsOn())));
+                saved.add(entry);
+            }
+            // Entries already designed keep their feature even when a new roadmap leaves them out.
+            for (RoadmapEntry entry : previous.values()) {
+                if (entry.getFeatureId() != null && items.existsById(entry.getFeatureId())) saved.add(entry);
+                else roadmap.delete(entry);
+            }
+            roadmap.flush();
+            for (int index = 0; index < saved.size(); index++) saved.get(index).setPosition(index);
+            roadmap.saveAll(saved);
+        }
+
+        private void saveProposal(ProjectDefinition row, ProjectProposal proposal) {
+            ProjectProposalRow revision = new ProjectProposalRow();
+            revision.setId(UUID.randomUUID());
+            revision.setDefinitionId(row.getId());
+            revision.setProposalId(proposal.proposalId());
+            revision.setContent(json.writeValueAsString(proposal));
+            proposals.save(revision);
+        }
+
+        private void lockProject(UUID playerId, UUID projectId) {
+            projects.findLockedByIdAndPlayerId(projectId, playerId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found"));
+        }
+
+        private ProjectDefinition definitionRow(UUID projectId) {
+            return definitions.findByProjectId(projectId).orElseGet(() -> {
+                ProjectDefinition row = new ProjectDefinition();
+                row.setId(UUID.randomUUID());
+                row.setProjectId(projectId);
+                row.setState(DefinitionState.NEW);
+                return row;
+            });
+        }
+
+        private ProjectProposal current(ProjectDefinition row) {
+            return json.readValue(row.getProposal(), ProjectProposal.class);
+        }
+
+        private void requireRevision(ProjectDefinition row, DefinitionRevision revision) {
+            UUID current = row.getProposal() == null ? null : current(row).proposalId();
+            if (!java.util.Objects.equals(current, revision.proposalId())) {
+                throw WorkService.conflict("Project definition proposal has changed; reload it before accepting or reopening");
+            }
+        }
+
+        private static void validate(ProjectProposal proposal) {
+            Set<String> keys = new HashSet<>();
+            for (RoadmapEntryDraft entry : proposal.roadmap()) {
+                if (!keys.containsAll(entry.dependsOn())) {
+                    throw WorkService.badRequest("Roadmap entry " + entry.key()
+                            + " may only depend on earlier entries, or on none for Foundations");
+                }
+                if (!keys.add(entry.key())) throw WorkService.badRequest("Roadmap keys must be unique");
+            }
+            if (proposal.foundations().dependsOn() != null) {
+                throw WorkService.badRequest("Foundations is the first feature and depends on nothing");
+            }
+            if (proposal.foundations().tasks().stream().noneMatch(task -> task.category() == TaskCategory.docs)) {
+                throw WorkService.badRequest("Foundations needs a docs task that writes the design documents");
+            }
+        }
+
+        private ProjectDefinitionPayload payload(ProjectDefinition row) {
+            if (row == null) {
+                return new ProjectDefinitionPayload(DefinitionState.NEW, null, null, null, List.of());
+            }
+            List<RoadmapEntry> entries = roadmap.findByDefinitionIdOrderByPositionAsc(row.getId());
+            Map<UUID, WorkItem> features = items.findAllById(entries.stream().map(RoadmapEntry::getFeatureId)
+                    .filter(java.util.Objects::nonNull).toList()).stream()
+                    .collect(Collectors.toMap(WorkItem::getId, Function.identity()));
+            return new ProjectDefinitionPayload(row.getState(),
+                    row.getProposal() == null ? null : current(row),
+                    row.getAccepted() == null ? null : json.readValue(row.getAccepted(), ProjectProposal.class),
+                    row.getFeatureId(),
+                    entries.stream().map(entry -> {
+                        WorkItem feature = entry.getFeatureId() == null ? null : features.get(entry.getFeatureId());
+                        RoadmapStatus status = feature == null ? RoadmapStatus.pending
+                                : feature.getDeployedVersion() != null ? RoadmapStatus.deployed : RoadmapStatus.designed;
+                        return new RoadmapEntryPayload(entry.getEntryKey(), entry.getTitle(), entry.getGoal(),
+                                List.copyOf(entry.getDependsOn()), feature == null ? null : feature.getId(), status);
+                    }).toList());
+        }
+    }
+
     // --- persistence ---
+
+    /** One per project, created by its first proposal; proposing creates no work. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "ProjectDefinition")
+    @Table(name = "work_project_definitions")
+    public static class ProjectDefinition extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "project_id", nullable = false, updatable = false)
+        private UUID projectId;
+        @Enumerated(EnumType.STRING)
+        @Column(nullable = false)
+        private DefinitionState state;
+        @Column(columnDefinition = "text")
+        private String proposal;
+        @Column(columnDefinition = "text")
+        private String accepted;
+        /** The Foundations feature (Feature 0) the first acceptance created. */
+        @Column(name = "feature_id")
+        private UUID featureId;
+    }
+
+    public interface ProjectDefinitionRepository extends JpaRepository<ProjectDefinition, UUID> {
+        Optional<ProjectDefinition> findByProjectId(UUID projectId);
+    }
+
+    /** Immutable project proposal content plus its acceptance receipt. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "ProjectProposalRow")
+    @Table(name = "work_project_definition_proposals")
+    public static class ProjectProposalRow extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "definition_id", nullable = false, updatable = false)
+        private UUID definitionId;
+        @Column(name = "proposal_id", nullable = false, updatable = false)
+        private UUID proposalId;
+        @Column(nullable = false, updatable = false, columnDefinition = "text")
+        private String content;
+        @Column(columnDefinition = "text")
+        private String result;
+    }
+
+    public interface ProjectProposalRepository extends JpaRepository<ProjectProposalRow, UUID> {
+        Optional<ProjectProposalRow> findByDefinitionIdAndProposalId(UUID definitionId, UUID proposalId);
+    }
+
+    /** An accepted roadmap entry, in order, and the feature an orchestrator designed for it. */
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "RoadmapEntry")
+    @Table(name = "work_project_roadmap")
+    public static class RoadmapEntry extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "definition_id", nullable = false, updatable = false)
+        private UUID definitionId;
+        @Column(name = "entry_key", nullable = false, updatable = false, length = 64)
+        private String entryKey;
+        @Column(nullable = false)
+        private int position;
+        @Column(nullable = false, length = 300)
+        private String title;
+        @Column(nullable = false, columnDefinition = "text")
+        private String goal;
+        @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+        @Column(name = "depends_on", nullable = false, columnDefinition = "jsonb")
+        private List<String> dependsOn = new ArrayList<>();
+        @Column(name = "feature_id")
+        private UUID featureId;
+    }
+
+    public interface RoadmapEntryRepository extends JpaRepository<RoadmapEntry, UUID> {
+        List<RoadmapEntry> findByDefinitionIdOrderByPositionAsc(UUID definitionId);
+    }
 
     /** Definition metadata is independent of executable items: proposing creates no work. */
     @Getter
@@ -2691,6 +3039,46 @@ public class ProjectWorkFeature {
 
     public record DefinitionResult(DefinitionPayload definition, List<IssuePayload> issues,
                                     List<ItemPayload> items) { }
+
+    /** A global decision, why it was taken and what it affects (the test policy is one of them). */
+    public record ProjectDecision(@NotBlank @Size(max = 2_000) String decision,
+                                  @NotBlank @Size(max = 4_000) String reason,
+                                  @NotBlank @Size(max = 2_000) String affects) { }
+
+    /** {@code dependsOn}: keys of earlier entries; none (or null) depends on Foundations. */
+    public record RoadmapEntryDraft(@NotBlank @Size(max = 64) @Pattern(regexp = "[a-z0-9][a-z0-9-]*") String key,
+                                    @NotBlank @Size(max = 300) String title,
+                                    @NotBlank @Size(max = 20_000) String goal,
+                                    @Size(max = 50) List<@NotBlank @Size(max = 64) String> dependsOn) {
+        public RoadmapEntryDraft {
+            dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
+        }
+    }
+
+    /**
+     * The client owns the revision id; retries must send identical content and the same id.
+     * {@code vision} (problem, users, scope, out of scope) and {@code architecture} (stack, components,
+     * data, integrations) are Markdown.
+     */
+    public record ProjectProposal(@NotNull UUID proposalId, UUID previousProposalId,
+                                  @NotBlank @Size(max = 40_000) String vision,
+                                  @NotBlank @Size(max = 40_000) String architecture,
+                                  @NotNull @Size(max = 100) List<@Valid @NotNull ProjectDecision> decisions,
+                                  @NotNull @Size(max = 50) List<@Valid @NotNull RoadmapEntryDraft> roadmap,
+                                  @NotNull @Valid FeatureDraft foundations) { }
+
+    public enum RoadmapStatus { pending, designed, deployed }
+
+    public record RoadmapEntryPayload(String key, String title, String goal, List<String> dependsOn, UUID featureId,
+                                      RoadmapStatus status) { }
+
+    /** {@code featureId}: the Foundations feature, once accepted. */
+    public record ProjectDefinitionPayload(DefinitionState state, ProjectProposal proposal, ProjectProposal accepted,
+                                           UUID featureId, List<RoadmapEntryPayload> roadmap) { }
+
+    public record ProjectDefinitionResult(ProjectDefinitionPayload definition, List<ItemPayload> items) { }
+
+    public record RoadmapLink(UUID featureId) { }
 
     /**
      * {@code planned}: not started; {@code running}: the runner works on it;

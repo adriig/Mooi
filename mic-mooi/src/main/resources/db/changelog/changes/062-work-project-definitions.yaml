@@ -1,0 +1,47 @@
+databaseChangeLog:
+  - changeSet:
+      id: 062-work-project-definitions
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE work_project_definitions (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+                state varchar(16) NOT NULL CHECK (state IN ('NEW', 'DEFINED')),
+                proposal text,
+                accepted text,
+                feature_id uuid REFERENCES work_items(id) ON DELETE SET NULL,
+                created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL
+              );
+              CREATE TABLE work_project_definition_proposals (
+                id uuid PRIMARY KEY,
+                definition_id uuid NOT NULL REFERENCES work_project_definitions(id) ON DELETE CASCADE,
+                proposal_id uuid NOT NULL,
+                content text NOT NULL,
+                result text,
+                created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL,
+                UNIQUE (definition_id, proposal_id)
+              );
+              CREATE TABLE work_project_roadmap (
+                id uuid PRIMARY KEY,
+                definition_id uuid NOT NULL REFERENCES work_project_definitions(id) ON DELETE CASCADE,
+                entry_key varchar(64) NOT NULL,
+                position integer NOT NULL,
+                title varchar(300) NOT NULL,
+                goal text NOT NULL,
+                depends_on jsonb NOT NULL DEFAULT '[]',
+                feature_id uuid REFERENCES work_items(id) ON DELETE SET NULL,
+                created_at timestamptz NOT NULL,
+                updated_at timestamptz NOT NULL,
+                UNIQUE (definition_id, entry_key)
+              );
+      rollback:
+        - dropTable:
+            tableName: work_project_roadmap
+        - dropTable:
+            tableName: work_project_definition_proposals
+        - dropTable:
+            tableName: work_project_definitions

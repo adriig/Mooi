@@ -18,22 +18,27 @@ vuelve a permitir nuevas propuestas sin tocar lo ya creado.
 
 Las rutas de usuario comparten el prefijo `/projects/{projectId}/work/definition`:
 
-- `GET`: propuesta actual, última propuesta aceptada y resultados (`featureId` y roadmap con el
-  estado y el enlace de cada entrada).
+- `GET`: `{state, proposal, accepted, featureId, roadmap}`: estado (`NEW` o `DEFINED`), propuesta
+  actual, última propuesta aceptada, la feature Fundaciones y el roadmap con el estado y el enlace de
+  cada entrada.
 - `PUT /proposal`: guarda una propuesta revisionada, sin escribir en el repositorio ni crear trabajo
   ejecutable.
-- `POST /accept` con `{"proposalId": "<uuid>"}`: acepta exactamente esa revisión.
+- `POST /accept` con `{"proposalId": "<uuid>"}`: acepta exactamente esa revisión. Aceptar tras
+  reabrir conserva la Fundaciones existente (se edita como cualquier feature) y los enlaces de las
+  entradas del roadmap que mantienen su key; una entrada ya diseñada que la nueva propuesta omite
+  conserva su feature.
 - `POST /reopen` con `{"proposalId": "<uuid actual>"}`: vuelve a permitir propuestas conservando
   propuesta, aceptación y resultados anteriores. Para una definición sin propuesta se envía
   `{"proposalId": null}`.
 
 Las mutaciones responden `{definition, items}` y publican `work.definition.project` con
 `{projectId, definition}` para sincronizar el panel; aceptar publica además el evento existente
-`work.item` de la feature creada. mic-mooi ofrece las mismas rutas bajo `/me/projects`, autenticadas
+`work.item` por cada item devuelto. mic-mooi ofrece las mismas rutas bajo `/me/projects`, autenticadas
 mediante el servicio y limitadas al propietario del proyecto. Los agentes tienen `GET` y
 `PUT /proposal` bajo `/sessions/{sessionId}/work/agent/definition` y
 `PUT /sessions/{sessionId}/work/agent/definition/roadmap/{key}` con `{"featureId": "<uuid>"}` para
-enlazar una entrada del roadmap a su feature diseñada; la aceptación se reserva a la API autenticada
+enlazar una entrada del roadmap a su feature diseñada (`null` la desenlaza; una feature solo se
+enlaza a una entrada); el `GET` de trabajo del agente también expone `newProject`. La aceptación se reserva a la API autenticada
 del usuario y no tiene una ruta de agente.
 
 Ejemplo de propuesta:
@@ -113,9 +118,11 @@ Ejemplo de propuesta:
 `vision` y `architecture` son texto Markdown: la visión cubre problema, usuarios, alcance cerrado y
 fuera de alcance; la arquitectura, stack, componentes, datos e integraciones. `decisions` es una lista
 de `{decision, reason, affects}` e incluye la política de tests. `roadmap` es una lista ordenada de
-`{key, title, goal, dependsOn}`; `dependsOn` nombra otras entradas por key y una entrada sin
-dependencias depende de Fundaciones. `foundations` contiene el `FeatureDraft` actual (`title`, `spec`,
-`dependsOn`, `tasks`) de la Feature 0, con el contrato de tareas habitual.
+`{key, title, goal, dependsOn}` de hasta 50 entradas con keys únicas (`[a-z0-9][a-z0-9-]*`);
+`dependsOn` nombra por key entradas anteriores de la lista y una entrada sin dependencias depende de
+Fundaciones. `foundations` contiene el `FeatureDraft` actual (`title`, `spec`, `dependsOn`, `tasks`)
+de la Feature 0, con el contrato de tareas habitual; su `dependsOn` es siempre `null`. Cada entrada
+del roadmap devuelve además `featureId` y `status`: `pending`, `designed` o `deployed`.
 
 Fundaciones contiene siempre una tarea `docs` que escribe `docs/VISION.md`, `docs/ARCHITECTURE.md`,
 `docs/DECISIONS.md` y `docs/ROADMAP.md` a partir de la propuesta aceptada, las tareas de base técnica

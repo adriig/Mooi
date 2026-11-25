@@ -7,7 +7,9 @@ announces every change on the player's live channel:
 - `work.item` `{projectId, item}`: an item was created or changed (its tasks travel with it);
 - `work.removed` `{projectId, itemId}`;
 - `work.issue` `{projectId, issue}`: a defect or debt issue was created or changed;
-- `work.settings` `{projectId, settings}`: the project's factory limits changed.
+- `work.settings` `{projectId, settings}`: the project's factory limits changed;
+- `work.definition` `{projectId, number, definition}`: an issue's definition changed;
+- `work.definition.project` `{projectId, definition}`: the project's definition or roadmap changed.
 
 Every plain session's agent decides whether a request is a single task (done in that very session), a
 feature (which it designs, as orchestrator, into tasks with blocking dependencies), a defect or debt,
@@ -43,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, overload
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, Depends, Query, Request, status
@@ -78,6 +81,7 @@ EVENT_WORK_REMOVED = "work.removed"
 EVENT_WORK_ISSUE = "work.issue"
 EVENT_WORK_SETTINGS = "work.settings"
 EVENT_WORK_DEFINITION = "work.definition"
+EVENT_WORK_DEFINITION_PROJECT = "work.definition.project"
 
 Json = dict[str, Any]
 
@@ -236,6 +240,58 @@ async def _change_definition(caller: Caller, project_id: UUID, number: int, acti
         return result
 
 
+async def _change_project_definition(caller: Caller, project_id: UUID, method: str, path: str,
+                                     payload: Json) -> Json:
+    """Views and agents share proposals and roadmap links; acceptance and reopening belong to the user."""
+    async with _lock_for(_project_locks, project_id):
+        result = await mooi.send_work(caller, method, project_id, f"/definition{path}", payload) or {}
+        for item in result.get("items", []):
+            _publish_item(caller.player_id, item)
+        sessions._channels.publish(caller.player_id, EVENT_WORK_DEFINITION_PROJECT, {
+            "projectId": str(project_id), "definition": result.get("definition"),
+        })
+        return result
+
+
+def _project_file(path: str) -> bool:
+    """Whether a versioned path is project code for the new-project heuristic: design documents, GitHub
+    configuration and the root README, LICENSE, .gitignore, AGENTS.md and CLAUDE.md do not count."""
+    if path.startswith(("docs/", ".github/")):
+        return False
+    if "/" in path:
+        return True
+    name = path.lower()
+    return name not in (".gitignore", "agents.md", "claude.md") and name.split(".")[0] not in ("readme", "license")
+
+
+async def _new_project(caller: Caller, project_id: UUID, work: Json) -> bool:
+    """A project with no feature and at most `_NEW_PROJECT_FILES` project files on its default branch is
+    new: its first work is the project's definition. The count is cached briefly, since the views poll."""
+    if any(item.get("kind") == "feature" for item in work.get("items", [])):
+        return False
+    async with _lock_for(_file_count_locks, project_id):
+        cached = _file_counts.get(project_id)
+        if cached is None or time.monotonic() - cached[0] >= _FILE_COUNT_TTL:
+            try:
+                project = await mooi.fetch_project(caller, project_id)
+                token = await mooi.fetch_github_token(caller)
+                files = await workspaces.tracked_files(project.full_name, project.default_branch, token)
+                count: int | None = sum(1 for path in files if _project_file(path))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.info("The files of project %s could not be counted", project_id, exc_info=True)
+                count = None
+            cached = (time.monotonic(), count)
+            _file_counts[project_id] = cached
+    return cached[1] is not None and cached[1] <= _NEW_PROJECT_FILES
+
+
+async def _project_work(caller: Caller, project_id: UUID) -> Json:
+    work = await mooi.fetch_work(caller, project_id)
+    return {**work, "newProject": await _new_project(caller, project_id, work)}
+
+
 async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
     """GitHub and factory state converge through the same operation for views, agents and runner."""
     # Throttle attempts as well as successful responses; repeated failures must not turn each
@@ -287,7 +343,30 @@ async def save_work_settings(project_id: UUID, settings: Annotated[Json, Body()]
 
 @router.get("/projects/{project_id}/work")
 async def project_work(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    return await mooi.fetch_work(caller, project_id)
+    return await _project_work(caller, project_id)
+
+
+@router.get("/projects/{project_id}/work/definition")
+async def project_definition(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await mooi.send_work(caller, "GET", project_id, "/definition") or {}
+
+
+@router.put("/projects/{project_id}/work/definition/proposal")
+async def propose_project_definition(project_id: UUID, proposal: Annotated[Json, Body()],
+                                     caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_project_definition(caller, project_id, "PUT", "/proposal", proposal)
+
+
+@router.post("/projects/{project_id}/work/definition/accept")
+async def accept_project_definition(project_id: UUID, revision: Annotated[Json, Body()],
+                                    caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_project_definition(caller, project_id, "POST", "/accept", revision)
+
+
+@router.post("/projects/{project_id}/work/definition/reopen")
+async def reopen_project_definition(project_id: UUID, revision: Annotated[Json, Body()],
+                                    caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _change_project_definition(caller, project_id, "POST", "/reopen", revision)
 
 
 @router.get("/projects/{project_id}/work/issues")
@@ -641,7 +720,7 @@ async def agent_work(session_id: UUID, request: Request) -> Json:
         issues_error = None
     except ApiException as failure:
         issues, issues_error = [], failure.message
-    work = await mooi.fetch_work(caller, session.project_id)
+    work = await _project_work(caller, session.project_id)
     return {**work, "issues": issues, "issuesError": issues_error}
 
 
@@ -809,6 +888,36 @@ async def agent_propose_issue_definition(session_id: UUID, number: int, request:
     if session.definition_issue_number != number:
         raise ApiException.not_found("Not found")
     return await _change_definition(caller, session.project_id, number, "proposal", proposal)
+
+
+async def _project_definition_access(session_id: UUID, request: Request) -> tuple[Session, Caller]:
+    """Plain sessions (the first request of a new project, orchestrators designing the next roadmap entry)
+    and the project's own definition chat, a definition session tied to no issue."""
+    session = get_registry().get(session_id)
+    project_chat = session is not None and session.kind == "definition" and session.definition_issue_number is None
+    return await sessions._agent_access(session_id, request, "definition" if project_chat else "session")
+
+
+@router.get("/sessions/{session_id}/work/agent/definition")
+async def agent_project_definition(session_id: UUID, request: Request) -> Json:
+    session, caller = await _project_definition_access(session_id, request)
+    return await mooi.send_work(caller, "GET", session.project_id, "/definition") or {}
+
+
+@router.put("/sessions/{session_id}/work/agent/definition/proposal")
+async def agent_propose_project_definition(session_id: UUID, request: Request,
+                                           proposal: Annotated[Json, Body()]) -> Json:
+    session, caller = await _project_definition_access(session_id, request)
+    _analyst_guard(session_id)
+    return await _change_project_definition(caller, session.project_id, "PUT", "/proposal", proposal)
+
+
+@router.put("/sessions/{session_id}/work/agent/definition/roadmap/{key}")
+async def agent_link_roadmap(session_id: UUID, key: str, request: Request, link: Annotated[Json, Body()]) -> Json:
+    """Links a roadmap entry to the feature this orchestrator designed for it."""
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
+    return await _change_project_definition(caller, session.project_id, "PUT", f"/roadmap/{quote(key, safe='')}", link)
 
 
 @router.get("/sessions/{session_id}/work/agent/settings")
@@ -1315,6 +1424,10 @@ _saved: dict[UUID, int] = {}
 _advancing: dict[UUID, asyncio.Task[None]] = {}
 _behind: set[UUID] = set()
 _issue_sync_at: dict[UUID, float] = {}
+_NEW_PROJECT_FILES = 10
+_FILE_COUNT_TTL = 300
+_file_counts: dict[UUID, tuple[float, int | None]] = {}
+_file_count_locks: weakref.WeakValueDictionary[UUID, asyncio.Lock] = weakref.WeakValueDictionary()
 _LAUNCH_QUOTA_TTL = 300
 _launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
 _quota_wakeup: asyncio.TimerHandle | None = None

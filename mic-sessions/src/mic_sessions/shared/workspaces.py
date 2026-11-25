@@ -470,6 +470,35 @@ class Workspaces:
         finally:
             await self._remove_document_directory(operation_id)
 
+    async def tracked_files(self, project_full_name: str, target: str, token: str) -> list[str]:
+        """The paths versioned on the target branch, from a blobless shallow fetch with no checkout; an
+        empty repository (no such branch yet) has none."""
+        await self.validate_branch(target)
+        operation_id = uuid4()
+        root = self._document_directory(operation_id)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.mkdir()
+        try:
+            (root / ".mooi-document").write_text(str(operation_id))
+            repository = root / "repository"
+            repository.mkdir()
+            git = ("-C", str(repository))
+            await self._git(*git, "init", "-q")
+            await self._git(*git, "remote", "add", "origin", f"https://github.com/{project_full_name}.git")
+            remote = f"refs/remotes/origin/{target}"
+            code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, *git, "fetch", "--depth", "1", "--no-tags",
+                                              "--filter=blob:none", "origin", f"+refs/heads/{target}:{remote}",
+                                              auth=token)
+            if code != 0:
+                if "couldn't find remote ref" in detail:
+                    return []
+                LOG.warning("git fetch failed with %s: %s", code, detail or "no output")
+                raise ApiException.bad_gateway(detail or "The default branch could not be fetched")
+            listed = await self._git(*git, "ls-tree", "-r", "-z", "--name-only", "--full-tree", remote)
+            return [path for path in listed.split("\0") if path]
+        finally:
+            await self._remove_document_directory(operation_id)
+
     async def remove_release_checkout(self, operation_id: UUID) -> None:
         directory = self._release_directory(operation_id)
         if directory.is_symlink():
@@ -1469,3 +1498,7 @@ async def commit_documents(
 ) -> str | None:
     return await get_workspaces().commit_documents(project_full_name, target, directory, files, message, identity,
                                                    token, adopt_suffix=adopt_suffix)
+
+
+async def tracked_files(project_full_name: str, target: str, token: str) -> list[str]:
+    return await get_workspaces().tracked_files(project_full_name, target, token)
