@@ -997,14 +997,19 @@ def _work_section(session: Session, root: str) -> str:
         return _task_section(run, root)
     work = f"{root}/work/agent"
     return f"""## Project work: features, defects and debt (the software factory)
-Mooi runs this project as a software factory. Whenever the user asks for work, first decide what it is, and say which one you chose:
+Mooi runs this project as a software factory. Whenever the user asks for work, first read `GET {work}`. If `newProject: true` or the user asks to define the project, follow Project definition below instead of recording a normal feature. Otherwise decide what the work is, and say which one you chose:
 - **A single task** (one focused change): do it right here in this session. Never record it.
 - **A feature** (work worth several tasks): do not implement it here. Design it as the factory's orchestrator and record it; the user reviews it in the Planification and Board tabs and presses Start, and the platform then runs every task in its own session.
 - **A defect** (something that does not work as it should) or **debt** (technical debt to pay back): record it as a GitHub issue through the platform API, never with your own tools. Fix it here only if the user asks you to.
 Never start work items yourself: Start belongs to the user.
 
+Project definition and Feature 0:
+- Read `docs/project-definitions.md` for the proposal contract and revision rules. Lead the definition with the user; read `GET {work}/definition` and save reviewable proposals with `PUT {work}/definition/proposal`. Proposing changes no repository files and creates no executable work. Never accept a proposal: only the user accepts it from the UI.
+- The `foundations` FeatureDraft must include a `docs` task writing `docs/VISION.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` and `docs/ROADMAP.md` from the accepted proposal, and technical base tasks (skeleton, structure, dependencies, conventions). For web applications, include an `infra` task with `tests: true` so QA checks the preview; its description must require following exactly the Deploy brief (`GET /sessions/{{sessionId}}/deployment/agent/brief` in that task's session), which authorizes editing `compose.yml` as the deployment channel's owner. Production and backups stay in their own chats. Use the assignment expert below for all foundations tasks, as for any feature.
+
 Designing a feature:
-- Read the code first. Write a `spec`: the goal, the user-facing behaviour and the main technical decisions.
+- Before designing any feature, read `docs/VISION.md`, `docs/ARCHITECTURE.md` and `docs/DECISIONS.md` if they exist; respect their decisions or explicitly propose changing them. Read the real code. Write a `spec`: the goal, the user-facing behaviour and the main technical decisions.
+- To design the next roadmap entry, read `GET {work}/definition` and follow `docs/project-definitions.md`: design the next pending entry as a normal feature with feature-level `dependsOn` set to the previous entry's feature id (or Fundaciones). After recording it, link it with `PUT {work}/definition/roadmap/{{key}}` and JSON `{{"featureId": "<created feature id>"}}`.
 - Break it into tasks of about one to four hours of agent work. Each task runs in a fresh session with its own task and access to the feature's spec by section, so its `description` must be self-contained: what to build, where in the code, and the decisions it must follow. Name relevant spec sections explicitly, including shared decisions and preparation; QA must have enough preparation in its description. Write verifiable `acceptance` criteria for every task.
 - Categories: `ux` (UX/UI), `dev` (development), `infra` (infrastructure/DevOps), `docs` (documentation). QA tasks are never written by hand: set `tests: true` on a task whose behaviour must be checked, with optional `qa` settings, and the platform adds its QA task, blocked until the task merges.
 - `dependsOn` lists the keys of tasks of the same feature that must be merged first. Add a dependency only when a task really builds on another's code (a new system before the features that use it); everything else stays parallel. Never make a task depend on another feature; at most a whole feature `dependsOn` another feature's id.
