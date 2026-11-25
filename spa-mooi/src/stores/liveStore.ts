@@ -4,6 +4,7 @@ import { applyPlatformSnapshot, applyPlatformStreamEvent } from '@/features/plat
 import type { PlatformEnvironmentVariable } from '@/features/platform/types/PlatformEnvironmentVariable';
 import type { PlatformSnapshot } from '@/features/platform/types/PlatformSnapshot';
 import type { PlatformStreamState } from '@/features/platform/types/PlatformStreamState';
+import type { ProjectDefinition } from '@/features/work/types/ProjectDefinition';
 import type { ProjectWork } from '@/features/work/types/ProjectWork';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
@@ -95,6 +96,9 @@ export const useLiveStore = create<LiveState>((set) => ({
     if (frame.type === 'work.item') {
       return { work: { ...state.work, [projectId]: upsertItem(state.work[projectId], data.item as WorkItem) } };
     }
+    if (frame.type === 'work.definition.project') {
+      return { work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), definition: data.definition as ProjectDefinition } } };
+    }
     if (frame.type === 'work.removed') {
       const current = state.work[projectId];
       if (!current?.items) return state;
@@ -128,8 +132,13 @@ export const useLiveStore = create<LiveState>((set) => ({
       [projectId]: applyPlatformSnapshot(state.operations[kind][projectId] ?? EMPTY, snapshot) } },
   })),
 
-  adoptWorkItems: (projectId, items) => set((state) => ({
-    work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), items } },
+  adoptWorkItems: (projectId, items, newProject) => set((state) => ({
+    work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), items,
+      ...(newProject === undefined ? {} : { newProject }) } },
+  })),
+
+  adoptProjectDefinition: (projectId, definition) => set((state) => ({
+    work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), definition } },
   })),
 
   adoptWorkIssues: (projectId, issues) => set((state) => ({

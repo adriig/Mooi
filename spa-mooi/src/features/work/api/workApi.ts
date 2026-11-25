@@ -1,5 +1,6 @@
 import { sessionsFetch } from '@/features/sessions/lib/sessionsFetch';
 import type { Session } from '@/features/sessions/types/Session';
+import type { ProjectDefinition } from '@/features/work/types/ProjectDefinition';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
 import type { WorkSettings } from '@/features/work/types/WorkSettings';
@@ -8,12 +9,21 @@ import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const workPath = (projectId: string, path = ''): string => `/projects/${encodeURIComponent(projectId)}/work${path}`;
 
+/** A failed call that keeps its HTTP status, so a view can explain a conflict in its own words. */
+export class WorkApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 const send = async <T>(path: string, method: string, fallback: string, body?: unknown): Promise<T> => {
   const response = await sessionsFetch(path, {
     method,
     ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   });
-  if (!response.ok) throw new Error(await apiErrorMessage(response, fallback));
+  if (!response.ok) throw new WorkApiError(await apiErrorMessage(response, fallback), response.status);
   return (response.status === 204 ? undefined : await response.json()) as T;
 };
 
@@ -21,8 +31,11 @@ const send = async <T>(path: string, method: string, fallback: string, body?: un
  * Through mic-sessions, which announces every change live to the player's other views and agents:
  * callers may adopt the answer at once, the live channel brings the same item a moment later.
  */
+export const fetchProjectWork = (projectId: string): Promise<{ items: WorkItem[]; newProject?: boolean }> =>
+  send(workPath(projectId), 'GET', 'Could not load the project work.');
+
 export const fetchWorkItems = async (projectId: string): Promise<WorkItem[]> =>
-  (await send<{ items: WorkItem[] }>(workPath(projectId), 'GET', 'Could not load the project work.')).items;
+  (await fetchProjectWork(projectId)).items;
 
 /** Defects and debt as GitHub has them, read with the player's own grant. */
 export const fetchWorkIssues = (projectId: string): Promise<{ issues: WorkIssue[]; items: WorkItem[] }> =>
@@ -87,3 +100,17 @@ export const fetchWorkSettings = (projectId: string) =>
 
 export const saveWorkSettings = (projectId: string, settings: WorkSettings) =>
   send<WorkSettings>(workPath(projectId, '/settings'), 'PUT', 'Could not save the factory settings.', settings);
+
+/** The project's definition: current proposal, accepted one, Fundaciones feature and roadmap. */
+export const fetchProjectDefinition = (projectId: string) =>
+  send<ProjectDefinition>(workPath(projectId, '/definition'), 'GET', 'Could not load the project definition.');
+
+/** Accepts exactly this revision: creates Fundaciones and saves the roadmap. Only the user can do it. */
+export const acceptProjectDefinition = (projectId: string, proposalId: string) =>
+  send<{ definition: ProjectDefinition; items: WorkItem[] }>(workPath(projectId, '/definition/accept'), 'POST',
+    'Could not accept the proposal.', { proposalId });
+
+/** Allows new proposals again, keeping the current one, the acceptance and what it created. */
+export const reopenProjectDefinition = (projectId: string, proposalId: string | null) =>
+  send<{ definition: ProjectDefinition; items: WorkItem[] }>(workPath(projectId, '/definition/reopen'), 'POST',
+    'Could not reopen the definition.', { proposalId });

@@ -2,6 +2,7 @@ import type { LiveOperationKind } from '@/features/live/types/LiveOperationKind'
 import type { PlatformEnvironmentVariable } from '@/features/platform/types/PlatformEnvironmentVariable';
 import type { PlatformSnapshot } from '@/features/platform/types/PlatformSnapshot';
 import type { PlatformStreamState } from '@/features/platform/types/PlatformStreamState';
+import type { ProjectDefinition } from '@/features/work/types/ProjectDefinition';
 import type { ProjectWork } from '@/features/work/types/ProjectWork';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
@@ -36,7 +37,8 @@ export interface LiveState {
   /** Folds one frame of the player's channel that is not about sessions. */
   apply: (frame: StreamFrame) => void;
   adoptSnapshot: (kind: LiveOperationKind, projectId: string, snapshot: PlatformSnapshot) => void;
-  adoptWorkItems: (projectId: string, items: WorkItem[]) => void;
+  adoptWorkItems: (projectId: string, items: WorkItem[], newProject?: boolean) => void;
+  adoptProjectDefinition: (projectId: string, definition: ProjectDefinition) => void;
   adoptWorkIssues: (projectId: string, issues: WorkIssue[]) => void;
   /** One item as an answer or an event brought it. */
   adoptWorkItem: (item: WorkItem) => void;

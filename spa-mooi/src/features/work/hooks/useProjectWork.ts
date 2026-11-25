@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { fetchWorkIssues, fetchWorkItems } from '@/features/work/api/workApi';
+import { fetchProjectWork, fetchWorkIssues } from '@/features/work/api/workApi';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
 import { useLiveStore } from '@/stores/liveStore';
@@ -37,8 +37,8 @@ export const useProjectWork = (projectId: string, enabled = true): UseProjectWor
     if (!enabled) return undefined;
     let active = true;
     const live = useLiveStore.getState();
-    const initialItems = fetchWorkItems(projectId)
-      .then((items) => { if (active) { live.adoptWorkItems(projectId, items); setLoadError(null); } })
+    const initialItems = fetchProjectWork(projectId)
+      .then(({ items, newProject }) => { if (active) { live.adoptWorkItems(projectId, items, newProject ?? false); setLoadError(null); } })
       .catch((failure: Error) => { if (active) setLoadError(failure.message); });
     // Synchronization can close an item: adopt it after the initial snapshot to avoid restoring stale work.
     void initialItems.then(() => fetchWorkIssues(projectId))

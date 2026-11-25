@@ -21,6 +21,12 @@ interface NewSessionDialogProps {
   onClose: () => void;
   onCreate: (request: CreateSessionRequest) => Promise<boolean>;
   initialMessage?: string;
+  /** Preselects the strongest model of the chosen account (architecture or design work); still changeable. */
+  preferStrongModel?: boolean;
+  title?: string;
+  description?: string;
+  /** Prefix of the proposed branch, `feat` by default. */
+  branchPrefix?: string;
 }
 
 const slugify = (value: string): string => {
@@ -33,7 +39,6 @@ const slugify = (value: string): string => {
 };
 
 const MAX_BRANCH_LENGTH = 120;
-const BRANCH_PREFIX = 'feat/';
 
 const randomSuffix = (): string => Math.random().toString(36).slice(2, 8);
 
@@ -41,13 +46,17 @@ const randomSuffix = (): string => Math.random().toString(36).slice(2, 8);
  * Suggest a fresh branch per opening; users can also reuse an existing remote branch.
  * Each session has its own clone, so matching branch names can run independently.
  */
-const proposeBranchName = (projectName: string): string => {
+const proposeBranchName = (projectName: string, prefix: string): string => {
   const suffix = randomSuffix();
-  const slugBudget = MAX_BRANCH_LENGTH - BRANCH_PREFIX.length - suffix.length - 1;
+  const slugBudget = MAX_BRANCH_LENGTH - prefix.length - 1 - suffix.length - 1;
   const slug = slugify(projectName).slice(0, Math.max(slugBudget, 1));
 
-  return `${BRANCH_PREFIX}${slug}-${suffix}`;
+  return `${prefix}/${slug}-${suffix}`;
 };
+
+const WEAK_MODEL = /mini|haiku|flash|lite|spark|nano/i;
+const STRONG_MODEL = /opus|fable|ultra|pro\b|max/i;
+const modelScore = (id: string): number => (WEAK_MODEL.test(id) ? 0 : STRONG_MODEL.test(id) ? 3 : /sonnet/i.test(id) ? 2 : 1);
 
 export const NewSessionDialog = ({
   open,
@@ -60,6 +69,10 @@ export const NewSessionDialog = ({
   onClose,
   onCreate,
   initialMessage,
+  preferStrongModel = false,
+  title = 'New session',
+  description,
+  branchPrefix = 'feat',
 }: NewSessionDialogProps) => {
   const [branch, setBranch] = useState('');
   const [refreshingConnections, setRefreshingConnections] = useState(false);
@@ -79,9 +92,22 @@ export const NewSessionDialog = ({
       setRefreshingConnections(true);
       void onRefreshConnections().finally(() => setRefreshingConnections(false));
     }
-    if (open && !branchEditedRef.current) setBranch(projectName ? proposeBranchName(projectName) : '');
+    if (open && !branchEditedRef.current) setBranch(projectName ? proposeBranchName(projectName, branchPrefix) : '');
     wasOpenRef.current = open;
-  }, [open, projectName, onRefreshConnections]);
+  }, [open, projectName, branchPrefix, onRefreshConnections]);
+
+  const catalog = choice.selectedProvider;
+  const { selectModel, setEffort } = choice;
+  useEffect(() => {
+    if (!open || !preferStrongModel || !catalog || catalog.unavailable) return;
+    const best = catalog.models.reduce<(typeof catalog.models)[number] | null>(
+      (top, entry) => (!top || modelScore(entry.id) > modelScore(top.id) ? entry : top), null);
+    if (!best || modelScore(best.id) <= modelScore(catalog.defaultModel)) return;
+    selectModel(best.id);
+    if (best.efforts.includes('high')) setEffort('high');
+  // Only a new catalog re-picks: the user's later choice must stick.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, preferStrongModel, catalog]);
 
   const canSubmit = !refreshingConnections && Boolean(project) && choice.ready && branch.trim().length > 0;
 
@@ -110,9 +136,9 @@ export const NewSessionDialog = ({
     <Modal
       open={open}
       onClose={onClose}
-      title="New session"
-      description={project && !projectPicker ? `Start a live agent session on ${project.fullName}.`
-        : 'Pick a project and start a live agent session on it.'}
+      title={title}
+      description={description ?? (project && !projectPicker ? `Start a live agent session on ${project.fullName}.`
+        : 'Pick a project and start a live agent session on it.')}
       footer={
         <>
           <Button variant="ghost" onClick={onClose} disabled={busy}>

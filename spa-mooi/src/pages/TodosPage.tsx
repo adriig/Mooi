@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { FolderGit2, Info } from 'lucide-react';
 import { useProjects } from '@/features/projects/hooks/useProjects';
 import { useSelectedProject } from '@/features/projects/hooks/useSelectedProject';
+import { ProjectDefinitionSection } from '@/features/work/components/ProjectDefinitionSection';
 import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
 import { createWorkIssue } from '@/features/work/api/workApi';
 import { IssueComposer } from '@/features/work/components/IssueComposer';
@@ -41,7 +42,7 @@ const ProjectIssueComposer = ({ projects, projectId, onProjectChange }: {
 export const TodosPage = () => {
   const { projects, status, error, reload } = useProjects();
   const { projectId } = useSelectedProject();
-  const { connections } = useAgentConnections();
+  const { connections, reload: reloadConnections } = useAgentConnections();
   const playerId = useAuthStore((state) => state.player?.id);
   const selection = useTodoProjectSelectionStore((state) => playerId ? state.selections[playerId] : undefined);
   const select = useTodoProjectSelectionStore((state) => state.select);
@@ -94,6 +95,10 @@ export const TodosPage = () => {
           <div className="flex flex-col gap-2 empty:hidden">
             {visibleProjects.map((project) => <ProjectWorkLoader key={project.id} projectId={project.id} projectName={project.name} />)}
           </div>
+          {visibleProjects.map((project) => (
+            <ProjectDefinitionSection key={project.id} project={project} connections={connections}
+              reloadConnections={reloadConnections} alwaysVisible={visibleProjects.length === 1} />
+          ))}
           <TodosBoard projects={visibleProjects} kind={kind} connections={connections} />
         </>
       )}
