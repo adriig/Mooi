@@ -172,6 +172,18 @@ async def _retry_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: 
     return item or {}
 
 
+async def _restart_clean_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
+    # Serialize with this runner; mic-mooi validates ownership and eligibility under its item lock.
+    async with _lock_for(_item_locks, item_id):
+        item = await mooi.send_work(caller, "POST", project_id,
+                                    f"/items/{item_id}/tasks/{task_id}/restart-clean")
+        _touch(item_id)
+        item = _publish_item(caller.player_id, item)
+    if item and item.get("status") == "running":
+        wake()
+    return item or {}
+
+
 async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Json:
     work = await mooi.fetch_work(caller, project_id)
     item = next((entry for entry in work.get("items", []) if entry["id"] == str(item_id)), None)
@@ -427,6 +439,12 @@ async def update_task(project_id: UUID, item_id: UUID, task_id: UUID, update: An
 async def retry_task(project_id: UUID, item_id: UUID, task_id: UUID,
                      caller: Annotated[Caller, Depends(current_caller)]) -> Json:
     return await _retry_task(caller, project_id, item_id, task_id)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}/restart-clean")
+async def restart_clean_task(project_id: UUID, item_id: UUID, task_id: UUID,
+                             caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _restart_clean_task(caller, project_id, item_id, task_id)
 
 
 @router.post("/projects/{project_id}/work/items/{item_id}/reassign")
@@ -852,6 +870,13 @@ async def agent_retry_task(session_id: UUID, item_id: UUID, task_id: UUID, reque
     return await _retry_task(caller, session.project_id, item_id, task_id)
 
 
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}/restart-clean")
+async def agent_restart_clean_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
+    return await _restart_clean_task(caller, session.project_id, item_id, task_id)
+
+
 @router.post("/sessions/{session_id}/work/agent/items/{item_id}/reassign")
 async def agent_reassign_tasks(session_id: UUID, item_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
@@ -1051,6 +1076,7 @@ Platform API:
 - To change an ongoing feature without pausing it, `GET {work}/items/<itemId>/change-requests` lists its requests; `POST` there with JSON `{{"request": "<requested change>"}}` queues one. A dedicated analyst handles it at a safe point. Items and `work.item` events include `changeRequests`, with status, analysis and proposal.
 - `POST {work}/items/<itemId>/change-requests/<changeId>/decision` with JSON `{{"decision": "accept" | "reject", "userConfirmed": true}}` decides a proposal awaiting confirmation. **Both decisions require the user's explicit confirmation of that specific proposal. Never infer it from the initial change request or decide autonomously.** Acceptance relaunches the analyst with permission; completed and active tasks remain immutable, so rework becomes delta tasks.
 - Only when explicitly requested, `POST {work}/items/<itemId>/reassign` rechecks current quota for tasks not yet running and applies the first available saved assignment/fallback; `POST {work}/items/<itemId>/tasks/<taskId>/retry` restarts a queued task or one waiting to retry. Neither starts work on a planned item.
+- Only after the user's explicit decision, `POST {work}/items/<itemId>/tasks/<taskId>/restart-clean` discards saved recovery for an attention task without a session. First confirm: “El estado guardado de esta tarea no puede recuperarse. Reiniciarla desde cero descartará cualquier cambio no integrado de la sesión anterior. Esta acción no puede recuperar ese trabajo.” Retry preserves recovery; restart-clean permanently invalidates old evidence.
 - `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2, "contextHandoffPercent": 60, "stallTurns": 3}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5; context percent at which a task session checkpoints and hands off to a fresh session, 20-90; consecutive segments or turns without progress before a task waits for the user, 1-10). Change them only when the user asks.
 - `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with. `task.assignment` and `task.alternatives` come from the assignment expert, just like feature task settings."""
 

@@ -228,6 +228,14 @@ public class ProjectWorkFeature {
         return work.retryTask(principal.player().id(), projectId, itemId, taskId);
     }
 
+    @PostMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}/restart-clean")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ItemPayload restartCleanTask(@PathVariable UUID projectId, @PathVariable UUID itemId,
+                                       @PathVariable UUID taskId, Auth.Principal principal) {
+        return work.restartCleanTask(principal.player().id(), projectId, itemId, taskId);
+    }
+
     @DeleteMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}")
     @Auth.Authenticated
     @Auth.ServiceCall
@@ -876,6 +884,34 @@ public class ProjectWorkFeature {
         }
 
         @Transactional
+        public ItemPayload restartCleanTask(UUID playerId, UUID projectId, UUID itemId, UUID taskId) {
+            project(playerId, projectId);
+            WorkItem item = lockedItem(projectId, itemId);
+            requireOpen(item);
+            List<WorkTask> all = new ArrayList<>(tasks.findByItemId(itemId));
+            WorkTask task = find(all, taskId);
+            if (task.getStatus() != TaskStatus.attention || task.getSessionId() != null) {
+                throw conflict("Clean restart requires a task in attention without a session");
+            }
+            // Persist invalidation in this transaction. Bundle cleanup belongs to the runner,
+            // after this commit; historical metadata is retained for audit.
+            task.setRecoveryDisposition("clean_restart");
+            task.setDiscardedAttempt(task.getAttempts());
+            task.setAttemptsBase(task.getAttempts());
+            task.setStatus(TaskStatus.planned);
+            task.setSessionId(null);
+            task.setSegments(0);
+            task.setStalledSegments(0);
+            task.setLastSnapshotRevision(null);
+            task.setContextHandoff(null);
+            task.setReport(null);
+            task.setStartedAt(null);
+            task.setFinishedAt(null);
+            tasks.save(task);
+            return toPayload(touch(item), all);
+        }
+
+        @Transactional
         public ItemPayload deleteTask(UUID playerId, UUID projectId, UUID itemId, UUID taskId) {
             project(playerId, projectId);
             WorkItem item = lockedItem(projectId, itemId);
@@ -1017,6 +1053,9 @@ public class ProjectWorkFeature {
                 return runnerItem(item, all);
             }
             task = find(all, taskId);
+            if (task.getDiscardedAttempt() != null && progress.attempts() <= task.getDiscardedAttempt()) {
+                throw conflict("Task progress belongs to an explicitly discarded attempt");
+            }
             // A stale runner snapshot must not launch a paused item or revive a cancelled task.
             if (task.getStatus() == TaskStatus.done
                     || (task.getSessionId() == null && (item.getStatus() != ItemStatus.running
@@ -1099,6 +1138,9 @@ public class ProjectWorkFeature {
             if (task.getStatus() == TaskStatus.done) {
                 throw conflict("A completed task cannot accept new recovery evidence");
             }
+            if (task.getDiscardedAttempt() != null && update.attempt() <= task.getDiscardedAttempt()) {
+                throw conflict("Recovery attempt was explicitly discarded");
+            }
             if (update.attempt() != task.getAttempts()) {
                 throw conflict("Recovery attempt does not match the task's current attempt");
             }
@@ -1162,7 +1204,11 @@ public class ProjectWorkFeature {
                 throw badRequest("Recovery attempt must not be negative");
             }
             // Checking the task first avoids exposing whether a recovery row exists for an unknown id.
-            tasks.findById(taskId).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            WorkTask task = tasks.findById(taskId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            if (task.getDiscardedAttempt() != null && attempt <= task.getDiscardedAttempt()) {
+                throw conflict("Recovery attempt was explicitly discarded");
+            }
             return recoveries.findByTaskIdAndAttempt(taskId, attempt).map(WorkService::toRecoveryPayload)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Recovery evidence not found"));
         }
@@ -1676,7 +1722,23 @@ public class ProjectWorkFeature {
             return new RunnerItem(playerId, item.getRunnerAuthSessionId(), limits, toPayload(item, all));
         }
 
+        private RecoveryDisposition recoveryDisposition(WorkTask task, Map<UUID, TaskRecovery> currentRecovery) {
+            boolean pending = "clean_restart".equals(task.getRecoveryDisposition());
+            String state;
+            if (task.getDiscardedAttempt() != null && task.getAttempts() <= task.getDiscardedAttempt()) {
+                state = "discarded";
+            } else if (task.getAttempts() == 0) {
+                state = "normal";
+            } else {
+                state = Optional.ofNullable(currentRecovery.get(task.getId()))
+                        .map(row -> row.isSnapshotValid() ? "recoverable" : "invalid").orElse("missing");
+            }
+            return new RecoveryDisposition(state, pending, task.getDiscardedAttempt());
+        }
+
         private ItemPayload toPayload(WorkItem item, List<WorkTask> all) {
+            Map<UUID, TaskRecovery> currentRecovery = recoveries.findCurrentByItemId(item.getId()).stream()
+                    .collect(Collectors.toMap(TaskRecovery::getTaskId, row -> row));
             return new ItemPayload(item.getId(), item.getProjectId(), item.getKind(), item.getIssueNumber(),
                     item.getTitle(), item.getSpec(), item.getStatus(),
                     item.getStatus() == ItemStatus.paused ? item.getPauseReason() : null, item.getDependsOnId(),
@@ -1692,7 +1754,7 @@ public class ProjectWorkFeature {
                                             task.getEffort()),
                                      readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
                                      task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
-                                     task.getAttempts(), task.getAttemptsBase(), task.getReport(),
+                                     task.getAttempts(), task.getAttemptsBase(), task.getReport(), recoveryDisposition(task, currentRecovery),
                                      task.getSegments(), task.getStalledSegments(), task.getLastSnapshotRevision(), task.getContextHandoff(),
                                      readQaReport(task.getQaReport()),
                                      task.getFindingId(),
@@ -2707,6 +2769,14 @@ public class ProjectWorkFeature {
         @Column(name = "attempts_base", nullable = false)
         private int attemptsBase;
 
+        /** Null for legacy/normal tasks; clean_restart remains durable until launch acceptance. */
+        @Column(name = "recovery_disposition", length = 32)
+        private String recoveryDisposition;
+
+        /** Permanent watermark: evidence at or before this attempt must never be restored. */
+        @Column(name = "discarded_attempt")
+        private Integer discardedAttempt;
+
         @Column(name = "segments", nullable = false)
         private int segments;
 
@@ -2845,6 +2915,10 @@ public class ProjectWorkFeature {
     }
 
     public interface TaskRecoveryRepository extends JpaRepository<TaskRecovery, UUID> {
+
+        @Query("select recovery from WorkTaskRecovery recovery, WorkTask task where recovery.taskId = task.id "
+                + "and task.itemId = :itemId and recovery.attempt = task.attempts")
+        List<TaskRecovery> findCurrentByItemId(@Param("itemId") UUID itemId);
 
         Optional<TaskRecovery> findByTaskIdAndAttempt(UUID taskId, int attempt);
 
@@ -3267,7 +3341,7 @@ public class ProjectWorkFeature {
     public record TaskPayload(UUID id, String key, String title, TaskCategory category, String description,
                                String acceptance, Assignment assignment, List<Assignment> alternatives,
                                boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
-                               UUID sessionId, int attempts, int attemptsBase, String report,
+                               UUID sessionId, int attempts, int attemptsBase, String report, RecoveryDisposition recoveryDisposition,
                                int segments, int stalledSegments, String lastSnapshotRevision, String contextHandoff,
                                Map<String, Object> qaReport,
                                String findingId, int qaRounds, String mergeSha,
@@ -3275,6 +3349,8 @@ public class ProjectWorkFeature {
                                List<UUID> dependsOn,
                                OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
+
+    public record RecoveryDisposition(String state, boolean restartPending, Integer discardedAttempt) { }
 
     /** {@code pauseReason}: why the runner paused the item on its own; null for the player's own pause. */
     public record ItemPayload(UUID id, UUID projectId, ItemKind kind, Integer issueNumber, String title, String spec,

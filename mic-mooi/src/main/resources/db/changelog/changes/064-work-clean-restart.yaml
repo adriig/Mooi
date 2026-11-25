@@ -1,0 +1,9 @@
+databaseChangeLog:
+  - changeSet:
+      id: 064-work-clean-restart
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS recovery_disposition varchar(32);
+              ALTER TABLE work_tasks ADD COLUMN IF NOT EXISTS discarded_attempt integer;
