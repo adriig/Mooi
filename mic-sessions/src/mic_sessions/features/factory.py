@@ -28,6 +28,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -172,17 +173,32 @@ async def _create_issue(caller: Caller, project_id: UUID, draft: Json) -> Json:
     created = await mooi.send_work(caller, "POST", project_id, "/issues", draft, github=True) or {}
     _publish_issue(caller.player_id, project_id, created.get("issue"))
     _publish_item(caller.player_id, created.get("item"))
+    # The create response is authoritative for the new issue. Let the runner reconcile any
+    # already-running work against it without waiting for the normal project polling interval.
+    _issue_sync_at.pop(project_id, None)
+    wake()
     return created
 
 
 async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
     """GitHub and factory state converge through the same operation for views, agents and runner."""
+    # Throttle attempts as well as successful responses; repeated failures must not turn each
+    # 20-second runner tick into another GitHub request.
+    _issue_sync_at[project_id] = time.monotonic()
     result = await mooi.fetch_issues(caller, project_id)
     for issue in result.get("issues", []):
         _publish_issue(caller.player_id, project_id, issue)
     for item in result.get("items", []):
         _publish_item(caller.player_id, item)
     return result
+
+
+async def _sync_issues_if_due(caller: Caller, project_id: UUID) -> Json | None:
+    """Keep background GitHub polling bounded while noticing external closes promptly."""
+    last_sync = _issue_sync_at.get(project_id)
+    if last_sync is not None and time.monotonic() - last_sync < _ISSUE_SYNC_INTERVAL_SECONDS:
+        return None
+    return await _sync_issues(caller, project_id)
 
 
 async def _save_settings(caller: Caller, project_id: UUID, settings: Json) -> Json:
@@ -713,6 +729,7 @@ async def _capacity(caller: Caller, quota_limit: float, favorites: dict[str, lis
 # --- the runner ----------------------------------------------------------------------------------
 
 _TICK_SECONDS = 20
+_ISSUE_SYNC_INTERVAL_SECONDS = 120
 # The project's limits when mic-mooi sends none; each project changes them in its factory settings.
 DEFAULT_LIMITS: Json = {"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2}
 
@@ -756,6 +773,7 @@ _runner_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
 _lock = asyncio.Lock()
 _last_recovery_cleanup = 0.0
+_issue_sync_at: dict[UUID, float] = {}
 _LAUNCH_QUOTA_TTL = 300
 _launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
 
@@ -874,7 +892,7 @@ async def _tick() -> None:
     entries = await mooi.fetch_running_work()
     async with _lock:
         limits: dict[UUID, int] = {}
-        synchronized: dict[UUID, Json] = {}
+        synchronized: dict[UUID, Json | None] = {}
         for entry in entries:
             try:
                 item = entry["item"]
@@ -887,9 +905,11 @@ async def _tick() -> None:
                     if caller is None:
                         continue
                     if project_id not in synchronized:
-                        synchronized[project_id] = await _sync_issues(caller, project_id)
-                    entry = {**entry, "item": next(
-                        (row for row in synchronized[project_id].get("items", []) if row["id"] == item["id"]), item)}
+                        synchronized[project_id] = await _sync_issues_if_due(caller, project_id)
+                    synced = synchronized[project_id]
+                    if synced is not None:
+                        entry = {**entry, "item": next(
+                            (row for row in synced.get("items", []) if row["id"] == item["id"]), item)}
                 await _advance(entry, limits)
             except asyncio.CancelledError:
                 raise
@@ -1657,6 +1677,9 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
             changed = await mooi.send_work(caller, "PATCH", run.project_id, f"/issues/{run.issue_number}",
                                            {"state": "closed"}, github=True) or {}
             _publish_issue(run.player_id, run.project_id, changed.get("issue"))
+            # Closing an issue is a runner-owned event, so reconcile its other queued tasks now
+            # instead of making them wait for the next periodic GitHub poll.
+            await _sync_issues(caller, run.project_id)
 
 
 async def _close(run: TaskRun) -> None:
