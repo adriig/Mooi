@@ -1507,14 +1507,15 @@ public class AnalyticsFeature {
                 + "addEventListener('pagehide',()=>send('leave',{duration:visible+(shown?Date.now()-shown:0)}))})();";
     }
 
-    /** No ambient proxy, DNS re-resolution, cookies or automatic redirects are used by the auditor. */
-    private static final class AuditScanner {
+    /** No ambient proxy, DNS re-resolution, cookies or automatic redirects are used by the auditor.
+     *  Its URL, address and robots checks are shared with {@link GeoSiteEvidenceFeature}. */
+    static final class AuditScanner {
         private static final int MAX_BYTES = 2 * 1024 * 1024;
         private static final List<String> CRAWLERS = List.of("GPTBot", "OAI-SearchBot", "ChatGPT-User",
                 "ClaudeBot", "Claude-SearchBot", "PerplexityBot", "Google-Extended", "Applebot-Extended", "CCBot");
         private static final java.util.concurrent.ExecutorService IO = Executors.newVirtualThreadPerTaskExecutor();
-        private static final Pattern TAG = Pattern.compile("(?is)<([a-z][a-z0-9:-]*)\\b((?:[^>\"']++|\"[^\"]*+\"|'[^']*+')*+)>");
-        private static final Pattern ATTR = Pattern.compile("([\\w:-]+)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))");
+        static final Pattern TAG = Pattern.compile("(?is)<([a-z][a-z0-9:-]*)\\b((?:[^>\"']++|\"[^\"]*+\"|'[^']*+')*+)>");
+        static final Pattern ATTR = Pattern.compile("([\\w:-]+)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))");
         private final ObjectMapper json;
         private final List<AuditFinding> findings = new ArrayList<>();
         private final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
@@ -1713,7 +1714,7 @@ public class AnalyticsFeature {
             } else if (node.isArray()) for (var child : node) collectTypes(child, types, depth + 1);
         }
 
-        private static Map<String, String> attributes(String input) {
+        static Map<String, String> attributes(String input) {
             Map<String, String> result = new LinkedHashMap<>();
             var matcher = ATTR.matcher(input);
             while (matcher.find()) result.put(matcher.group(1).toLowerCase(Locale.ROOT),
@@ -1728,7 +1729,7 @@ public class AnalyticsFeature {
 
         private record RobotGroup(List<String> agents, List<String[]> rules) { }
 
-        private static boolean blocked(String robots, String crawler, String path) {
+        static boolean blocked(String robots, String crawler, String path) {
             List<RobotGroup> groups = new ArrayList<>();
             RobotGroup group = new RobotGroup(new ArrayList<>(), new ArrayList<>());
             boolean hasRules = false;
@@ -1867,7 +1868,7 @@ public class AnalyticsFeature {
             return first.getHost().equalsIgnoreCase(second.getHost());
         }
 
-        private static boolean publicAddress(InetAddress address) {
+        static boolean publicAddress(InetAddress address) {
             if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isLinkLocalAddress()
                     || address.isSiteLocalAddress() || address.isMulticastAddress()) return false;
             byte[] bytes = address.getAddress();

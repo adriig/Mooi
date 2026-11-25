@@ -385,7 +385,12 @@ in Planification, the Board and the task editor.
   prompts through the user's already linked provider accounts, manually or on a weekly schedule, while
   respecting account quotas; and an on-demand SEO & GEO audit of production sites. Audits check AI crawler
   access and site discoverability, return scored findings with suggested fixes, and **Fix in a session**
-  opens a development session with the finding's fix request.
+  opens a development session with the finding's fix request. **Propose with AI** in Manage AI visibility
+  suggests brand terms, competitors and tracked prompts from a bounded, read-only crawl of the public
+  production site (production targets only, an explicit choice when they name several sites; public
+  addresses, robots.txt and page/byte/time/redirect limits enforced; pages consulted, date and coverage
+  shown; web content is untrusted data). Proposals are a reviewable draft saved only on explicit
+  acceptance and never start runs, audits or schedules.
 - Analytics setup, configuration and reports converge between the page and session chat through the Mooi
   platform agent API, so agents can read statistics and retrieve the tracker snippet as well as manage
   configuration.

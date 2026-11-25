@@ -332,12 +332,13 @@ async def fetch_analytics(caller: Caller, project_id: UUID, path: str,
 async def send_analytics(caller: Caller, method: str, project_id: UUID, path: str,
                          payload: dict | None = None,
                          params: dict[str, str | int] | None = None) -> Any:
-    # An audit has a server-side 20 s budget; the shared client's default timeout is only 10 s.
+    # An audit (20 s) and a site evidence collection (25 s) have server-side budgets beyond the 10 s default.
+    slow = method == "POST" and path in ("/audits", "/geo/suggestions/evidence")
     try:
         response = await get_http_client().request(
             method, f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/analytics{path}",
             headers=_bearer(caller), params=params, json=payload,
-            timeout=30.0 if path == "/audits" and method == "POST" else 10.0,
+            timeout=40.0 if slow else 10.0,
         )
     except httpx.HTTPError:
         raise ApiException.bad_gateway() from None
