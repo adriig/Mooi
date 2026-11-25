@@ -131,6 +131,27 @@ Each project plans and builds its work as a software factory: agents design it, 
     the issue to **DEFINED**; splits create separate issues and promotion uses the feature contract.
     Proposal, acceptance and reopening are revisioned and idempotent; reopening returns it to **NEW**.
     Features bypass NEW. Existing items with complete execution settings remain defined.
+- **Project definition and Feature 0**: a new project — no feature items and at most 10 versioned files
+  outside `docs/`, `.github/` and root configuration files, detected by the platform and exposed as
+  `newProject` on the work list — is defined as a whole before its first feature: the session agent
+  receiving the first work request opens the project definition instead of registering a normal feature,
+  Planification shows an empty state with **Define project** for projects without items, and existing
+  projects offer the same action in their project menu. **Define project** creates or reopens a definition
+  session with a strong model (it is architecture work): the agent converses with the user and saves a
+  revisioned proposal — vision, architecture, decisions (including the tests policy), an ordered roadmap
+  and a complete foundations FeatureDraft. Proposing changes no repository or executable work; only user
+  acceptance creates the **Feature 0: Fundaciones** feature with the normal validations and saves the
+  roadmap, and reopening allows new proposals without touching what was created. Fundaciones always holds
+  a `docs` task writing `docs/VISION.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` and `docs/ROADMAP.md`
+  from the accepted proposal, the technical base tasks (skeleton, structure, dependencies, conventions)
+  and, for web applications, an `infra` task preparing the development deployment by following the Deploy
+  button's brief exactly, with tests enabled so QA checks the preview; production and backups stay in
+  their own chats. A live roadmap panel shows each entry's state (pending, designed with its feature link,
+  deployed); **Design next** opens an orchestrator session that designs the next pending entry as a normal
+  feature, depending on the previous entry or on Fundaciones, reading the real code and the design
+  documents. Every later feature, from the roadmap or not, reads `docs/VISION.md`, `docs/ARCHITECTURE.md`
+  and `docs/DECISIONS.md` first when they exist, and respects their decisions or proposes changing them
+  explicitly. Contract: `docs/project-definitions.md`.
 - **Tasks** belong to one feature and carry a title, a category, a description, acceptance criteria, the
   provider, account, model and effort to run with, **auto-merge** (on or off) and **tests** (on or off),
   all prefilled by the orchestrator and editable. Dependencies are blocking and stay inside the feature.
