@@ -700,8 +700,15 @@ public class ProjectWorkFeature {
             item.setDeployedAt(latest == null ? null : latest.getDeployedAt());
         }
 
+        /**
+         * {@code closed} is an item whose issue was closed before anything was delivered: no development
+         * task merged, and every finished one was only cancelled by that close.
+         */
         private static DeploymentPayload deployment(WorkItem item, List<WorkTask> all) {
+            boolean delivered = all.stream().anyMatch(task -> task.getQaOfId() == null && (task.getMergeSha() != null
+                    || (task.getStatus() == TaskStatus.done && !ISSUE_CLOSED_REPORT.equals(task.getReport()))));
             String state = item.getStatus() != ItemStatus.done ? "none"
+                    : item.isIssueClosed() && !delivered ? "closed"
                     : all.stream().anyMatch(task -> task.getQaOfId() == null
                             && task.getStatus() == TaskStatus.done && task.getMergeSha() == null) ? "unknown"
                     : item.getDeployedVersion() != null ? "deployed" : "pending";
@@ -1998,7 +2005,10 @@ public class ProjectWorkFeature {
             fields.put("title", proposal.title());
             fields.put("body", proposal.description());
             fields.put("labels", labels);
-            if (!proposal.executable()) fields.put("state", "closed");
+            if (!proposal.executable()) {
+                fields.put("state", "closed");
+                fields.put("state_reason", "not_planned");
+            }
             source = github.updateIssue(project.getOwner(), project.getName(), number, fields, token);
             row.setState(DefinitionState.DEFINED);
             row.setAccepted(row.getProposal());
@@ -2191,6 +2201,10 @@ public class ProjectWorkFeature {
             }
             if (update.state() != null) {
                 fields.put("state", update.state() == IssueState.closed ? "closed" : "open");
+                // Without a reason GitHub records a close as completed; delivery-less closes say not_planned.
+                if (update.state() == IssueState.closed && update.stateReason() != null) {
+                    fields.put("state_reason", update.stateReason().name());
+                }
             }
             Github.Issue issue = github.updateIssue(project.getOwner(), project.getName(), number, fields,
                     accessToken(playerId));
@@ -2226,11 +2240,11 @@ public class ProjectWorkFeature {
         }
 
         private IssuePayload toPayload(UUID projectId, Github.Issue issue, ItemKind kind) {
+            Optional<IssueDefinition> definition = definitions.findByProjectIdAndIssueNumber(projectId, issue.number());
             return new IssuePayload(issue.number(), kind, issue.title(), issue.body(), issue.state(), issue.htmlUrl(),
-                    issue.createdAt(), issue.closedAt(), definitions.findByProjectIdAndIssueNumber(projectId, issue.number())
-                            .map(IssueDefinition::getState).orElse(DefinitionState.NEW),
-                    definitions.findByProjectIdAndIssueNumber(projectId, issue.number())
-                            .map(row -> row.getProposal() != null).orElse(false));
+                    issue.createdAt(), issue.closedAt(), issue.stateReason(),
+                    definition.map(IssueDefinition::getState).orElse(DefinitionState.NEW),
+                    definition.map(row -> row.getProposal() != null).orElse(false));
         }
 
         /** Read-only like every non-owning feature: mic-sessions renews the grant before calling here. */
@@ -3186,6 +3200,9 @@ public class ProjectWorkFeature {
 
     public enum IssueState { open, closed }
 
+    /** Why an issue is closed, as GitHub names it: delivered, or closed without delivering anything. */
+    public enum IssueStateReason { completed, not_planned }
+
     public enum ChangeStatus { queued, analyzing, awaiting_confirmation, applied, rejected }
 
     public enum Decision { accept, reject }
@@ -3269,7 +3286,8 @@ public class ProjectWorkFeature {
                              @Size(max = 60_000) String body, @Valid TaskSettings task) {
     }
 
-    public record IssueUpdate(@Size(max = 300) String title, @Size(max = 60_000) String body, IssueState state) {
+    public record IssueUpdate(@Size(max = 300) String title, @Size(max = 60_000) String body, IssueState state,
+                              IssueStateReason stateReason) {
     }
 
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
@@ -3385,8 +3403,8 @@ public class ProjectWorkFeature {
     }
 
     public record IssuePayload(int number, ItemKind kind, String title, String body, String state, String htmlUrl,
-                               OffsetDateTime createdAt, OffsetDateTime closedAt, DefinitionState definitionState,
-                               boolean hasProposal) {
+                               OffsetDateTime createdAt, OffsetDateTime closedAt, String stateReason,
+                               DefinitionState definitionState, boolean hasProposal) {
     }
 
     public record IssuesPayload(List<IssuePayload> issues, List<ItemPayload> items) {

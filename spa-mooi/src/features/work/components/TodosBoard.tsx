@@ -26,13 +26,15 @@ interface TodosBoardProps {
   connections: AgentConnection[];
 }
 
-const MIN_DEPLOYED = 5;
+const MIN_HISTORY = 5;
+/** History columns: they page instead of growing the board. */
+const PAGED: WorkColumn[] = ['deployed', 'closed'];
 const entryKey = (project: Project, entry: WorkEntry) => `${project.id}:${entry.key}`;
 
 /**
- * The Kanban of every selected project's work. Columns follow from state; the DEPLOYED column shows
- * only as many cards as the tallest other column (at least five) until asked for more, so history
- * never makes the board taller on its own.
+ * The Kanban of every selected project's work. Columns follow from state; the DEPLOYED and CLOSED
+ * columns show only as many cards as the tallest other column (at least five) until asked for more,
+ * so history never makes the board taller on its own.
  */
 export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => {
   const work = useLiveStore((live) => live.work);
@@ -56,14 +58,16 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
       return rows.sort((a, b) => order.get(a.entry)! - order.get(b.entry)!);
     };
     return { new: byColumn('new'), defined: byColumn('defined'), inProgress: byColumn('inProgress'),
-      pendingDeploy: byColumn('pendingDeploy'), deployed: byColumn('deployed') };
+      pendingDeploy: byColumn('pendingDeploy'), deployed: byColumn('deployed'), closed: byColumn('closed') };
   }, [ofKind]);
 
-  const pageSize = Math.max(MIN_DEPLOYED, columns.new.length, columns.defined.length, columns.inProgress.length, columns.pendingDeploy.length);
+  const pageSize = Math.max(MIN_HISTORY, columns.new.length, columns.defined.length, columns.inProgress.length, columns.pendingDeploy.length);
   const filterKey = `${kind}|${projects.map((project) => project.id).join(',')}`;
-  const [paging, setPaging] = useState({ key: filterKey, pages: 1 });
-  const pages = paging.key === filterKey ? paging.pages : 1;
-  const shownDeployed = columns.deployed.slice(0, pageSize * pages);
+  const [paging, setPaging] = useState<{ key: string; pages: Partial<Record<WorkColumn, number>> }>({ key: filterKey, pages: {} });
+  const pagesOf = (column: WorkColumn) => (paging.key === filterKey ? paging.pages[column] : undefined) ?? 1;
+  const loadMore = (column: WorkColumn) => setPaging({
+    key: filterKey, pages: { ...(paging.key === filterKey ? paging.pages : {}), [column]: pagesOf(column) + 1 },
+  });
 
   const open = openKey ? all.find((row) => entryKey(row.project, row.entry) === openKey) ?? null : null;
 
@@ -94,9 +98,9 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
     <div className="flex flex-col gap-3">
       <Tabs ariaLabel="Columns" value={tab} onChange={(id) => setTab(id as WorkColumn)} className="border-b border-line lg:hidden"
         items={WORK_COLUMNS.map((column) => ({ id: column.id, label: column.label, count: columns[column.id].length }))} />
-      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-5">
+      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-6">
         {WORK_COLUMNS.map((column) => {
-          const rows = column.id === 'deployed' ? shownDeployed : columns[column.id];
+          const rows = PAGED.includes(column.id) ? columns[column.id].slice(0, pageSize * pagesOf(column.id)) : columns[column.id];
           const total = columns[column.id].length;
           return (
             <section key={column.id} aria-label={column.label}
@@ -125,8 +129,8 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
               ) : (
                 <p className="rounded-card border border-dashed border-line px-3 py-6 text-center text-[13px] text-ink-subtle">Nothing here.</p>
               )}
-              {column.id === 'deployed' && total > rows.length ? (
-                <Button variant="secondary" size="sm" onClick={() => setPaging({ key: filterKey, pages: pages + 1 })}>Load more</Button>
+              {PAGED.includes(column.id) && total > rows.length ? (
+                <Button variant="secondary" size="sm" onClick={() => loadMore(column.id)}>Load more</Button>
               ) : null}
             </section>
           );

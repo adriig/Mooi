@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -413,9 +414,13 @@ public class Github {
     public record FileContent(String sha, String text) {
     }
 
-    /** One issue (never a pull request) as the issues API lists it; {@code labels} are their names. */
+    /**
+     * One issue (never a pull request) as the issues API lists it; {@code labels} are their names.
+     * {@code stateReason} is GitHub's closing reason ({@code completed}, {@code not_planned} or
+     * {@code duplicate}), null while open, reopened or unknown.
+     */
     public record Issue(int number, String title, String body, String state, List<String> labels, String htmlUrl,
-                        OffsetDateTime createdAt, OffsetDateTime closedAt) {
+                        OffsetDateTime createdAt, OffsetDateTime closedAt, String stateReason) {
     }
 
     /**
@@ -443,6 +448,7 @@ public class Github {
         private static final int MAX_LOGIN_LENGTH = 128;
         private static final int MAX_NAME_LENGTH = 255;
         private static final int MAX_URL_LENGTH = 512;
+        private static final Set<String> CLOSE_REASONS = Set.of("completed", "not_planned", "duplicate");
         private static final int MAX_SCOPE_LENGTH = 512;
         private static final int MAX_ERROR_LENGTH = 256;
         private static final int MAX_FULL_NAME_LENGTH = 255;
@@ -901,9 +907,12 @@ public class Github {
             });
             String title = text(node, "title");
             String body = text(node, "body");
+            boolean closed = "closed".equals(text(node, "state"));
+            String reason = text(node, "state_reason");
             return new Issue(number, title == null ? "" : title, body == null ? "" : body,
-                    "closed".equals(text(node, "state")) ? "closed" : "open", labels, text(node, "html_url", MAX_URL_LENGTH),
-                    timestamp(node, "created_at"), timestamp(node, "closed_at"));
+                    closed ? "closed" : "open", labels, text(node, "html_url", MAX_URL_LENGTH),
+                    timestamp(node, "created_at"), timestamp(node, "closed_at"),
+                    closed && CLOSE_REASONS.contains(reason) ? reason : null);
         }
 
         /** Every path segment encoded on its own, so the separators survive and nothing else can break out. */

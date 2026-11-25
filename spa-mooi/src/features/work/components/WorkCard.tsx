@@ -113,6 +113,15 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
         </div>
       ) : null}
 
+      {entry.column === 'closed' ? (
+        <div className="flex flex-wrap items-center gap-1.5 px-1.5">
+          <Badge tone="neutral">Closed</Badge>
+          {entry.issue?.closedAt ? (
+            <span className="text-[12px] text-ink-subtle">{formatRelativeTime(entry.issue.closedAt)}</span>
+          ) : null}
+        </div>
+      ) : null}
+
       {commits.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 px-1.5">
           {commits.map((sha) => <CommitLink key={sha} repository={repository} sha={sha} />)}

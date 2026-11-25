@@ -1,3 +1,4 @@
+import { mergeCommits } from '@/features/work/lib/mergeCommits';
 import type { WorkColumn } from '@/features/work/types/WorkColumn';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
@@ -9,6 +10,7 @@ export const WORK_COLUMNS: { id: WorkColumn; label: string }[] = [
   { id: 'inProgress', label: 'In progress' },
   { id: 'pendingDeploy', label: 'Pending to deploy' },
   { id: 'deployed', label: 'Deployed' },
+  { id: 'closed', label: 'Closed' },
 ];
 
 const UNKNOWN: WorkItemDeployment = { state: 'unknown', version: null, deployedAt: null, inCurrentRelease: null };
@@ -22,9 +24,18 @@ const itemColumn = (item: WorkItem): WorkColumn => {
   return 'defined';
 };
 
+/**
+ * A closed issue that delivered nothing: its item was closed before any merge, or GitHub says it was not
+ * completed and nothing of it merged. Legacy issues closed as completed without an item stay deployed.
+ */
+const closedWithoutDelivery = (issue: WorkIssue, item: WorkItem | null): boolean =>
+  item?.deployment?.state === 'closed'
+  || ((issue.stateReason === 'not_planned' || issue.stateReason === 'duplicate') && mergeCommits(item).length === 0);
+
 /** The deployment an entry shows: a closed issue without a Mooi item is a legacy, unknown one. */
 export const entryDeployment = (entry: WorkEntry): WorkItemDeployment | null =>
-  entry.item ? entry.item.deployment ?? null : entry.issue?.state === 'closed' ? UNKNOWN : null;
+  entry.column === 'closed' ? null
+    : entry.item ? entry.item.deployment ?? null : entry.issue?.state === 'closed' ? UNKNOWN : null;
 
 /** Work cards: every feature, and every defect and debt issue joined with the item that runs it. */
 export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[] => {
@@ -36,8 +47,9 @@ export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[]
     const item = byIssue.get(issue.number) ?? null;
     const definitionState = item?.definitionState ?? issue.definitionState;
     const column: WorkColumn = issue.state === 'open' && definitionState !== 'DEFINED' ? 'new'
-      : item ? itemColumn(item)
-        : issue.state === 'closed' ? 'deployed' : 'defined';
+      : issue.state === 'closed' && closedWithoutDelivery(issue, item) ? 'closed'
+        : item ? itemColumn(item)
+          : issue.state === 'closed' ? 'deployed' : 'defined';
     return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, column, item, issue };
   });
   return [...features, ...tracked];
@@ -49,7 +61,7 @@ const needsPlayer = (entry: WorkEntry): boolean =>
   || (entry.item?.changeRequests?.some((change) => change.status === 'awaiting_confirmation') ?? false);
 const finished = (entry: WorkEntry): number => time(entry.item?.finishedAt ?? entry.issue?.closedAt);
 
-/** Each column's order: newest first; items needing the player lead in progress; unknown versions trail. */
+/** Each column's order: newest first; items needing the player lead in progress; unknown versions trail; closed by close date. */
 export const sortColumn = (column: WorkColumn, entries: WorkEntry[]): WorkEntry[] => {
   const sorted = [...entries];
   switch (column) {
@@ -70,5 +82,7 @@ export const sortColumn = (column: WorkColumn, entries: WorkEntry[]): WorkEntry[
           ? time(entryDeployment(b)?.deployedAt) - time(entryDeployment(a)?.deployedAt)
           : finished(b) - finished(a);
       });
+    case 'closed':
+      return sorted.sort((a, b) => time(b.issue?.closedAt ?? b.item?.finishedAt) - time(a.issue?.closedAt ?? a.item?.finishedAt));
   }
 };

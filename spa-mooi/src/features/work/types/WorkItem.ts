@@ -4,7 +4,8 @@ import type { WorkItemStatus } from '@/features/work/types/WorkItemStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 
 export interface WorkItemDeployment {
-  state: 'none' | 'pending' | 'deployed' | 'unknown';
+  /** `closed`: its issue was closed before any of its work was delivered. */
+  state: 'none' | 'pending' | 'deployed' | 'unknown' | 'closed';
   version: string | null;
   deployedAt: string | null;
   inCurrentRelease: boolean | null;

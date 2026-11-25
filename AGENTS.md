@@ -178,8 +178,12 @@ Each project plans and builds its work as a software factory: agents design it, 
   defined; legacy open issues without an explicit definition state are NEW), **DEFINED** (not
   started), **IN PROGRESS** (running or paused; cards flag tasks needing the user),
   **PENDING TO DEPLOY** (all merged, not yet in a successful production deployment; projects without
-  production stay here) and **DEPLOYED**, newest first. DEPLOYED shows at most as many cards as the largest
-  other column (minimum 5), so it never grows the board, with a **Load more** button for further pages.
+  production stay here), **DEPLOYED**, newest first, and **CLOSED** (defects and debt closed without
+  delivering anything: GitHub's closing reason is `not_planned`/`duplicate` with nothing merged, or their
+  item was closed before any task merged; labelled "Closed", newest close first). Closing an issue from
+  Mooi records `not_planned`; reopening a CLOSED issue returns it to NEW or DEFINED by its definition.
+  DEPLOYED and CLOSED each show at most as many cards as the largest other column (minimum 5), so they
+  never grow the board, with a **Load more** button for further pages.
   NEW is always before DEFINED and never contains features. NEW cards offer **Define**, not Start.
   Define creates or reopens a definition session associated with the item, using read-only repository
   access and economical model/effort choices that respect the user's accounts and quotas. In that
@@ -199,8 +203,8 @@ Each project plans and builds its work as a software factory: agents design it, 
   deterministically (no agent) when a production deployment succeeds. A rollback keeps the first version and
   flags the card "Not in current release <tag>". An item is deployed when its last development or fix task
   is. Recomputation is idempotent and never fails or delays the deployment; errors are logged and the next
-  success reconciles. Legacy done items lacking merge commits, and closed defect/debt issues without a
-  Mooi item, show in DEPLOYED as "Unknown version" and are never backfilled. Changes stream live, so
+  success reconciles. Legacy done items lacking merge commits, and defect/debt issues closed as completed
+  without a Mooi item, show in DEPLOYED as "Unknown version" and are never backfilled. Changes stream live, so
   boards on every device move cards when a deployment finishes.
 - **Board tab** (per project and feature): pick a feature and see its tasks as a left-to-right dependency
   graph of coloured nodes. Without opening a task, each node shows and changes auto-merge (robot icon),

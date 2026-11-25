@@ -94,7 +94,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
       <div className="flex flex-col gap-5">
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={kind.tone} icon={kind.icon}>{kind.label}</Badge>
-          <Badge tone={status.tone}>{status.label}</Badge>
+          {entry.column === 'closed' ? <Badge tone="neutral">Closed</Badge> : <Badge tone={status.tone}>{status.label}</Badge>}
           <WorkChangeBadges item={item} />
           {item?.status === 'paused' && item.pauseReason ? (
             <span className="inline-flex min-w-0 items-start gap-1 text-xs font-medium text-warning">
@@ -134,7 +134,9 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
           <span className="ml-auto flex gap-2">
             {entry.issue ? (
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => {
-                void run(() => updateWorkIssue(projectId, entry.issue!.number, { state: entry.issue!.state === 'open' ? 'closed' : 'open' }));
+                // Closing from Mooi delivers nothing, so GitHub records it as not planned.
+                void run(() => updateWorkIssue(projectId, entry.issue!.number, entry.issue!.state === 'open'
+                  ? { state: 'closed', stateReason: 'not_planned' } : { state: 'open' }));
               }}>
                 {entry.issue.state === 'open' ? <CheckCircle2 className="size-4" /> : <CircleDot className="size-4" />}
                 {entry.issue.state === 'open' ? 'Close issue' : 'Reopen issue'}

@@ -87,7 +87,7 @@ export const createWorkIssue = (projectId: string, draft: { kind: 'defect' | 'de
   send<{ issue: WorkIssue; item: WorkItem | null }>(workPath(projectId, '/issues'), 'POST', 'Could not open the issue.', draft);
 
 export const updateWorkIssue = (projectId: string, number: number,
-  update: { title?: string; body?: string; state?: 'open' | 'closed' }) =>
+  update: { title?: string; body?: string; state?: 'open' | 'closed'; stateReason?: 'completed' | 'not_planned' }) =>
   send<{ issue: WorkIssue; item: WorkItem | null }>(workPath(projectId, `/issues/${number}`), 'PATCH',
     'Could not update the issue.', update);
 
