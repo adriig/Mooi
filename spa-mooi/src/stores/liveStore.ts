@@ -31,6 +31,7 @@ const initial = {
   work: {},
   workSettings: {},
   analyticsRevisions: {},
+  analyticsAnalysisRevisions: {},
   analyticsGeoRuns: {},
 };
 
@@ -90,6 +91,9 @@ export const useLiveStore = create<LiveState>((set) => ({
     const projectId = String(data.projectId ?? '');
     if (frame.type === 'analytics.updated') {
       return { analyticsRevisions: bump(state.analyticsRevisions, projectId) };
+    }
+    if (frame.type === 'analytics.analysis') {
+      return { analyticsAnalysisRevisions: bump(state.analyticsAnalysisRevisions, `${projectId}:${String(data.analysisId ?? '')}`) };
     }
     if (frame.type === 'analytics.geo.run') {
       return { analyticsGeoRuns: { ...state.analyticsGeoRuns, [projectId]: data } };

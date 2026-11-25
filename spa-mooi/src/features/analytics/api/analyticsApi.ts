@@ -68,3 +68,35 @@ export const fetchAnalyticsSearch = async (projectId: string, range: AnalyticsRa
 
 export const fetchAnalyticsGa4 = async (projectId: string, range: AnalyticsRange, report: AnalyticsGa4ReportKind, limit = 10): Promise<AnalyticsGa4Report> =>
   readGoogle(await authenticatedFetch(`${base(projectId)}/ga4?${rangeParams(range)}&report=${report}&limit=${limit}`), 'Could not load Google Analytics.');
+
+export interface AnalyticsAnalysisPeriod { from: string; to: string; timezone: string }
+export interface AnalyticsAnalysisEvidence {
+  id: string; source: string; status: 'available' | 'partial' | 'not_connected' | 'empty' | 'failed';
+  requestedPeriod: AnalyticsAnalysisPeriod; actualPeriod: AnalyticsAnalysisPeriod | null; queriedAt: string;
+  coverage: { description: string; rowLimit: number | null; returnedRows: number | null; truncated: boolean | null;
+    dataFetchedAt: string | null; dataUntil: string | null; sampleSize: number | null; sampleUnit: string | null; limitations: string[] };
+  errors: string[]; executions: { id: string; createdAt: string | null; startedAt: string | null; finishedAt: string | null; status: string }[];
+  data: unknown;
+}
+export interface AnalyticsAnalysisResult {
+  summary: string;
+  findings: { id: string; title: string; priority: 'high' | 'medium' | 'low'; interpretation: string;
+    evidence: { evidenceId: string; period: AnalyticsAnalysisPeriod }[]; limitations: string[] }[];
+  recommendations: { priority: 'high' | 'medium' | 'low'; justification: string; action: string; verification: string;
+    evidence: { evidenceId: string; period: AnalyticsAnalysisPeriod }[] }[];
+  generalSuggestions: string[];
+}
+export interface AnalyticsAnalysis {
+  id: string; projectId: string; period: AnalyticsAnalysisPeriod;
+  status: 'collecting' | 'queued' | 'running' | 'completed' | 'partial' | 'no_data' | 'failed' | 'invalid_output' | 'no_account' | 'quota';
+  reason: string | null; revision: number; createdAt: string; updatedAt: string;
+  evidence: AnalyticsAnalysisEvidence[]; result: AnalyticsAnalysisResult | null;
+}
+export const listAnalyticsAnalyses = async (projectId: string): Promise<AnalyticsAnalysis[]> =>
+  read(await authenticatedFetch(`${base(projectId)}/analyses?limit=20`), 'Could not load analytics diagnoses.');
+export const fetchAnalyticsAnalysis = async (projectId: string, id: string): Promise<AnalyticsAnalysis> =>
+  read(await authenticatedFetch(`${base(projectId)}/analyses/${encodeURIComponent(id)}`), 'Could not refresh the analytics diagnosis.');
+export const generateAnalyticsAnalysis = async (projectId: string, id: string): Promise<AnalyticsAnalysis> =>
+  read(await authenticatedFetch(`${base(projectId)}/analyses/${encodeURIComponent(id)}/generate`, { method: 'POST' }), 'Could not generate the analytics diagnosis.');
+export const createAnalyticsAnalysis = async (projectId: string, id: string, period: AnalyticsAnalysisPeriod): Promise<AnalyticsAnalysis> =>
+  read(await authenticatedFetch(`${base(projectId)}/analyses`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, period }) }), 'Could not start the analytics diagnosis.');

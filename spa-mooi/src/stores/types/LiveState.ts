@@ -32,6 +32,8 @@ export interface LiveState {
   workSettings: Record<string, WorkSettings>;
   /** Per project: bumped when Analytics configuration, GEO or audits change from chat. */
   analyticsRevisions: Record<string, number>;
+  /** Per project and analysis id: revision announced by persisted diagnostic events. */
+  analyticsAnalysisRevisions: Record<string, number>;
   /** Latest GEO runner event by project. */
   analyticsGeoRuns: Record<string, Record<string, unknown>>;
   setStreamState: (streamState: EventStreamState) => void;

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { BarChart3, RotateCw, Settings2 } from 'lucide-react';
 import { fetchAnalyticsOverview, fetchAnalyticsSeries } from '@/features/analytics/api/analyticsApi';
 import { AnalyticsBreakdownCard } from '@/features/analytics/components/AnalyticsBreakdownCard';
+import { AnalyticsAnalysisPanel } from '@/features/analytics/components/AnalyticsAnalysisPanel';
 import { AnalyticsGa4Section } from '@/features/analytics/components/AnalyticsGa4Section';
 import { AnalyticsGeoSection } from '@/features/analytics/components/AnalyticsGeoSection';
 import { AnalyticsKpis } from '@/features/analytics/components/AnalyticsKpis';
@@ -100,6 +101,8 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
           <Button variant="secondary" size="sm" onClick={() => setSetupOpen(true)}><Settings2 className="size-4" />Configure</Button>
         </div>
       </div>
+
+      <AnalyticsAnalysisPanel projectId={projectId} range={range} site={siteState.site} onConfigure={() => setSetupOpen(true)} />
 
       {siteState.error ? (
         <Card className="flex flex-wrap items-center justify-between gap-3 p-5" >
