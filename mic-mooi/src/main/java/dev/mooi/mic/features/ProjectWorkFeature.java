@@ -933,6 +933,7 @@ public class ProjectWorkFeature {
                         return runnerItem(item, all);
                     }
                     Set<String> existingKeys = keys(all);
+                    UUID previousFixId = tested.getId();
                     for (FindingDraft finding : findings.stream()
                             .sorted(Comparator.comparingInt(finding -> finding.priority().ordinal())).toList()) {
                         String keySuffix = UUID.nameUUIDFromBytes((deliveryId + "|" + finding.id())
@@ -946,7 +947,7 @@ public class ProjectWorkFeature {
                         fix.setCategory(TaskCategory.dev);
                         fix.setDescription(findingDescription(finding));
                         fix.setFindingId(finding.id());
-                        fix.setAcceptance(qa.getAcceptance());
+                        fix.setAcceptance(findingAcceptance(finding));
                         fix.setProvider(tested.getProvider());
                         fix.setConnectionId(tested.getConnectionId());
                         fix.setModel(tested.getModel());
@@ -957,9 +958,10 @@ public class ProjectWorkFeature {
                         fix.setFixOfId(qa.getId());
                         fix.setStatus(TaskStatus.planned);
                         fix.setPosition(qa.getPosition());
-                        fix.setDependsOn(new LinkedHashSet<>(Set.of(tested.getId())));
+                        fix.setDependsOn(new LinkedHashSet<>(Set.of(previousFixId)));
                         all.add(fix);
                         qa.getDependsOn().add(fix.getId());
+                        previousFixId = fix.getId();
                     }
                     qa.setQaRounds(qa.getQaRounds() + 1);
                     qa.setStatus(TaskStatus.planned);
@@ -971,6 +973,12 @@ public class ProjectWorkFeature {
             tasks.saveAll(all);
             items.save(touch(item));
             return runnerItem(item, all);
+        }
+
+        private static String findingAcceptance(FindingDraft finding) {
+            return "Acceptance criterion:\n" + finding.criterion() + "\n\n"
+                    + "Expected:\n" + finding.expected() + "\n\n"
+                    + "Reproduction:\n" + finding.reproduction();
         }
 
         private static String findingDescription(FindingDraft finding) {
