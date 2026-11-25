@@ -171,7 +171,7 @@ public class ProjectWorkFeature {
         return work.start(principal.player().id(), principal.sessionId(), projectId, itemId);
     }
 
-    /** No task starts while paused; the ones already running finish their work. */
+    /** No task starts or auto-merges while paused; live sessions still save their work and results. */
     @PostMapping("/me/projects/{projectId}/work/items/{itemId}/pause")
     @Auth.Authenticated
     @Auth.ServiceCall
@@ -595,7 +595,8 @@ public class ProjectWorkFeature {
 
         @Transactional(readOnly = true)
         public RunningPayload running() {
-            List<WorkItem> rows = items.findByStatus(ItemStatus.running);
+            // Paused items still need session adoption and durable result reconciliation after restarts.
+            List<WorkItem> rows = items.findByStatusIn(List.of(ItemStatus.running, ItemStatus.paused));
             Map<UUID, List<WorkTask>> byItem = tasks.findByItemIdIn(rows.stream().map(WorkItem::getId).toList())
                     .stream().collect(Collectors.groupingBy(WorkTask::getItemId));
             List<UUID> projectIds = rows.stream().map(WorkItem::getProjectId).distinct().toList();
@@ -1821,7 +1822,7 @@ public class ProjectWorkFeature {
         @Query("select item.id from WorkItem item where item.projectId = :projectId order by item.id")
         List<UUID> findIdsByProjectId(@Param("projectId") UUID projectId);
 
-        List<WorkItem> findByStatus(ItemStatus status);
+        List<WorkItem> findByStatusIn(List<ItemStatus> statuses);
 
         @Lock(LockModeType.PESSIMISTIC_WRITE)
         Optional<WorkItem> findLockedByProjectIdAndIssueNumber(UUID projectId, Integer issueNumber);
@@ -1930,7 +1931,10 @@ public class ProjectWorkFeature {
 
     public enum ItemKind { feature, defect, debt }
 
-    /** {@code planned}: not started; {@code running}: the runner works on it; {@code paused}: nothing new starts. */
+    /**
+     * {@code planned}: not started; {@code running}: the runner works on it;
+     * {@code paused}: live tasks reconcile, but no task starts or auto-merges until Resume.
+     */
     public enum ItemStatus { planned, running, paused, done }
 
     /** UX/UI, development, QA, infrastructure and documentation, each with its own colour on the Board. */
@@ -1939,8 +1943,8 @@ public class ProjectWorkFeature {
     /**
      * {@code planned}: waiting for its dependencies or the item's start; {@code queued}: unblocked, waiting
      * for a free session; {@code running}: its session works on it; {@code merging}: its work is being
-     * merged; {@code review}: waiting for the player's merge; {@code attention}: the player must answer or
-     * decide; {@code done}: merged, or for QA, its acceptance criteria are met.
+     * merged; {@code review}: waiting for the player's merge or Resume; {@code attention}: the player must
+     * answer or decide; {@code done}: merged, or for QA, its acceptance criteria are met.
      */
     public enum TaskStatus { planned, queued, running, merging, review, attention, done }
 

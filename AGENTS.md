@@ -178,6 +178,9 @@ Each project plans and builds its work as a software factory: agents design it, 
   - a development task ends with its merge into the default branch: automatic (agentic merge on
     conflicts) or by the user, as the task says. The merge closes the task and its session and unblocks
     its dependants;
+  - **Pause** prevents new task sessions and automatic merges. Live sessions still save their results
+    and recovery snapshots, and the runner keeps reconciling paused items across restarts. **Resume**
+    merges pending completed tasks with auto-merge enabled before their dependants can start;
   - a QA task checks the default branch with everything merged, using its own isolated preview and the
     existing deployment setup for web applications, and reports an independent result against its acceptance
     criteria. It keeps exploration within that scope. One delivery may group up to 20 reproducible in-scope

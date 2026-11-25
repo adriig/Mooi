@@ -19,7 +19,8 @@ task, one session) within the account's session limit, on the account its assign
 account runs low on quota (then its alternatives, in order). A development task ends with its merge,
 automatic (agentic on conflicts) or by the player; a QA task ends when its acceptance criteria are met,
 and a defect it finds becomes a fix task the QA waits for. A finished task's session is closed. The
-runner reconciles from `mic-mooi` on every tick, so a restart only relaunches the tasks it interrupted.
+runner reconciles running and paused items from `mic-mooi` on every tick, adopting live sessions and
+preserving durable results across restarts. Paused items open no sessions and defer auto-merge until Resume.
 """
 
 from __future__ import annotations
@@ -284,16 +285,23 @@ async def delete_task(project_id: UUID, item_id: UUID, task_id: UUID,
 @router.post("/projects/{project_id}/work/items/{item_id}/start")
 async def start_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
     """Hands the item to the runner, which acts for this sign-in from now on, with or without devices."""
-    item = _publish_item(caller.player_id, await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/start"))
-    _callers[item_id] = caller
+    async with _lock:
+        item = _publish_item(caller.player_id,
+                             await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/start"))
+        _callers[item_id] = caller
     wake()
     return item or {}
 
 
 @router.post("/projects/{project_id}/work/items/{item_id}/pause")
 async def pause_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    return _publish_item(caller.player_id,
-                         await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/pause")) or {}
+    # Serialize Pause with launches and merges: an operation already in flight finishes before
+    # Pause takes effect, and no runner operation can use an earlier item state afterwards.
+    async with _lock:
+        item = _publish_item(caller.player_id,
+                             await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/pause"))
+    wake()
+    return item or {}
 
 
 @router.post("/projects/{project_id}/work/issues", status_code=status.HTTP_201_CREATED)
@@ -755,7 +763,7 @@ class TaskRun:
     outcome: TaskReport | None = None
     nudged: bool = False
     resolutions: int = 0
-    # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for the player's merge).
+    # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for merge or Resume).
     phase: str = "working"
     status: str = "running"
     recovered: bool = False
@@ -889,14 +897,14 @@ async def _runner_loop() -> None:
 
 
 async def _tick() -> None:
-    entries = await mooi.fetch_running_work()
     async with _lock:
+        entries = await mooi.fetch_running_work()
         limits: dict[UUID, int] = {}
         synchronized: dict[UUID, Json | None] = {}
         for entry in entries:
             try:
                 item = entry["item"]
-                if item.get("status") != "running":
+                if item.get("status") not in ("running", "paused"):
                     continue
                 if item.get("issueNumber") is not None:
                     item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
@@ -917,9 +925,9 @@ async def _tick() -> None:
                 LOG.warning("Work item %s could not advance", (entry.get("item") or {}).get("id"), exc_info=True)
 
 
-async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
+async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     item = entry["item"]
-    if item.get("status") != "running":
+    if item.get("status") not in ("running", "paused"):
         return
     item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
     limits = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
@@ -945,8 +953,14 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
             # removal finish, so wait rather than racing a launch against the old checkout.
             continue
         if live is not None and not live.closing:
+            run = _runs.get(live.id)
+            adopted = run is None
+            if run is None:
+                recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
+                run = _adopt(item, task, live, player_id, limits, recovery=recovery)
+                # This workspace is already alive; only its runner metadata was lost.
+                run.recovery_expected = False
             if live.status == STATUS_FAILED:
-                run = _runs.get(live.id)
                 if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
                     try:
                         report = TaskReport.model_validate(task["qaReport"])
@@ -960,14 +974,10 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
                         _publish_item(player_id, item)
                         await _retire_task_recovery(player_id, UUID(item["projectId"]), UUID(item["id"]),
                                                     UUID(task["id"]), task["attempts"])
-                    if run is not None:
-                        await _close(run)
-                    else:
-                        await sessions.close_session(live.id)
+                    await _close(run)
                     tasks = item.get("tasks", tasks)
                     continue
-                recovery_failure = bool(run and run.recovery_expected)
-                if recovery_failure:
+                if run.recovery_expected:
                     reason = live.detail or "The saved task state could not be restored"
                     item = await _report(task, "attention", session_id=None, attempts=task["attempts"],
                                          report=f"Task recovery could not be restored safely: {reason}")
@@ -979,8 +989,13 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
                     await sessions.close_session(live.id)
                     _runs.pop(live.id, None)
                 continue
-            if UUID(session_id) not in _runs:
-                _adopt(item, task, live, player_id, limits)
+            if (live.status == STATUS_READY and live.pending is None and not live.queue
+                    and run.phase != "merging"):
+                if adopted:
+                    await _persist_recovery(run, live, report=run.outcome)
+                if run.status != "attention" and (run.outcome is not None or run.phase == "resolving") and (
+                        adopted or item.get("status") == "running"):
+                    await _settle(run, live)
             continue
         if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
             # QA's structured delivery is durable on the task itself. It can be committed safely
@@ -1017,19 +1032,21 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
         else:
             item = await _report(task, task["status"] if task["status"] in ("review", "merging") else "planned",
                                  attempts=attempts)
-            recoveries[task["id"]] = recovery
+            if recovery is not None:
+                recoveries[task["id"]] = recovery
         tasks = item.get("tasks", tasks)
 
+    # Reconcile paused tasks above, but never open a new session until Resume.
+    if item.get("status") != "running":
+        return
     if item.get("dependsOn") and not await _dependency_done(caller, item):
         return
     done = {task["id"] for task in tasks if task["status"] == "done"}
-    if item.get("status") != "running":
-        return
     ready = [task for task in tasks if task["status"] in ("planned", "queued", "review", "merging")
              and not task.get("sessionId")
              and all(dependency in done for dependency in task["dependsOn"])]
     for task in ready:
-        if not await _has_room(caller, player_id, limits):
+        if not await _has_room(caller, player_id, session_limits):
             await _wait(task, "Waiting for a free session")
             continue
         await _launch(item, task, caller, player_id, limits, recovery=recoveries.get(task["id"]))
@@ -1106,16 +1123,19 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
     if assignment is None:
         await _wait(task, "Waiting for an account with the requested model and quota left")
         return
-    # Assignment can take time; refresh GitHub and the locked item before opening a session.
+    # Assignment can take time; refresh the item before opening any session, including features.
     if item.get("issueNumber") is not None:
         item = await mooi.send_work(caller, "PUT", UUID(item["projectId"]),
                                     f"/issues/{item['issueNumber']}/item", github=True) or {}
         _publish_item(player_id, item)
-        task = next((row for row in item.get("tasks", []) if row["id"] == task["id"]), {})
-        if (item.get("status") != "running"
-                or task.get("status") not in ("planned", "queued", "review", "merging")
-                or task.get("sessionId")):
-            return
+    else:
+        work = await mooi.fetch_work(caller, UUID(item["projectId"]))
+        item = next((row for row in work.get("items", []) if row["id"] == item["id"]), {})
+    task = next((row for row in item.get("tasks", []) if row["id"] == task["id"]), {})
+    if (item.get("status") != "running"
+            or task.get("status") not in ("planned", "queued", "review", "merging")
+            or task.get("sessionId")):
+        return
     key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
     branch = recovery["branch"] if recovery else f"factory/{key}-{uuid4().hex[:6]}"
     recovery_context = _recovery_context(recovery, item, task, player_id) if recovery else None
@@ -1411,7 +1431,7 @@ sessions.session_listeners.append(_on_session_event)
 
 def _handoff_text(value: str) -> str:
     """Keep recovery metadata compact and redact credentials and host-local paths."""
-    text = workspaces._safe_handoff_text(value)
+    text = workspaces.Workspaces._safe_handoff_text(value)
     return re.sub(r"(?<![A-Za-z0-9])/(?:home|tmp|var/tmp|workspace)/[^\s'\"`]+", "[local path]", text)[:20_000]
 
 
@@ -1567,7 +1587,9 @@ async def _after_turn(run: TaskRun) -> None:
 
 
 async def _settle(run: TaskRun, session: Session) -> None:
-    if run.phase == "resolving":
+    if run.phase == "merging":
+        return
+    if run.phase == "resolving" or (run.phase == "review" and run.auto_merge and not run.qa):
         await _merge(run)
         return
     if run.phase == "review":
@@ -1617,6 +1639,15 @@ async def _settle(run: TaskRun, session: Session) -> None:
 async def _merge(run: TaskRun) -> None:
     """Merges a finished development task: clean merges at once, conflicts through the agent first."""
     caller = await _run_caller(run)
+    work = await mooi.fetch_work(caller, run.project_id)
+    item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), {})
+    if item.get("status") != "running":
+        if item.get("status") == "paused":
+            run.phase = "review"
+            if run.status != "review":
+                summary = run.outcome.summary if run.outcome else "Work finished."
+                await _report(run, "review", report=f"{summary}\n\nReady to merge when the item resumes.")
+        return
     preview = await sessions.check_merge(run.session_id, caller)
     if preview.state == "up_to_date":
         await _finish(run, "Nothing to merge: the default branch already holds this work", locked=True)
