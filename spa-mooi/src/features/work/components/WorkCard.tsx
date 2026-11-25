@@ -1,6 +1,7 @@
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Network } from 'lucide-react';
 import { CommitLink } from '@/features/work/components/CommitLink';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
+import { Button } from '@/shared/components/Button';
 import { entryDeployment } from '@/features/work/lib/workEntries';
 import { mergeCommits } from '@/features/work/lib/mergeCommits';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
@@ -20,10 +21,11 @@ interface WorkCardProps {
   onOpen: () => void;
   onStart: () => void;
   onPause: () => void;
+  onViewBoard?: () => void;
 }
 
 /** One feature, defect or debt on the board: what it is, how far it got, where it stands and its run control. */
-export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause }: WorkCardProps) => {
+export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause, onViewBoard }: WorkCardProps) => {
   const kind = WORK_KINDS[entry.kind];
   const Icon = kind.icon;
   const tasks = entry.item?.tasks ?? [];
@@ -79,7 +81,12 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
       ) : null}
 
       {showRun ? (
-        <div className="flex justify-end px-1">
+        <div className="flex justify-end gap-2 px-1">
+          {onViewBoard && entry.kind === 'feature' && entry.item?.status === 'planned' ? (
+            <Button size="sm" variant="secondary" disabled={busy} onClick={onViewBoard}>
+              <Network className="size-4" /> View board
+            </Button>
+          ) : null}
           <WorkRunButton item={entry.item} busy={busy} onStart={onStart} onPause={onPause} />
         </div>
       ) : null}

@@ -8,17 +8,18 @@ interface WorkBoardCardProps {
   project: Project;
   entry: WorkEntry;
   onOpen: () => void;
+  onViewBoard?: () => void;
 }
 
 /** A card wired to its own project's start and pause actions. */
-export const WorkBoardCard = ({ project, entry, onOpen }: WorkBoardCardProps) => {
+export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoardCardProps) => {
   const { run, busy } = useProjectWork(project.id, false);
   const start = async () => {
     const item = entry.item ?? (entry.issue ? await run(() => ensureIssueItem(project.id, entry.issue!.number)) : null);
     if (item) await run(() => startWorkItem(project.id, item.id));
   };
   return (
-    <WorkCard entry={entry} projectName={project.name} repository={project.fullName} busy={busy} onOpen={onOpen}
+    <WorkCard entry={entry} projectName={project.name} repository={project.fullName} busy={busy} onOpen={onOpen} onViewBoard={onViewBoard}
       onStart={() => { void start(); }}
       onPause={() => { if (entry.item) void run(() => pauseWorkItem(project.id, entry.item!.id)); }} />
   );

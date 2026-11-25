@@ -4,9 +4,11 @@ import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import type { Project } from '@/features/projects/types/Project';
 import { WorkBoardCard } from '@/features/work/components/WorkBoardCard';
 import { WorkEntryDialog } from '@/features/work/components/WorkEntryDialog';
+import { WorkFeatureGraphDialog } from '@/features/work/components/WorkFeatureGraphDialog';
 import { sortColumn, workEntries, WORK_COLUMNS } from '@/features/work/lib/workEntries';
 import type { WorkColumn } from '@/features/work/types/WorkColumn';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
+import type { WorkItem } from '@/features/work/types/WorkItem';
 import type { WorkKindFilter } from '@/features/work/types/WorkKindFilter';
 import { Button } from '@/shared/components/Button';
 import { Tabs } from '@/shared/components/Tabs';
@@ -37,6 +39,7 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
   const work = useLiveStore((live) => live.work);
   const [tab, setTab] = useState<WorkColumn>('defined');
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [graphItem, setGraphItem] = useState<WorkItem | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedWork = searchParams.get('work');
 
@@ -114,7 +117,10 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
                 <ul className="flex flex-col gap-2">
                   {rows.map(({ project, entry }) => (
                     <WorkBoardCard key={entryKey(project, entry)} project={project} entry={entry}
-                      onOpen={() => setOpenKey(entryKey(project, entry))} />
+                      onOpen={() => setOpenKey(entryKey(project, entry))}
+                      onViewBoard={entry.kind === 'feature' && entry.item?.status === 'planned'
+                        ? () => setGraphItem(entry.item)
+                        : undefined} />
                   ))}
                 </ul>
               ) : (
@@ -128,6 +134,7 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
         })}
       </div>
       {open ? <WorkEntryDialog project={open.project} entry={open.entry} connections={connections} onClose={close} /> : null}
+      {graphItem ? <WorkFeatureGraphDialog item={graphItem} onClose={() => setGraphItem(null)} /> : null}
     </div>
   );
 };
