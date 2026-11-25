@@ -6,6 +6,7 @@ import type { AnalyticsBreakdownRow } from '@/features/analytics/types/Analytics
 import type { AnalyticsDimension } from '@/features/analytics/types/AnalyticsDimension';
 import type { AnalyticsRange } from '@/features/analytics/types/AnalyticsRange';
 import { Card } from '@/shared/components/Card';
+import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 
 interface AnalyticsBreakdownCardProps {
   projectId: string;
@@ -40,6 +41,7 @@ export const AnalyticsBreakdownCard = ({ projectId, range, dimension, title, mea
         <h3 className="min-w-0 truncate text-sm font-semibold">{title}</h3>
         <span className="shrink-0 text-[11px] text-ink-subtle">{MEASURE_LABEL[measure]}</span>
       </header>
+      <AnalyticsSource name="Mooi tracker" />
       {error ? (
         <div role="alert" className="flex flex-col items-start gap-2 text-[13px] text-danger">
           <span>{error}</span>

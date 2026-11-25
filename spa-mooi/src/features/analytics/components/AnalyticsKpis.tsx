@@ -3,6 +3,7 @@ import { formatMetricCount, formatPercent, formatVisitDuration } from '@/feature
 import type { AnalyticsMetricValue } from '@/features/analytics/types/AnalyticsMetricValue';
 import type { AnalyticsOverview } from '@/features/analytics/types/AnalyticsOverview';
 import { Card } from '@/shared/components/Card';
+import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 import { cn } from '@/shared/utils/cn';
 
 interface Tile {
@@ -48,6 +49,7 @@ export const AnalyticsKpis = ({ overview }: { overview: AnalyticsOverview }) => 
           <span className="text-[12px] font-medium text-ink-muted">{tile.label}</span>
           <span className="text-2xl font-semibold tracking-[-0.03em] tabular-nums" title={tile.metric.value.toLocaleString('en')}>{tile.format(tile.metric.value)}</span>
           <Delta metric={tile.metric} inverse={tile.inverse} />
+          <AnalyticsSource name="Mooi tracker" />
         </Card>
       ))}
     </ul>

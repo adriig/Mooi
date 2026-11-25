@@ -3,6 +3,7 @@ import { RotateCw } from 'lucide-react';
 import { fetchAnalyticsSearch } from '@/features/analytics/api/analyticsApi';
 import { AnalyticsGoogleErrorState } from '@/features/analytics/components/AnalyticsGoogleErrorState';
 import { AnalyticsPositionChart } from '@/features/analytics/components/AnalyticsPositionChart';
+import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 import { AnalyticsSortableTable, type AnalyticsTableColumn } from '@/features/analytics/components/AnalyticsSortableTable';
 import { useAnalyticsReport } from '@/features/analytics/hooks/useAnalyticsReport';
 import { formatBucket, formatMetricCount, formatPosition, formatRatio } from '@/features/analytics/lib/analyticsFormat';
@@ -47,6 +48,7 @@ const Tile = ({ label, value }: { label: string; value: string }) => (
   <Card as="li" className="flex flex-col gap-1.5 p-4">
     <span className="text-[12px] font-medium text-ink-muted">{label}</span>
     <span className="text-2xl font-semibold tracking-[-0.03em] tabular-nums">{value}</span>
+    <AnalyticsSource name="Google Search Console" />
   </Card>
 );
 
@@ -64,6 +66,7 @@ const RowsCard = ({ projectId, range, site, revision, dimension, title, name, on
         <h3 className="min-w-0 truncate text-sm font-semibold">{title}</h3>
         {children}
       </header>
+      <AnalyticsSource name="Google Search Console" />
       {error ? (
         errorCode ? <AnalyticsGoogleErrorState code={errorCode} message={error} onAction={(action) => (action === 'retry' ? reload() : onAction(action))} /> : (
           <div role="alert" className="flex flex-col items-start gap-2 text-[13px] text-danger">
@@ -74,7 +77,9 @@ const RowsCard = ({ projectId, range, site, revision, dimension, title, name, on
       ) : loading && !data ? (
         <ul aria-busy className="flex flex-col gap-2.5">{[0, 1, 2, 3].map((index) => <li key={index} className="h-6 animate-pulse-soft rounded-chip bg-surface-3" />)}</ul>
       ) : (
-        <AnalyticsSortableTable rows={data?.rows ?? []} columns={columns(name)} rowKey={(row) => row.key} defaultSort="clicks"
+        <AnalyticsSortableTable key={dimension === 'query' ? `${projectId}|${range.from}|${range.to}|${site.searchConsoleSiteUrl}|${site.googleConnectionId}|query` : dimension}
+          batchSize={dimension === 'query' ? 5 : undefined}
+          rows={data?.rows ?? []} columns={columns(name)} rowKey={(row) => row.key} defaultSort="clicks"
           emptyText="No search data in this range." />
       )}
     </Card>
@@ -96,7 +101,7 @@ export const AnalyticsSearchSection = (props: AnalyticsSearchSectionProps) => {
 
   return (
     <section aria-labelledby="analytics-search" className="flex min-w-0 flex-col gap-3">
-      <div><h2 id="analytics-search" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">Google Search Console · search performance</h2><p className="mt-1 text-xs text-ink-subtle">Google’s organic search impressions, clicks, CTR and average position. This does not come from the Mooi tracker.</p></div>
+      <div><h2 id="analytics-search" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">SEO · Google Search Console</h2><p className="mt-1 text-xs text-ink-subtle">Google’s organic search impressions, clicks, CTR and average position. This does not come from the Mooi tracker.</p></div>
       {missing ? (
         <AnalyticsGoogleErrorState code={missing} onAction={onAction} />
       ) : daily.error ? (
@@ -125,6 +130,7 @@ export const AnalyticsSearchSection = (props: AnalyticsSearchSectionProps) => {
               <h3 className="text-sm font-semibold">Average Google position over time</h3>
               <span className="text-[11px] text-ink-subtle">Lower is better</span>
             </div>
+            <AnalyticsSource name="Google Search Console" />
             <AnalyticsPositionChart rows={daily.data.rows} />
           </Card>
           <RowsCard {...props} dimension={table} title={table === 'query' ? 'Top queries' : 'Top pages'} name={table === 'query' ? 'Query' : 'Page'}>

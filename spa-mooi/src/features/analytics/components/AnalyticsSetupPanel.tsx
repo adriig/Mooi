@@ -4,7 +4,6 @@ import { AnalyticsGoogleSetup } from '@/features/analytics/components/AnalyticsG
 import type { AnalyticsGoogleSelection } from '@/features/analytics/types/AnalyticsGoogleSelection';
 import type { AnalyticsSite } from '@/features/analytics/types/AnalyticsSite';
 import { Button } from '@/shared/components/Button';
-import { Card } from '@/shared/components/Card';
 import { CopyButton } from '@/shared/components/CopyButton';
 import { Modal } from '@/shared/components/Modal';
 
@@ -24,7 +23,7 @@ const STEPS = [
   'Tag any element with data-mooi-track="name" to count its clicks under that name.',
 ];
 
-/** Everything needed to install the tracker; shown open while the project has no events. */
+/** Production tracker and Google configuration, hosted in the shared configuration modal. */
 export const AnalyticsSetupPanel = ({ projectId, site, busy, error, onSaveOrigins, onRegenerateKey, onSaveGoogle }: AnalyticsSetupPanelProps) => {
   const [origins, setOrigins] = useState<string[] | null>(null);
   const [draft, setDraft] = useState('');
@@ -46,10 +45,12 @@ export const AnalyticsSetupPanel = ({ projectId, site, busy, error, onSaveOrigin
   };
 
   return (
-    <Card as="section" className="flex flex-col gap-5 p-5 sm:p-6">
+    <section className="flex min-w-0 flex-col gap-5">
       <div>
         <h3 className="text-base font-semibold tracking-[-0.015em]">Mooi tracker · traffic and clicks</h3>
         <p className="mt-1 text-sm text-ink-muted">Mooi’s cookieless first-party tracker records production page views and clicks. It powers the Traffic, Clicks and AI referral reports below; it is separate from Google Analytics and Search Console. Development previews are never measured.</p>
+        <p className="mt-2 text-sm text-ink-muted">Use it for live visitors and aggregate reports by page, referrer, UTM campaign and device. Recognized AI referrers classify AI referral traffic; visits without a referrer cannot be attributed to an AI source. The tracker does not provide Google rankings or execute AI visibility prompts.</p>
+        <p className="mt-2 text-sm text-ink-muted">Privacy: no cookies. The tracker respects Do Not Track and Global Privacy Control. Visitor hashes use a daily rotating salt, so visitors cannot be tracked across days. IP addresses and user-agent strings are not stored.</p>
       </div>
 
       <div className="flex min-w-0 items-start gap-2 rounded-control border border-line bg-surface-2 py-2 pr-1 pl-3">
@@ -100,12 +101,13 @@ export const AnalyticsSetupPanel = ({ projectId, site, busy, error, onSaveOrigin
         footer={(
           <>
             <Button variant="secondary" onClick={() => setConfirmOpen(false)} disabled={busy}>Cancel</Button>
-            <Button variant="danger" disabled={busy} onClick={() => void onRegenerateKey().then(() => setConfirmOpen(false))}>Regenerate key</Button>
+            <Button variant="danger" disabled={busy} onClick={() => void onRegenerateKey().then((saved) => { if (saved) setConfirmOpen(false); })}>Regenerate key</Button>
           </>
         )}
       >
         <p className="text-sm text-ink-muted">Past events are kept; only new events need the new key.</p>
+        {error ? <p role="alert" className="mt-3 text-sm text-danger">{error}</p> : null}
       </Modal>
-    </Card>
+    </section>
   );
 };

@@ -1,6 +1,7 @@
 import { RotateCw } from 'lucide-react';
 import { fetchAnalyticsGa4 } from '@/features/analytics/api/analyticsApi';
 import { AnalyticsGoogleErrorState } from '@/features/analytics/components/AnalyticsGoogleErrorState';
+import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 import { AnalyticsSortableTable, type AnalyticsTableColumn } from '@/features/analytics/components/AnalyticsSortableTable';
 import { AnalyticsTimeSeriesChart } from '@/features/analytics/components/AnalyticsTimeSeriesChart';
 import { useAnalyticsReport } from '@/features/analytics/hooks/useAnalyticsReport';
@@ -30,6 +31,7 @@ const Tile = ({ label, value }: { label: string; value: string }) => (
   <Card as="li" className="flex flex-col gap-1.5 p-4">
     <span className="text-[12px] font-medium text-ink-muted">{label}</span>
     <span className="text-2xl font-semibold tracking-[-0.03em] tabular-nums">{value}</span>
+    <AnalyticsSource name="Google Analytics 4 (GA4)" />
   </Card>
 );
 
@@ -42,6 +44,7 @@ const RowsCard = ({ projectId, range, site, revision, kind, title, name, onActio
   return (
     <Card as="section" className="flex min-w-0 flex-col gap-3 p-4 sm:p-5">
       <h3 className="min-w-0 truncate text-sm font-semibold">{title}</h3>
+      <AnalyticsSource name="Google Analytics 4 (GA4)" />
       {error ? (
         errorCode ? <AnalyticsGoogleErrorState code={errorCode} message={error} onAction={(action) => (action === 'retry' ? reload() : onAction(action))} /> : (
           <div role="alert" className="flex flex-col items-start gap-2 text-[13px] text-danger">
@@ -70,7 +73,7 @@ export const AnalyticsGa4Section = (props: AnalyticsGa4SectionProps) => {
 
   return (
     <section aria-labelledby="analytics-ga4" className="flex min-w-0 flex-col gap-3">
-      <h2 id="analytics-ga4" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">Google Analytics</h2>
+      <div><h2 id="analytics-ga4" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">Statistics · Google Analytics 4 (optional)</h2><p className="mt-1 text-xs text-ink-subtle">Source: your selected Google Analytics 4 property. These Google reports are separate from Mooi tracker statistics and can have different totals.</p></div>
       {missing ? (
         <AnalyticsGoogleErrorState code={missing} onAction={onAction} />
       ) : summary.error ? (
@@ -93,6 +96,7 @@ export const AnalyticsGa4Section = (props: AnalyticsGa4SectionProps) => {
           </ul>
           <Card className="flex flex-col gap-4 p-4 sm:p-5">
             <h3 className="text-sm font-semibold">Sessions over time</h3>
+            <AnalyticsSource name="Google Analytics 4 (GA4)" />
             {series.error ? <p role="alert" className="text-[13px] text-danger">{series.error}</p>
               : !series.data ? <div className="h-56 animate-pulse-soft rounded-control bg-surface-3" />
               : <AnalyticsTimeSeriesChart label="Sessions" points={series.data.rows.map((row) => ({ bucket: row.key, value: row.metrics.sessions }))} />}

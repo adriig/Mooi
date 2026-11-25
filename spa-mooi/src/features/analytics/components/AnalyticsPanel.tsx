@@ -9,6 +9,7 @@ import { AnalyticsKpis } from '@/features/analytics/components/AnalyticsKpis';
 import { AnalyticsRangePicker } from '@/features/analytics/components/AnalyticsRangePicker';
 import { AnalyticsSearchSection } from '@/features/analytics/components/AnalyticsSearchSection';
 import { AnalyticsSetupPanel } from '@/features/analytics/components/AnalyticsSetupPanel';
+import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 import { AnalyticsTimeSeriesChart } from '@/features/analytics/components/AnalyticsTimeSeriesChart';
 import { useAnalyticsReport } from '@/features/analytics/hooks/useAnalyticsReport';
 import { useAnalyticsSite } from '@/features/analytics/hooks/useAnalyticsSite';
@@ -23,6 +24,7 @@ import { startGoogleAuthorization } from '@/features/google/api/googleApi';
 import { Button } from '@/shared/components/Button';
 import { Card } from '@/shared/components/Card';
 import { EmptyState } from '@/shared/components/EmptyState';
+import { Modal } from '@/shared/components/Modal';
 import { SegmentedControl } from '@/shared/components/SegmentedControl';
 
 interface AnalyticsPanelProps {
@@ -82,15 +84,20 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
+      <Card className="grid gap-4 p-4 sm:p-5 md:grid-cols-3">
+        <div><h2 className="text-sm font-semibold">Statistics</h2><p className="mt-1 text-sm text-ink-muted">Production visits and clicks from the Mooi tracker. Optional Google Analytics 4 (GA4) reports appear separately with their own data.</p></div>
+        <div><h2 className="text-sm font-semibold">SEO · search performance</h2><p className="mt-1 text-sm text-ink-muted">Google Search Console shows organic Google Search impressions, clicks and average position.</p></div>
+        <div><h2 className="text-sm font-semibold">GEO · AI discovery</h2><p className="mt-1 text-sm text-ink-muted">AI referral visits come from tracker referrers. Separate visibility runs test prompts with AI providers; the SEO &amp; GEO audit checks your production site.</p></div>
+      </Card>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <AnalyticsRangePicker range={range} onPreset={onPreset} onCustom={onCustom} />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex h-9 items-center gap-2 rounded-full border border-line bg-surface px-3 text-[13px] text-ink-muted" title="Visitors in the last 5 minutes">
             <span aria-hidden className={`size-2 rounded-full ${live ? 'bg-success-dot' : 'bg-line-strong'}`} />
-            <span className="font-medium text-ink tabular-nums">{live ?? '–'}</span> live
+            <span className="font-medium text-ink tabular-nums">{live ?? '–'}</span> live · Mooi tracker
           </span>
           <Button variant="secondary" size="sm" onClick={reload} ariaLabel="Refresh analytics"><RotateCw className="size-4" /></Button>
-          {hasData ? <Button variant="secondary" size="sm" onClick={() => setSetupOpen((open) => !open)}><Settings2 className="size-4" />Setup</Button> : null}
+          <Button variant="secondary" size="sm" onClick={() => setSetupOpen(true)}><Settings2 className="size-4" />Configure</Button>
         </div>
       </div>
 
@@ -101,10 +108,15 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
         </Card>
       ) : siteState.loading && !siteState.site ? (
         <Card className="h-40 animate-pulse-soft" />
-      ) : siteState.site && (hasData === false || setupOpen) ? (
-        <AnalyticsSetupPanel projectId={projectId} site={siteState.site} busy={siteState.busy} error={siteState.actionError}
-          onSaveOrigins={siteState.saveOrigins} onRegenerateKey={siteState.regenerateKey} onSaveGoogle={siteState.saveGoogle} />
       ) : null}
+
+      <Modal open={setupOpen} onClose={() => setSetupOpen(false)} title="Analytics configuration" size="lg"
+        description="Set up production tracking and optional Google data sources.">
+        {siteState.site ? <AnalyticsSetupPanel key={projectId} projectId={projectId} site={siteState.site} busy={siteState.busy} error={siteState.actionError}
+          onSaveOrigins={siteState.saveOrigins} onRegenerateKey={siteState.regenerateKey} onSaveGoogle={siteState.saveGoogle} />
+          : siteState.error ? <div className="flex flex-col items-start gap-3"><p role="alert" className="text-sm text-danger">{siteState.error}</p><Button variant="secondary" onClick={siteState.reload}>Retry</Button></div>
+          : <p role="status" className="text-sm text-ink-muted">Loading configuration…</p>}
+      </Modal>
 
       {overview.error ? (
         <Card className="flex flex-wrap items-center justify-between gap-3 p-5">
@@ -122,16 +134,19 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
         <EmptyState icon={BarChart3} title="No Mooi tracker data in this range yet"
           description="Install the Mooi tracker to measure production traffic and clicks, or pick a wider range. Google Search Console and Analytics reports below use their own Google data sources.">
           <Button variant="secondary" onClick={() => update({ range: '90d' })}>Show the last 90 days</Button>
+          <Button variant="brand" onClick={() => setSetupOpen(true)}>Configure Analytics</Button>
         </EmptyState>
       ) : (
         <>
           <section aria-label="Overview" className="flex flex-col gap-4">
+            <div><h2 className={GROUP_TITLE}>Statistics · overview</h2><AnalyticsSource name="Mooi tracker" /></div>
             <AnalyticsKpis overview={overview.data} />
             <Card className="flex flex-col gap-4 p-4 sm:p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold">Over time</h3>
                 <SegmentedControl items={METRICS} value={metric} onChange={(id) => setMetric(id as AnalyticsMetric)} />
               </div>
+              <AnalyticsSource name="Mooi tracker" />
               {series.error ? <p role="alert" className="text-[13px] text-danger">{series.error}</p>
                 : !series.data ? <div className="h-56 animate-pulse-soft rounded-control bg-surface-3" />
                 : <AnalyticsTimeSeriesChart points={series.data} label={METRICS.find((item) => item.id === metric)?.label ?? ''} />}
