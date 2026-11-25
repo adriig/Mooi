@@ -1,4 +1,5 @@
 import { sessionsFetch } from '@/features/sessions/lib/sessionsFetch';
+import type { Session } from '@/features/sessions/types/Session';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
 import type { WorkSettings } from '@/features/work/types/WorkSettings';
@@ -75,6 +76,11 @@ export const updateWorkIssue = (projectId: string, number: number,
 /** The item that runs an issue, created on first use so its settings can change. */
 export const ensureIssueItem = (projectId: string, number: number) =>
   send<WorkItem>(workPath(projectId, `/issues/${number}/item`), 'PUT', 'Could not prepare this issue to run.');
+
+/** Opens or resumes the issue's read-only definition conversation with a server-selected assignment. */
+export const defineWorkIssue = (projectId: string, number: number) =>
+  send<Session>(workPath(projectId, `/issues/${number}/define`), 'POST',
+    'Could not open the definition session.');
 
 export const fetchWorkSettings = (projectId: string) =>
   send<WorkSettings>(workPath(projectId, '/settings'), 'GET', 'Could not load the factory settings.');

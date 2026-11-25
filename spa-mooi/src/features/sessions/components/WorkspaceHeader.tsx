@@ -28,7 +28,10 @@ interface WorkspaceHeaderProps {
  */
 export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose, closeBusy }: WorkspaceHeaderProps) => {
   const deployControl = useDeployControl(session, closeBusy);
-  const deploy = deployEnabled ? deployControl : null;
+  const deploy = deployEnabled && session.kind !== 'definition' ? deployControl : null;
+  const title = session.kind === 'definition'
+    ? `Define issue #${session.definitionIssueNumber ?? ''}`
+    : session.branch;
 
   return (
     <div className="flex shrink-0 items-center gap-1.5 composing:max-lg:hidden border-b border-line bg-surface py-2 pr-2 pl-1.5 sm:gap-3 sm:px-5 sm:py-2.5">
@@ -45,10 +48,10 @@ export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose
 
       <div className="min-w-0 flex-1 max-sm:hidden">
         <p className="truncate text-[11px] font-medium text-ink-subtle">{project.name}</p>
-        <Tooltip content={session.branch} className="flex">
+        <Tooltip content={title} className="flex">
           <h1 className="flex min-w-0 items-center gap-1.5 text-[15px] leading-[1.3] font-semibold tracking-[-0.01em] text-ink">
             <GitBranch className="size-4 shrink-0 text-ink-subtle" />
-            <span className="line-clamp-1 font-mono break-all">{session.branch}</span>
+            <span className={`line-clamp-1 ${session.kind === 'definition' ? '' : 'font-mono break-all'}`}>{title}</span>
           </h1>
         </Tooltip>
         <WorkspacePathLabel path={session.workspacePath} className="mt-0.5" focusable />
@@ -56,7 +59,7 @@ export const WorkspaceHeader = ({ project, session, back, deployEnabled, onClose
 
       <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
         <span className="hidden max-w-36 border-r border-line pr-3 sm:block"><SessionAccountIdentity session={session} /></span>
-        <MergeButton key={`merge-${session.id}`} session={session} disabled={closeBusy} onCloseSession={onClose} closeBusy={closeBusy} />
+        {session.kind === 'definition' ? null : <MergeButton key={`merge-${session.id}`} session={session} disabled={closeBusy} onCloseSession={onClose} closeBusy={closeBusy} />}
         {deploy ? <DeployButton control={deploy} /> : null}
         <SessionActionsMenu session={session} deploy={deploy} onClose={onClose} closeBusy={closeBusy} />
       </div>

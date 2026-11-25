@@ -39,14 +39,14 @@ export const SessionActionsMenu = ({ session, deploy, onClose, closeBusy }: Sess
             disabled={!session.workspacePath}
             onClick={() => session.workspacePath && copy(session.workspacePath)}
           />
-          <MenuAction
+          {session.kind === 'definition' ? null : <MenuAction
             icon={KeyRound}
             label="Environment variables"
             onClick={() => {
               dismiss();
               setEnvironmentOpen(true);
             }}
-          />
+          />}
           <div className="my-1 h-px bg-line" />
           <MenuAction
             icon={XCircle}

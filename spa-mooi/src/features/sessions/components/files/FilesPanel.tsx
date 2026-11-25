@@ -24,6 +24,7 @@ interface FilesPanelProps {
  */
 export const FilesPanel = ({ sessionId, active }: FilesPanelProps) => {
   const { files, error, retry } = useSessionFiles(sessionId, active);
+  const readOnly = useSessionsStore((state) => state.sessions.find((session) => session.id === sessionId)?.kind === 'definition');
   const changed = useSessionsStore((state) => state.byId[sessionId]?.changes?.files);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -108,6 +109,7 @@ export const FilesPanel = ({ sessionId, active }: FilesPanelProps) => {
             path={current}
             draft={drafts[current]}
             active={active}
+            readOnly={readOnly}
             onDraft={setDraft}
             onBack={() => setReading(false)}
           />
@@ -118,7 +120,8 @@ export const FilesPanel = ({ sessionId, active }: FilesPanelProps) => {
               title={files.paths.length === 0 ? 'No files yet' : 'Pick a file'}
               description={files.paths.length === 0
                 ? 'Once this workspace has files, you can browse and edit them here.'
-                : 'Open a file from the tree to read it, edit it and save it into this session.'}
+                : readOnly ? 'Open a file from the tree to inspect the read-only repository.'
+                  : 'Open a file from the tree to read it, edit it and save it into this session.'}
             />
           </div>
         )}

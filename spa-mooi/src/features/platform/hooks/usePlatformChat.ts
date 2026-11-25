@@ -17,7 +17,7 @@ interface UsePlatformChat {
  * The project's live platform chat of one kind, if any. Starting a new one replaces the previous chat
  * of that kind on the server; the first message is delivered as soon as the agent is ready.
  */
-export const usePlatformChat = (projectId: string | undefined, kind: Exclude<SessionKind, 'session'>): UsePlatformChat => {
+export const usePlatformChat = (projectId: string | undefined, kind: Exclude<SessionKind, 'session' | 'definition'>): UsePlatformChat => {
   const sessions = useSessionsStore((state) => state.sessions);
   const chat = useMemo(() => sessions.find((session) => session.projectId === projectId && session.kind === kind
     && session.status !== 'closed'), [sessions, projectId, kind]);

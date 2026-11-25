@@ -25,20 +25,20 @@ const Detail = ({ icon: Icon, children, mono = false }: { icon: LucideIcon; chil
  */
 export const WorkspaceCompactTitle = ({ project, session }: WorkspaceCompactTitleProps) => (
   <div className="min-w-0 flex-1 sm:hidden">
-    <h1 className="sr-only">{session.branch}</h1>
+    <h1 className="sr-only">{session.kind === 'definition' ? `Define issue #${session.definitionIssueNumber ?? ''}` : session.branch}</h1>
     <TapTooltip label="Show session details" content={
       <div className="flex w-[min(22rem,calc(100vw-6rem))] flex-col divide-y divide-line">
         <Detail icon={Layers}><span className="font-bold">{project.name}</span></Detail>
-        <Detail icon={GitBranch} mono>{session.branch}</Detail>
+        <Detail icon={GitBranch} mono>{session.kind === 'definition' ? `Define issue #${session.definitionIssueNumber ?? ''}` : session.branch}</Detail>
         <Detail icon={Bot}><SessionAccountIdentity session={session} compact /></Detail>
         <Detail icon={FolderGit2} mono>
           {session.workspacePath ?? <span className="font-sans text-ink-subtle italic">Clone not ready yet</span>}
         </Detail>
       </div>
     }>
-      <span aria-hidden="true" className="flex min-w-0 items-center gap-1.5 text-[14px] leading-tight font-extrabold tracking-[-0.01em] text-ink">
-        <GitBranch className="size-3.5 shrink-0 text-ink-subtle" />
-        <span className="truncate-start min-w-0 font-mono"><span dir="ltr">{session.branch}</span></span>
+        <span aria-hidden="true" className="flex min-w-0 items-center gap-1.5 text-[14px] leading-tight font-extrabold tracking-[-0.01em] text-ink">
+          <GitBranch className="size-3.5 shrink-0 text-ink-subtle" />
+          <span className={`truncate min-w-0 ${session.kind === 'definition' ? '' : 'font-mono'}`}><span dir="ltr">{session.kind === 'definition' ? `Define #${session.definitionIssueNumber ?? ''}` : session.branch}</span></span>
       </span>
       <span aria-hidden="true" className="mt-0.5 block truncate pl-5 text-[10px] leading-tight font-semibold text-ink-subtle">
         {session.adapterLabel ?? session.providerLabel}

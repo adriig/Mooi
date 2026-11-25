@@ -1,2 +1,2 @@
-/** A plain session on its own branch, or a platform chat (production deployment, backups) on the default branch. */
-export type SessionKind = 'session' | 'production' | 'backup';
+/** A development chat, read-only issue-definition chat, or platform chat. */
+export type SessionKind = 'session' | 'definition' | 'production' | 'backup';

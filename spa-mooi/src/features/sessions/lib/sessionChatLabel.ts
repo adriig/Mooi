@@ -4,5 +4,6 @@ import type { Session } from '@/features/sessions/types/Session';
 export const sessionChatLabel = (session: Session): string => {
   if (session.kind === 'production') return 'Deployment chat';
   if (session.kind === 'backup') return 'Backups chat';
+  if (session.kind === 'definition') return `Define issue #${session.definitionIssueNumber ?? ''}`;
   return session.branch || 'New session';
 };

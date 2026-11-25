@@ -228,7 +228,7 @@ class DeploymentLog(DeploymentContract):
 
 # A plain session works on its own branch; the platform chats (production deployment and backups) work
 # on a clone of the default branch and edit their project's platform-stored documents.
-SessionKind = Literal["session", "production", "backup"]
+SessionKind = Literal["session", "definition", "production", "backup"]
 _PLATFORM_KINDS = frozenset({"production", "backup"})
 
 
@@ -242,6 +242,7 @@ class CreateSessionRequest(BaseModel):
     model: str | None = None
     effort: str | None = None
     kind: SessionKind = "session"
+    definitionIssueNumber: int | None = Field(default=None, ge=1)
     # Delivered as the first user message once the agent is ready, exactly as if the user sent it.
     initialMessage: str | None = Field(default=None, min_length=1, max_length=100_000)
 
@@ -628,6 +629,7 @@ class PendingPayload(BaseModel):
 class SessionPayload(BaseModel):
     id: UUID
     kind: SessionKind
+    definitionIssueNumber: int | None = None
     projectId: UUID
     projectFullName: str
     provider: str
@@ -853,6 +855,7 @@ class Session:
 
     id: UUID
     kind: SessionKind
+    definition_issue_number: int | None
     player_id: UUID
     project_id: UUID
     project_full_name: str
@@ -934,6 +937,7 @@ class Session:
         return SessionPayload(
             id=self.id,
             kind=self.kind,
+            definitionIssueNumber=self.definition_issue_number,
             projectId=self.project_id,
             projectFullName=self.project_full_name,
             provider=self.provider,
@@ -986,6 +990,7 @@ def new_session(
     return Session(
         id=session_id,
         kind=kind,
+        definition_issue_number=None,
         player_id=player_id,
         project_id=project_id,
         project_full_name=project_full_name,
@@ -1046,6 +1051,13 @@ class SessionRegistry:
                 for existing in self._sessions.values()
             ):
                 raise ApiException.conflict(f"A {session.kind} chat already exists for this project")
+            if session.kind == "definition" and any(
+                existing.player_id == session.player_id and existing.project_id == session.project_id
+                and existing.kind == "definition"
+                and existing.definition_issue_number == session.definition_issue_number and not existing.closing
+                for existing in self._sessions.values()
+            ):
+                raise ApiException.conflict("A definition chat already exists for this issue")
             self.check_limits(session.player_id, max_sessions)
             self._sessions[session.id] = session
         _announce(session)
@@ -1480,6 +1492,8 @@ async def create_session(
     body: CreateSessionRequest, caller: Annotated[Caller, Depends(current_caller)]
 ) -> SessionPayload:
     """Reserve a session immediately; provision it in a tracked background task."""
+    if body.kind == "definition":
+        raise ApiException.bad_request("Definition sessions are created through the software factory Define action")
     return (await _open_session(body, caller)).to_payload()
 
 
@@ -1495,6 +1509,13 @@ async def _open_session(body: CreateSessionRequest, caller: Caller, *,
         if body.branch is None:
             raise ApiException.bad_request("A branch is required for a session")
         await workspaces.get_workspaces().validate_branch(body.branch)
+    elif body.kind == "definition":
+        if body.definitionIssueNumber is None:
+            raise ApiException.bad_request("A definition session must be linked to an issue")
+        if body.branch is not None:
+            raise ApiException.bad_request("A definition session always uses the project default branch")
+    elif body.definitionIssueNumber is not None:
+        raise ApiException.bad_request("Only a definition session can be linked to an issue")
     if body.kind in _PLATFORM_KINDS:
         # A new platform chat always replaces the project's previous one of the same kind.
         for existing in registry.list_for(caller.player_id, body.projectId):
@@ -1516,9 +1537,12 @@ async def _open_session(body: CreateSessionRequest, caller: Caller, *,
     session.config = config
     session.adapter = adapter.id
     session.agent_caller = caller
+    session.definition_issue_number = body.definitionIssueNumber
     project = await mooi.fetch_project(caller, body.projectId)
     session.project_full_name = project.full_name
     session.base_branch = project.default_branch
+    if session.kind == "definition":
+        session.branch = project.default_branch
     session.deployment_ready = project.development_deployment_ready
     if session.kind in _PLATFORM_KINDS:
         session.branch = project.default_branch
@@ -1573,6 +1597,7 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
             adapter=session.adapter,
             instructions=_session_instructions(session),
             environment=_session_environment(session),
+            read_only=session.kind == "definition",
         )
         session.runtime = runtime
         session.trace.follow(runtime.trace_sources)
@@ -2520,6 +2545,8 @@ async def save_file_content(
     session = get_registry().get_for(caller, session_id)
     if session.kind in _PLATFORM_KINDS:
         raise ApiException.conflict("Platform chats publish their documents after a successful test")
+    if session.kind == "definition":
+        raise ApiException.forbidden("Definition sessions are read-only")
     if session.workspace == _UNSET_PATH:
         raise ApiException.conflict("The workspace is still being prepared")
     async with session.operation_lock:
@@ -2534,6 +2561,8 @@ async def save_file_content(
 
 def _require_mergeable(session: Session) -> None:
     """Merging reads the whole working tree, so no turn, question or deployment may be mid-flight."""
+    if session.kind == "definition":
+        raise ApiException.forbidden("Definition sessions are read-only and cannot be merged")
     if session.kind in _PLATFORM_KINDS:
         raise ApiException.conflict("Platform chats publish their documents after a successful test")
     if session.workspace == _UNSET_PATH:
@@ -2609,7 +2638,8 @@ async def _reset_conversation(session: Session, caller: Caller) -> AgentRuntime:
     runtime = create_runtime(session.provider, credential, session.workspace, session.branch,
                              _emitter(session), _asker(session), session.config, adapter=session.adapter,
                              instructions=_session_instructions(session),
-                             environment=_session_environment(session))
+                             environment=_session_environment(session),
+                             read_only=session.kind == "definition")
     session.runtime = runtime
     session.trace.follow(runtime.trace_sources)
     try:
@@ -2763,6 +2793,16 @@ def _development_overview(stored: Iterable[str]) -> DevelopmentEnvironment:
 def _session_instructions(session: Session) -> str:
     """A plain session's standing guidance, added to the agent's system instructions: platform chats
     carry their own brief instead."""
+    if session.kind == "definition":
+        root = f"http://127.0.0.1:{get_settings().sessions_port}/sessions/{session.id}"
+        extensions = "".join(f"{section(session, root)}\n\n" for section in instruction_sections)
+        return f"""## Mooi issue definition session
+This is a read-only definition session for GitHub issue #{session.definition_issue_number}. Do not modify the repository, run commands that write files, deploy, merge, or create/update issues, tasks or features. Repository tools are restricted to read-only access. The only authorized write operation is saving a reviewable issue-definition proposal through the session's scoped software-factory API.
+Use Python urllib with inline JSON and this header: `X-Mooi-Agent-Token: {session.agent_token}`.
+For Antigravity and OpenCode, run API requests only as a single `python -c '...'` command with double-quoted Python string literals; the platform permits only this issue's definition GET and proposal PUT.
+Read the current report/definition with `GET {root}/work/agent/issues/{session.definition_issue_number}/definition`. Iterate with the user until its validity, category (defect or improvement), scope, and verifiable acceptance criteria are clear; recommend issue splits or promotion to a feature where appropriate. Persist the proposal with `PUT {root}/work/agent/issues/{session.definition_issue_number}/definition/proposal`. A proposal is not acceptance: never apply it, and do not treat discussion or a proposal as permission to change Issues or executable work. Only the user explicitly accepting the proposal in the software factory applies changes.
+
+{extensions}"""
     if session.kind != "session":
         return ""
     root = f"http://127.0.0.1:{get_settings().sessions_port}/sessions/{session.id}"
@@ -4901,6 +4941,8 @@ async def _run_deployment_start(
 @router.post("/sessions/{session_id}/deployment/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_deployment(session_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> DeploymentSnapshot:
     session = get_registry().get_for(caller, session_id)
+    if session.kind == "definition":
+        raise ApiException.forbidden("Definition sessions cannot deploy")
     if session.kind in _PLATFORM_KINDS:
         raise ApiException.conflict("Previews are only available for regular sessions")
     session.agent_caller = caller
@@ -4921,6 +4963,8 @@ async def change_deployment_setup(session_id: UUID, body: DeploymentSetupRequest
                                   caller: Annotated[Caller, Depends(current_caller)]) -> DeploymentSnapshot:
     """Clears the chat and asks the agent to change the deployment setup as requested, then test it."""
     session = get_registry().get_for(caller, session_id)
+    if session.kind == "definition":
+        raise ApiException.forbidden("Definition sessions cannot change deployment setup")
     if session.kind in _PLATFORM_KINDS:
         raise ApiException.conflict("Previews are only available for regular sessions")
     session.agent_caller = caller

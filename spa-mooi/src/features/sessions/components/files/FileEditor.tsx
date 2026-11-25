@@ -11,6 +11,7 @@ interface FileEditorProps {
   /** Unsaved text for this file, kept by the panel so switching files never loses it. */
   draft: string | undefined;
   active: boolean;
+  readOnly?: boolean;
   onDraft: (path: string, text: string | undefined) => void;
   onBack: () => void;
 }
@@ -23,7 +24,7 @@ const unreadable = {
   too_large: 'This file is too large to open here.',
 } as const;
 
-export const FileEditor = ({ sessionId, path, draft, active, onDraft, onBack }: FileEditorProps) => {
+export const FileEditor = ({ sessionId, path, draft, active, readOnly = false, onDraft, onBack }: FileEditorProps) => {
   const { file, latest, error, behind, adopt, reload } = useOpenFile(sessionId, path, active);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -86,7 +87,7 @@ export const FileEditor = ({ sessionId, path, draft, active, onDraft, onBack }: 
           </span>
           {directory ? <span className="truncate text-[10px] text-ink-subtle">{directory}</span> : null}
         </div>
-        {editable ? (
+        {editable && !readOnly ? (
           <div className="flex shrink-0 items-center gap-1.5">
             <Button variant="ghost" size="sm" onClick={discard} disabled={!dirty || saving} ariaLabel="Discard unsaved changes">
               <RotateCcw className="size-3.5" />
@@ -138,6 +139,7 @@ export const FileEditor = ({ sessionId, path, draft, active, onDraft, onBack }: 
           ) : null}
           <textarea
             value={value}
+            readOnly={readOnly}
             onChange={(event) => onDraft(path, event.target.value === text ? undefined : event.target.value)}
             onScroll={(event) => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }}
             onKeyDown={(event) => {

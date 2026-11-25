@@ -36,10 +36,13 @@ Nothing outside this module changes.
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import math
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -107,6 +110,110 @@ _COMPACT_SUMMARY_LIMIT = 16_000
 _TITLE_LIMIT = 120
 _FILE_TOOLS = {"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"}
 _QUESTION_TOOL = "AskUserQuestion"
+_READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch", "WebFetch", "Bash"}
+
+
+def _definition_api_command(command: Any, api_prefix: str | None) -> bool:
+    """Allow only a one-line Python urllib call to this definition session's two scoped API routes."""
+    if not isinstance(command, str) or not api_prefix:
+        return False
+    executable, marker, source = command.partition(" -c '")
+    if executable not in ("python", "python3") or not marker or not source.endswith("'"):
+        return False
+    source = source[:-1]
+    if "'" in source:
+        return False
+    try:
+        tokens = shlex.split(command)
+        tree = ast.parse(source, mode="exec")
+    except (ValueError, SyntaxError):
+        return False
+    if len(tokens) != 3 or tokens[0] != executable or tokens[1] != "-c" or tokens[2] != source:
+        return False
+
+    allowed_nodes = {
+        ast.Module, ast.Import, ast.ImportFrom, ast.alias, ast.Assign, ast.Name, ast.Load, ast.Store,
+        ast.Call, ast.Attribute, ast.Constant, ast.keyword, ast.Dict, ast.List, ast.Tuple, ast.Expr,
+        ast.With, ast.withitem, ast.Subscript, ast.BinOp, ast.Add,
+    }
+    if any(type(node) not in allowed_nodes for node in ast.walk(tree)):
+        return False
+    allowed_attributes = {"request", "Request", "urlopen", "dumps", "loads", "encode", "read", "decode"}
+    if any(isinstance(node, ast.Attribute) and node.attr not in allowed_attributes for node in ast.walk(tree)):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(alias.name not in ("urllib.request", "json")
+                                                or alias.asname for alias in node.names):
+            return False
+        if isinstance(node, ast.ImportFrom) and (
+            node.module != "urllib.request" or any(alias.name not in ("Request", "urlopen") for alias in node.names)
+        ):
+            return False
+
+    def dotted(node: ast.expr) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = dotted(node.value)
+            return f"{parent}.{node.attr}" if parent else ""
+        return ""
+
+    def literal(node: ast.expr | None) -> Any:
+        return node.value if isinstance(node, ast.Constant) else None
+
+    requests: list[tuple[ast.Call, str, str]] = []
+    request_names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = dotted(node.func)
+        if function in ("urllib.request.Request", "Request"):
+            url = literal(node.args[0]) if node.args else None
+            method = next((literal(item.value) for item in node.keywords if item.arg == "method"), "GET")
+            if url not in (api_prefix, f"{api_prefix}/proposal") or method not in ("GET", "PUT"):
+                return False
+            if (url == api_prefix and method != "GET") or (url.endswith("/proposal") and method != "PUT"):
+                return False
+            requests.append((node, url, method))
+            for statement in ast.walk(tree):
+                if isinstance(statement, ast.Assign) and statement.value is node:
+                    request_names.update(target.id for target in statement.targets if isinstance(target, ast.Name))
+        elif function not in (
+            "urllib.request.urlopen", "urlopen", "json.dumps", "json.loads", "print", "encode", "read", "decode",
+        ):
+            return False
+        elif function in ("urllib.request.urlopen", "urlopen"):
+            if not node.args or not (
+                (isinstance(node.args[0], ast.Name) and node.args[0].id in request_names)
+                or (isinstance(node.args[0], ast.Call)
+                    and dotted(node.args[0].func) in ("urllib.request.Request", "Request"))
+            ):
+                # Assignment order is not guaranteed by ast.walk; the second pass below validates names.
+                if not (node.args and isinstance(node.args[0], ast.Name)):
+                    return False
+    if len(requests) != 1:
+        return False
+    allowed_request_names = set()
+    request_call = requests[0][0]
+    for statement in ast.walk(tree):
+        if isinstance(statement, ast.Assign) and statement.value is request_call:
+            allowed_request_names.update(target.id for target in statement.targets if isinstance(target, ast.Name))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and dotted(node.func) in ("urllib.request.urlopen", "urlopen"):
+            if not node.args or not (
+                (isinstance(node.args[0], ast.Name) and node.args[0].id in allowed_request_names)
+                or (node.args[0] is request_call)
+            ):
+                return False
+    return True
+
+
+def _definition_api_prefix(instructions: str) -> str | None:
+    match = re.search(
+        r"GET (http://127\.0\.0\.1:\d+/sessions/[^/\s]+/work/agent/issues/\d+/definition)",
+        instructions,
+    )
+    return match.group(1) if match else None
 IMAGE_GENERATION_TOOL = "ImageGeneration"
 VIEW_IMAGE_TOOL = "ViewImage"
 _DENIED_MESSAGE = "The user declined this action"
@@ -373,6 +480,7 @@ class AgentRuntime(Protocol):
         *,
         instructions: str = "",
         environment: Mapping[str, str] | None = None,
+        read_only: bool = False,
     ) -> None: ...
 
     @staticmethod
@@ -735,10 +843,12 @@ class ClaudeAgentRuntime:
         *,
         instructions: str = "",
         environment: Mapping[str, str] | None = None,
+        read_only: bool = False,
     ) -> None:
         self._config = config
         self._instructions = instructions
         self._environment = dict(environment or {})
+        self._read_only = read_only
         self._credential = credential
         self._workspace = workspace
         self._branch = branch
@@ -1161,10 +1271,11 @@ class ClaudeAgentRuntime:
             # Full access: every tool is approved in the callback without creating a pending
             # request, and no project setting can re-enable the bash sandbox. Only the agent's
             # own questions reach the player.
-            permission_mode="default",
+            permission_mode="plan" if self._read_only else "default",
             can_use_tool=self._can_use_tool,
             hooks=hooks,
-            sandbox={"enabled": False},
+            sandbox=({"enabled": True, "filesystem": {"denyWrite": [str(self._workspace)]}}
+                     if self._read_only else {"enabled": False}),
             include_partial_messages=True,
             max_buffer_size=settings.agent_claude_max_message_bytes,
             # Native project discovery; cwd and these settings are not a host
@@ -1204,6 +1315,8 @@ class ClaudeAgentRuntime:
     ) -> PermissionResult:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
+            if self._read_only and tool_name not in _READ_ONLY_TOOLS:
+                return PermissionResultDeny(message="This definition session is read-only")
             return PermissionResultAllow(updated_input=input_data)
 
         request_id = uuid4().hex
@@ -1599,10 +1712,12 @@ class ClaudeCliAgentRuntime:
         *,
         instructions: str = "",
         environment: Mapping[str, str] | None = None,
+        read_only: bool = False,
     ) -> None:
         self._config = config
         self._instructions = instructions
         self._environment = dict(environment or {})
+        self._read_only = read_only
         self._credential = credential
         self._workspace = workspace
         self._branch = branch
@@ -1931,8 +2046,10 @@ class ClaudeCliAgentRuntime:
             "--include-partial-messages",
             # Full access: every tool is approved over stdio without a pending request, and no
             # project setting can re-enable the bash sandbox. Only the agent's questions reach the player.
-            "--permission-mode", "default", "--permission-prompt-tool", "stdio",
-            "--settings", json.dumps({"sandbox": {"enabled": False}}),
+            "--permission-mode", "plan" if self._read_only else "default", "--permission-prompt-tool", "stdio",
+            "--settings", json.dumps(
+                {"sandbox": {"enabled": True, "filesystem": {"denyWrite": [str(self._workspace)]}}
+                 if self._read_only else {"enabled": False}}),
             # Native project discovery; cwd and these settings are not a host filesystem boundary.
             "--setting-sources=project,local",
             "--mcp-config", json.dumps({"mcpServers": {"playwright": playwright_server()}}),
@@ -1973,6 +2090,8 @@ class ClaudeCliAgentRuntime:
     async def _can_use_tool(self, tool_name: str, input_data: dict[str, Any]) -> dict[str, Any]:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
+            if self._read_only and tool_name not in _READ_ONLY_TOOLS:
+                return {"behavior": "deny", "message": "This definition session is read-only"}
             return {"behavior": "allow", "updatedInput": input_data}
         request_id = uuid4().hex
         questions = list(input_data.get("questions") or [])
@@ -2330,11 +2449,13 @@ class CodexAgentRuntime:
             raise ApiException.bad_request("Unsupported effort for this model")
         return AgentConfig(chosen, value)
 
-    def __init__(self, credential, workspace, branch, emit, ask, config, *, instructions="", environment=None):
+    def __init__(self, credential, workspace, branch, emit, ask, config, *, instructions="", environment=None,
+                 read_only=False):
         self._credential, self._workspace, self._branch = credential, workspace, branch
         self._emit, self._ask, self._config = emit, ask, config
         self._instructions = instructions
         self._environment = dict(environment or {})
+        self._read_only = read_only
         self._account = None
         self._client = None
         # The credential the connection was opened with, and whether it has loaded the thread.
@@ -2358,8 +2479,12 @@ class CodexAgentRuntime:
         await self._emit(event["type"], event["data"])
 
     def _thread_params(self) -> dict[str, Any]:
-        params = {"cwd": str(self._workspace), "model": self._config.model, **_CODEX_ACCESS,
-                  "developerInstructions": "\n\n".join(filter(None, [_CODEX_CONDUCT, self._instructions]))}
+        params = {
+            "cwd": str(self._workspace),
+            "model": self._config.model,
+            **({"approvalPolicy": "never", "sandbox": "read-only"} if self._read_only else _CODEX_ACCESS),
+            "developerInstructions": "\n\n".join(filter(None, [_CODEX_CONDUCT, self._instructions])),
+        }
         if self._environment:
             # The account's app-server is shared by sessions: per-thread overrides scope the variables
             # to this conversation's shell commands, on top of the server's `inherit="none"` policy.
@@ -3070,11 +3195,14 @@ class AntigravityCliAgentRuntime:
         return AgentConfig(chosen, value)
 
     def __init__(self, credential: Credential, workspace: Path, branch: str, emit: Emit, ask: Ask,
-                 config: AgentConfig, *, instructions: str = "", environment: Mapping[str, str] | None = None) -> None:
+                 config: AgentConfig, *, instructions: str = "", environment: Mapping[str, str] | None = None,
+                 read_only: bool = False) -> None:
         self._credential, self._workspace, self._branch = credential, workspace, branch
         self._emit, self._ask, self._config = emit, ask, config
         self._instructions = instructions
         self._environment = dict(environment or {})
+        self._read_only = read_only
+        self._definition_api_prefix = _definition_api_prefix(instructions) if read_only else None
         self._home: Path | None = None
         # The sign-in bundle the home holds as far as this runtime knows (written or read back).
         self._home_token: str | None = None
@@ -3123,7 +3251,9 @@ class AntigravityCliAgentRuntime:
             self._home = await asyncio.to_thread(self._create_home)
         instructions = "\n\n".join(filter(None, [_ANTIGRAVITY_CONDUCT, _ANTIGRAVITY_GUIDANCE, self._instructions]))
         try:
-            await asyncio.to_thread(antigravity.prepare_home, self._home, self._credential, instructions=instructions)
+            await asyncio.to_thread(
+                antigravity.prepare_home, self._home, self._credential, instructions=instructions,
+                allow=("read_file(*)", "command(*)") if self._read_only else antigravity.ALLOW_RULES)
             self._home_token = self._credential.token
             if self._bridge is None:
                 self._bridge = antigravity.HookBridge(self._on_hook)
@@ -3535,6 +3665,13 @@ class AntigravityCliAgentRuntime:
             self._hook_args[(conversation, step)] = (name, args)
         if self._closing or self._interrupted:
             return antigravity.deny("The turn was interrupted")
+        if self._read_only and name == "run_command" and not _definition_api_command(
+            _antigravity_value(args, "CommandLine", "Command", "command"), self._definition_api_prefix
+        ):
+            return antigravity.deny("Definition sessions allow shell commands only for their scoped definition API")
+        if self._read_only and name in {"write_file", "write_to_file", "edit_file", "replace_file_content",
+                                        "multi_replace_file_content", "sed_file", "notebook_edit"}:
+            return antigravity.deny("This definition session is read-only")
         asked = antigravity.questions(payload)
         if asked is None:
             return antigravity.allow()
@@ -4031,7 +4168,7 @@ class OpenCodeAcpAgentRuntime:
 
     def __init__(self, credential: Credential, workspace: Path, branch: str, emit: Emit, ask: Ask,
                  config: AgentConfig, *, instructions: str = "",
-                 environment: Mapping[str, str] | None = None) -> None:
+                 environment: Mapping[str, str] | None = None, read_only: bool = False) -> None:
         self._credential = credential
         self._workspace = workspace.resolve()
         self._branch = branch
@@ -4040,6 +4177,8 @@ class OpenCodeAcpAgentRuntime:
         self._config = config
         self._instructions = instructions.strip()
         self._environment = dict(environment or {})
+        self._read_only = read_only
+        self._definition_api_prefix = _definition_api_prefix(self._instructions) if read_only else None
         self._home: Path | None = None
         self._acp: opencode.Acp | None = None
         self._session_id: str | None = None
@@ -4067,7 +4206,10 @@ class OpenCodeAcpAgentRuntime:
     async def start(self) -> None:
         await asyncio.to_thread(_validate_agent_workspace, self._workspace, self._branch)
         self._home = Path(tempfile.mkdtemp(prefix="opencode-", dir=self._workspace.parent))
-        await asyncio.to_thread(opencode.prepare_home, self._home, self._credential.mode)
+        await asyncio.to_thread(
+            opencode.prepare_home, self._home, self._credential.mode,
+            permission={"*": "deny", "read": "allow", "glob": "allow", "grep": "allow",
+                        "list": "allow", "bash": "ask"} if self._read_only else None)
         try:
             await opencode.install_account(self._home, self._binary(), self._credential)
         except opencode.OpenCodeError as error:
@@ -4212,6 +4354,11 @@ class OpenCodeAcpAgentRuntime:
         options = params.get("options") or []
         if self._interrupted or self._closing:
             return {"outcome": {"outcome": "cancelled"}}
+        if self._read_only:
+            tool_call = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
+            raw_input = tool_call.get("rawInput") if isinstance(tool_call.get("rawInput"), dict) else {}
+            if not _definition_api_command(raw_input.get("command"), self._definition_api_prefix):
+                return {"outcome": {"outcome": "cancelled"}}
         selected = next((item for item in options if item.get("kind") == "allow_once"), None) or next(
             (item for item in options if str(item.get("kind", "")).startswith("allow")), None)
         return ({"outcome": {"outcome": "selected", "optionId": selected["optionId"]}}
@@ -4521,6 +4668,9 @@ def create_runtime(
     adapter: str | None = None,
     instructions: str = "",
     environment: Mapping[str, str] | None = None,
+    read_only: bool = False,
 ) -> AgentRuntime:
-    return describe(provider).adapter(adapter).runtime_class(credential, workspace, branch, emit, ask, config,
-                                                             instructions=instructions, environment=environment)
+    return describe(provider).adapter(adapter).runtime_class(
+        credential, workspace, branch, emit, ask, config,
+        instructions=instructions, environment=environment, read_only=read_only,
+    )

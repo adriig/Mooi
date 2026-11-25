@@ -1,12 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { sessionPath } from '@/app/paths';
-import { useAgentConnections } from '@/features/agents/hooks/useAgentConnections';
-import { createSession } from '@/features/sessions/api/sessionsApi';
-import { useAgentModelChoice } from '@/features/sessions/hooks/useAgentModelChoice';
 import { useSessionsStore } from '@/stores/sessionsStore';
 import { backLinkState } from '@/shared/utils/backLinkState';
-import { ensureIssueItem, pauseWorkItem, startWorkItem } from '@/features/work/api/workApi';
+import { defineWorkIssue, ensureIssueItem, pauseWorkItem, startWorkItem } from '@/features/work/api/workApi';
 import { WorkCard } from '@/features/work/components/WorkCard';
 import { useProjectWork } from '@/features/work/hooks/useProjectWork';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
@@ -23,8 +20,6 @@ interface WorkBoardCardProps {
 export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoardCardProps) => {
   const { run, busy } = useProjectWork(project.id, false);
   const navigate = useNavigate();
-  const { connections } = useAgentConnections();
-  const choice = useAgentModelChoice(entry.column === 'new', connections);
   const [defining, setDefining] = useState(false);
   const [defineError, setDefineError] = useState<string | null>(null);
   const start = async () => {
@@ -32,19 +27,11 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
     if (item) await run(() => startWorkItem(project.id, item.id));
   };
   const define = async () => {
-    if (!entry.issue || !choice.ready || defining) return;
+    if (!entry.issue || defining) return;
     setDefining(true);
     setDefineError(null);
     try {
-      const session = await createSession({
-        projectId: project.id,
-        provider: choice.provider,
-        adapter: choice.adapter || undefined,
-        connectionId: choice.connectionId,
-        model: choice.model,
-        effort: choice.effort || null,
-        initialMessage: `Define issue #${entry.issue.number} (${entry.kind}): ${entry.title}\n\nIssue: ${entry.issue.htmlUrl ?? ''}\n${entry.issue.body}\n\nRead the repository without changing any files. Determine whether this report is valid, clarify scope and verifiable acceptance criteria, decide whether it is a defect or improvement, and recommend whether it should be split into issues or raised to a feature. Do not edit GitHub issues or create work items, tasks, or features. Read docs/issue-definitions.md for the proposal contract. Read the current definition through GET /sessions/{sessionId}/work/agent/issues/${entry.issue.number}/definition, then persist a reviewable proposal through PUT /sessions/{sessionId}/work/agent/issues/${entry.issue.number}/definition/proposal. Only user acceptance through the authenticated software factory API applies the proposal to issues and executable work.`,
-      });
+      const session = await defineWorkIssue(project.id, entry.issue.number);
       useSessionsStore.getState().upsertSession(session);
       navigate(sessionPath(session.projectId, session.id), { state: backLinkState({ to: '/todos', label: 'Planification' }) });
     } catch (error) {
@@ -62,7 +49,6 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
     {defineError ? <div role="alert" className="mt-1 flex items-center justify-between gap-2 rounded-control bg-danger-soft px-2 py-1.5 text-xs text-danger">
       <span>{defineError}</span><button type="button" className="font-semibold underline" onClick={() => { void define(); }}>Retry</button>
     </div> : null}
-    {entry.column === 'new' && !choice.ready && !defining ? <p className="mt-1 px-2 text-xs text-ink-subtle">Link an agent account to define this item.</p> : null}
     </div>
   );
 };

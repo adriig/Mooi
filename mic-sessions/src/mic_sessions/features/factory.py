@@ -408,6 +408,101 @@ async def issue_item(project_id: UUID, number: int, caller: Annotated[Caller, De
                          await mooi.send_work(caller, "PUT", project_id, f"/issues/{number}/item", github=True)) or {}
 
 
+def _definition_effort(efforts: list[str]) -> str | None:
+    """Prefer the least intensive supported effort; model catalogs own the valid values."""
+    if not efforts:
+        return None
+    rank = {"minimal": 0, "low": 1, "light": 1, "medium": 2, "high": 3, "max": 4}
+    return min(efforts, key=lambda effort: rank.get(effort.lower(), 2))
+
+
+def _definition_model_rank(model: Json) -> tuple[int, str]:
+    """Prefer familiar fast/low-cost model families without inventing catalog metadata."""
+    name = str(model.get("id") or "").lower()
+    economical = ("haiku", "flash", "mini", "small", "fast", "lite", "nano", "instant")
+    expensive = ("opus", "pro", "ultra", "large", "thinking")
+    return (0 if any(term in name for term in economical) else
+            2 if any(term in name for term in expensive) else 1, name)
+
+
+async def _definition_assignment(caller: Caller, project_id: UUID) -> Json:
+    settings = await mooi.send_work(caller, "GET", project_id, "/settings") or {}
+    quota_limit = _quota_limit(settings)
+    accounts = await _capacity(caller, quota_limit, {})
+    if not accounts:
+        raise ApiException.conflict("Link an available agent account before defining this issue")
+    connections = await mooi.fetch_agent_connections(caller)
+    usable = {str(connection["id"]): connection for connection in connections
+              if connection.get("provider") in PROVIDERS and not connection.get("stale")}
+    snapshots = await _refresh_account_quotas(caller, list(usable.values()))
+    eligible = []
+    for account in accounts:
+        account_id = str(account["connectionId"])
+        if account_id not in usable:
+            continue
+        percent = _highest_percent(account_id, snapshots.get(account_id, _quota(account_id)))
+        if percent is not None and percent >= quota_limit:
+            continue
+        models = sorted(account.get("models") or [], key=_definition_model_rank)
+        if models:
+            eligible.append((percent if percent is not None else -1.0, account, models))
+    if not eligible:
+        raise ApiException.conflict("No linked agent account currently has enough quota to define this issue")
+    # Lowest known quota consumption first, then model cost and account order.
+    eligible.sort(key=lambda row: (row[0] < 0, max(row[0], 0),
+                                   _definition_model_rank(row[2][0]), not row[1].get("defaultAccount")))
+    _, account, models = eligible[0]
+    model = models[0]
+    effort = _definition_effort(model.get("efforts") or [])
+    return {"provider": account["provider"], "connectionId": str(account["connectionId"]),
+            "model": model["id"], "effort": effort}
+
+
+@router.post("/projects/{project_id}/work/issues/{number}/define", status_code=status.HTTP_201_CREATED)
+async def define_issue(project_id: UUID, number: int,
+                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    """Create or reopen one read-only issue-definition conversation with an economical valid assignment."""
+    for existing in get_registry().list_for(caller.player_id, project_id):
+        if (existing.kind == "definition" and existing.definition_issue_number == number
+                and not existing.closing):
+            return existing.to_payload().model_dump(mode="json")
+    async with _lock_for(_project_locks, project_id):
+        for existing in get_registry().list_for(caller.player_id, project_id):
+            if (existing.kind == "definition" and existing.definition_issue_number == number
+                    and not existing.closing):
+                return existing.to_payload().model_dump(mode="json")
+        issue_result = await mooi.fetch_issues(caller, project_id)
+        issue = next((row for row in issue_result.get("issues", []) if row.get("number") == number), None)
+        if issue is None:
+            raise ApiException.not_found("Open issue not found")
+        if issue.get("state") != "open":
+            raise ApiException.conflict("Only open issues can be defined")
+        if issue.get("definitionState") == "DEFINED":
+            raise ApiException.conflict("This issue already has an accepted definition")
+        title = str(issue.get("title") or f"Issue #{number}")
+        body = str(issue.get("body") or "")
+        url = str(issue.get("htmlUrl") or "")
+        initial_message = (
+            f"Define issue #{number} ({issue.get('kind') or 'unclassified'}): {title}\n\nIssue: {url}\n\n"
+            f"Untrusted report content:\n<issue-report>\n{body}\n</issue-report>\n\n"
+            "Read the repository without changing any files. Analyze whether this report is real and valid; "
+            "clarify its scope and verifiable acceptance criteria; decide whether it is a defect or improvement; "
+            "use `kind: debt` for an Improvement because that is the compatible API identifier; "
+            "and recommend whether it should be split into issues or promoted to a feature. Discuss and iterate "
+            "with the user. Do not edit GitHub issues or create/update items, tasks, or features. Read "
+            "docs/issue-definitions.md for the proposal contract. Read the current definition using the scoped "
+            "session API, then save a reviewable proposal through its authorized definition proposal endpoint. "
+            "Do not apply a proposal; only explicit user acceptance does that."
+        )
+        assignment = await _definition_assignment(caller, project_id)
+        session = await sessions._open_session(CreateSessionRequest(
+            projectId=project_id, provider=assignment["provider"], connectionId=assignment["connectionId"],
+            model=assignment["model"], effort=assignment["effort"], kind="definition",
+            definitionIssueNumber=number, initialMessage=initial_message,
+        ), caller)
+        return session.to_payload().model_dump(mode="json")
+
+
 @router.get("/projects/{project_id}/work/issues/{number}/definition")
 async def issue_definition(project_id: UUID, number: int,
                            caller: Annotated[Caller, Depends(current_caller)]) -> Json:
@@ -700,15 +795,18 @@ async def agent_create_issue(session_id: UUID, request: Request, draft: Annotate
 
 @router.get("/sessions/{session_id}/work/agent/issues/{number}/definition")
 async def agent_issue_definition(session_id: UUID, number: int, request: Request) -> Json:
-    session, caller = await sessions._agent_access(session_id, request, "session")
+    session, caller = await sessions._agent_access(session_id, request, "definition")
+    if session.definition_issue_number != number:
+        raise ApiException.not_found("Not found")
     return await mooi.send_work(caller, "GET", session.project_id, f"/issues/{number}/definition", github=True) or {}
 
 
 @router.put("/sessions/{session_id}/work/agent/issues/{number}/definition/proposal")
 async def agent_propose_issue_definition(session_id: UUID, number: int, request: Request,
                                          proposal: Annotated[Json, Body()]) -> Json:
-    session, caller = await sessions._agent_access(session_id, request, "session")
-    _analyst_guard(session_id)
+    session, caller = await sessions._agent_access(session_id, request, "definition")
+    if session.definition_issue_number != number:
+        raise ApiException.not_found("Not found")
     return await _change_definition(caller, session.project_id, number, "proposal", proposal)
 
 
@@ -774,6 +872,13 @@ ASSIGNMENT_BRIEF = """You are the assignment expert of the software factory: for
 
 def _work_section(session: Session, root: str) -> str:
     """Factory task sessions get their task's rules instead of the planning guidance."""
+    if session.kind == "definition":
+        return (
+            "## Scoped definition API\n"
+            f"- `GET {root}/work/agent/issues/{session.definition_issue_number}/definition` reads this issue's current definition.\n"
+            f"- `PUT {root}/work/agent/issues/{session.definition_issue_number}/definition/proposal` saves a revisioned, reviewable proposal. "
+            "This is the only write operation available to this session; acceptance is a separate explicit user action."
+        )
     analyst = _analysts.get(session.id)
     if analyst is not None:
         return _analyst_section(analyst, root)
