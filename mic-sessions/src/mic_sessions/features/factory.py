@@ -1183,6 +1183,7 @@ def _analyst_brief(item: Json, change: Json) -> str:
                   "You have permission for that proposal only. Preserve all completed/active tasks."
                   if change.get("confirmedAt") else "No scope change has been approved by the user.")
     return (f"# Change request for {item['title']}\n\n{change['request']}\n\n"
+            f"{_design_memory_brief(item)}\n\n"
             f"## Spec (revision {_spec_revision(spec)})\n{spec if len(spec) <= 10_000 else index}\n\n"
             f"## Tasks and current states\n{tasks}\n\n## Permission\n{permission}\n\n"
             "Follow your Software factory change analyst instructions. Inspect task details through the work API "
@@ -2090,6 +2091,19 @@ def feature_directory(item: Json) -> str:
     return f"docs/features/{_feature_slug(item)}-{str(item['id'])[:8]}/"
 
 
+def _design_memory_brief(item: Json, task: Json | None = None) -> str:
+    if item.get("kind") != "feature":
+        return ""
+    directory = feature_directory(item)
+    brief = (f"Design memory: `{directory}`. Before starting, read `FEATURE.md` and the files in `decisions/` "
+             "there; skip missing files or folders without error.")
+    if task is not None and not task.get("qaOf"):
+        brief += (f"\nCreate or update `{directory}decisions/{task['key']}.md` on your task branch, even if the "
+                  "folder is missing, so it travels with your task merge. Keep it brief and concrete, with sections "
+                  "`Decisiones`, `Alternativas descartadas` (and why), and `Ficheros clave`.")
+    return brief
+
+
 def _table_cell(value: str) -> str:
     return " <br> ".join(line.strip() for line in value.strip().splitlines() if line.strip()).replace("|", "\\|")
 
@@ -2200,6 +2214,8 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
     kind = {"feature": "Feature", "defect": "Defect", "debt": "Debt"}[item["kind"]]
     issue = f" (GitHub issue #{item['issueNumber']})" if item.get("issueNumber") else ""
     lines = [f"# {kind}{issue}: {item['title']}"]
+    if memory := _design_memory_brief(item, task):
+        lines += ["", memory]
     seen: dict[str, str] = {}
 
     def block(title: str, content: str | None, fallback: str = "") -> None:
