@@ -247,6 +247,7 @@ export const ProjectDeploymentPage = () => {
           reload();
         }} /> : null}
       {detail ? <ProductionDeploymentDetailDialog key={detail.operationId} deployment={detail} projectName={project.name}
+        repository={project.fullName}
         onClose={() => setDetail(null)}
         onRedeploy={configured && stage !== 'deploying' ? () => requestRedeploy(detail.releaseTag) : undefined}
         onFix={() => { setDetail(null); fixFailure(); }}

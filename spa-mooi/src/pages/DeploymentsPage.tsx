@@ -98,7 +98,7 @@ export const DeploymentsPage = () => {
       </section>}
 
       {selected ? <ProductionDeploymentDetailDialog key={selected.operationId} deployment={selected}
-        projectName={projectById.get(selected.projectId)?.name ?? 'Removed project'} onClose={() => setSelected(null)}
+        projectName={projectById.get(selected.projectId)?.name ?? 'Removed project'} repository={projectById.get(selected.projectId)?.fullName} onClose={() => setSelected(null)}
         onFix={projectById.has(selected.projectId) ? () => navigate(deploymentPath(selected.projectId)) : undefined}
         onDelete={async () => {
           await deleteProductionDeployment(selected.projectId, selected.operationId);
