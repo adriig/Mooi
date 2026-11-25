@@ -96,8 +96,18 @@ def _publish_item(player_id: UUID, item: None) -> None: ...
 
 def _publish_item(player_id: UUID, item: Json | None) -> Json | None:
     if item:
+        item = _session_visible_item(item)
         sessions._channels.publish(player_id, EVENT_WORK_ITEM, {"projectId": item["projectId"], "item": item})
     return item
+
+
+def _session_visible_item(item: Json) -> Json:
+    registry = get_registry()
+    return {**item, "tasks": [
+        {**task, "sessionAvailable": bool(task.get("sessionId")
+                                           and registry.get(UUID(task["sessionId"])) is not None)}
+        for task in item.get("tasks", [])
+    ]}
 
 
 def _publish_issue(player_id: UUID, project_id: UUID, issue: Json | None) -> None:
@@ -175,6 +185,21 @@ async def _retry_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: 
 async def _restart_clean_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
     # Serialize with this runner; mic-mooi validates ownership and eligibility under its item lock.
     async with _lock_for(_item_locks, item_id):
+        work = await mooi.fetch_work(caller, project_id)
+        item = next((row for row in work.get("items", []) if row["id"] == str(item_id)), None)
+        task = next((row for row in item.get("tasks", []) if row["id"] == str(task_id)), None) if item else None
+        if task and task.get("sessionId"):
+            session_id = UUID(task["sessionId"])
+            if get_registry().get(session_id) is not None:
+                raise ApiException.conflict("The task still has a registered session")
+            # Only the session registry can establish that this reference is stale. Clear it through
+            # the same durable runner operation before mic-mooi applies its structured eligibility.
+            answer = await mooi.report_task(task_id, {
+                "status": "attention", "sessionId": None, "attempts": task["attempts"],
+                "report": task.get("report"), "recoveryState": (task.get("recoveryDisposition") or {}).get("state"),
+            })
+            _touch(item_id)
+            _publish_item(caller.player_id, answer.get("item"))
         item = await mooi.send_work(caller, "POST", project_id,
                                     f"/items/{item_id}/tasks/{task_id}/restart-clean")
         _touch(item_id)
@@ -301,7 +326,8 @@ async def _new_project(caller: Caller, project_id: UUID, work: Json) -> bool:
 
 async def _project_work(caller: Caller, project_id: UUID) -> Json:
     work = await mooi.fetch_work(caller, project_id)
-    return {**work, "newProject": await _new_project(caller, project_id, work)}
+    visible = {**work, "items": [_session_visible_item(item) for item in work.get("items", [])]}
+    return {**visible, "newProject": await _new_project(caller, project_id, work)}
 
 
 async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
@@ -1671,7 +1697,7 @@ async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
                   attempts: int | None = None, report: str | None = None, assignment: Json | None = None,
                   merge_sha: str | None = None, qa_handoff: Json | None = None,
-                  clear_session: bool = False) -> Json:
+                  clear_session: bool = False, recovery_state: str | None = None) -> Json:
     """Saves a task's progress in mic-mooi and announces its item."""
     if isinstance(run_or_task, TaskRun):
         task_id, player_hint = run_or_task.task_id, run_or_task.player_id
@@ -1691,6 +1717,10 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
             "qaHandoff": qa_handoff}
     if clear_session:
         body["sessionId"] = None
+    if recovery_state:
+        body["recoveryState"] = recovery_state
+    elif status_ == "running":
+        body["recoveryState"] = None
     if isinstance(run_or_task, TaskRun):
         body.update(segments=run_or_task.segments, stalledSegments=run_or_task.stalled_segments,
                     lastSnapshotRevision=run_or_task.last_snapshot_revision, contextHandoff=run_or_task.context_handoff)
@@ -1922,7 +1952,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                 recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
                 run = _adopt(item, task, live, player_id, settings, recovery=recovery)
                 # This workspace is already alive; only its runner metadata was lost.
-                run.recovery_expected = False
+                run.recovery_expected = bool(getattr(live, "recovery_failed", False))
                 if run.context_handoff == CONTINUATION:
                     # Its last turn end was counted before the continuation was saved; continue it once.
                     run.turn_end = run.counted_turn = live.log.last_seq
@@ -1934,7 +1964,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             if run.phase not in ("merging", "review") and _quota_exhausted(live):
                 _background(_pause_quota(run, live))
                 continue
-            if run.phase == "working" and run.status == "running":
+            if run.phase == "working" and run.status == "running" and live.status != STATUS_FAILED:
                 _background(_check_context(run))
             if live.status == STATUS_FAILED:
                 if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
@@ -1956,8 +1986,18 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                     continue
                 if run.recovery_expected:
                     reason = live.detail or "The saved task state could not be restored"
+                    recovery = await _task_recovery(UUID(task["id"]), task["attempts"], task.get("segments", 0))
+                    if recovery is not None:
+                        reason = f"Recovery restore failed: {reason}"
+                        try:
+                            await mooi.invalidate_task_recovery(UUID(task["id"]), task["attempts"], reason)
+                        except Exception:
+                            LOG.warning("Could not invalidate unrestorable snapshot for task %s",
+                                        task["id"], exc_info=True)
                     item = await _report(task, "attention", session_id=None, attempts=task["attempts"],
-                                         report=f"Task recovery could not be restored safely: {reason}")
+                                         report=f"Task recovery could not be restored safely: {reason}",
+                                         recovery_state="unrestorable" if recovery else None,
+                                         clear_session=True)
                     await _close(run)
                     tasks = item.get("tasks", tasks)
                 else:
@@ -2000,6 +2040,35 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             continue
         _runs.pop(UUID(session_id), None)
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"], task.get("segments", 0))
+        if task["status"] in ("running", "attention"):
+            blocker = (recovery or {}).get("reportedOutcome") == "blocked" or (
+                isinstance(task.get("qaReport"), dict)
+                and bool(task["qaReport"].get("blockerCause")))
+            stalled = str(task.get("report") or "").lower().startswith("no progress:")
+            # Explicit external blockers and exhausted-progress states wait for the user. Other
+            # orphaned active/attention tasks resume from their exact attempt and segment.
+            if blocker or stalled:
+                reason = task.get("report") or (recovery or {}).get("reportedSummary") or "Task is blocked"
+                item = await _report(task, "attention", clear_session=True, report=reason)
+                tasks = item.get("tasks", tasks)
+                continue
+            if _recovery_problem(recovery) is not None:
+                problem = _recovery_problem(recovery)
+                item = await _report(task, "attention", clear_session=True,
+                                     report=f"Task recovery needs attention: {problem}",
+                                     recovery_state="missing" if recovery is None else "invalid")
+                tasks = item.get("tasks", tasks)
+                continue
+            assert recovery is not None
+            LOG.warning("Task %s session %s disappeared; restoring attempt %s segment %s snapshot %s",
+                        task["id"], session_id, task["attempts"], task.get("segments", 0),
+                        recovery["snapshotRevision"])
+            queued = await _queue_context_continuation(task, recovery, settings)
+            tasks = queued.get("tasks", tasks)
+            resumed = next((row for row in tasks if row["id"] == task["id"]), None)
+            if resumed and resumed["status"] == "queued":
+                recoveries[task["id"]] = recovery
+            continue
         if task.get("contextHandoff") in (*_HANDOFF_STATES, CONTINUATION):
             # Complete a durable handoff after a runner restart between close and queue. A session lost
             # while its checkpoint was pending was being cut anyway, and one lost before its automatic
@@ -2190,6 +2259,14 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
     completed_report = recovered_outcome in ("done", "passed", "defect") or (
         task.get("qaOf") and recovered_outcome == "blocked")
     initial_message = None if completed_report else _brief(item, task, recovery)
+    if initial_message and recovery:
+        initial_message += (
+            "\n\nFactory recovery: the runner detected that the previous session record no longer exists; "
+            "its provider runtime is not being resumed. "
+            f"The runner validated and restored snapshot revision {recovery['snapshotRevision']} "
+            f"from attempt {recovery['attempt']}, segment {recovery.get('segment', 0)}. "
+            "Continue in this new provider runtime and report the task outcome through the task API."
+        )
     try:
         session = await sessions._open_session(CreateSessionRequest(
             projectId=UUID(item["projectId"]), provider=assignment["provider"],

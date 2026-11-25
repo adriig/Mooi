@@ -15,13 +15,16 @@ describe('clean restart eligibility', () => {
 
   test.each([
     task({ status: 'planned' }),
-    task({ sessionId: 'live-session' }),
     task({ recoveryDisposition: { state: 'recoverable' } }),
     task({ recoveryDisposition: { state: 'normal' } }),
     task({ recoveryDisposition: null }),
     task({ report: 'Recovery unavailable', recoveryDisposition: undefined }),
   ])('does not infer eligibility from report text or other task state: %o', (candidate: WorkTask) => {
     expect(canRestartTaskClean(candidate)).toBe(false);
+  });
+
+  test('a stale session reference does not hide an irrecoverable recovery action', () => {
+    expect(canRestartTaskClean(task({ sessionId: 'deleted-session' }))).toBe(true);
   });
 });
 

@@ -1585,12 +1585,16 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
         session.workspace = workspace.path
         session.base_commit = workspace.base_commit
         if recovery:
-            await workspaces.restore_recovery(
-                session.workspace, owner_id=UUID(recovery["ownerId"]), project_id=session.project_id,
-                item_id=UUID(recovery["itemId"]), task_id=UUID(recovery["taskId"]),
-                attempt=recovery["attempt"], revision=recovery["snapshotRevision"],
-                expected_branch=session.branch, expected_base=recovery["baseCommit"],
-            )
+            try:
+                await workspaces.restore_recovery(
+                    session.workspace, owner_id=UUID(recovery["ownerId"]), project_id=session.project_id,
+                    item_id=UUID(recovery["itemId"]), task_id=UUID(recovery["taskId"]),
+                    attempt=recovery["attempt"], revision=recovery["snapshotRevision"],
+                    expected_branch=session.branch, expected_base=recovery["baseCommit"],
+                )
+            except Exception:
+                session.recovery_failed = True
+                raise
         _sync_deployment_configured(session)
 
         _record_status(session, STATUS_PROVISIONING, f"Starting {descriptor.adapter(session.adapter).label}")
@@ -1621,15 +1625,14 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
                     with suppress(ApiException):
                         await _deliver(session, runtime, initial_message)
     except asyncio.CancelledError:
-        if recovery:
-            session.recovery_failed = True
         await _cleanup_workspace(session)
         raise
     except Exception as failure:
         if session.closing:
             return
         LOG.exception("Session %s could not be provisioned", session.id)
-        session.recovery_failed = recovery is not None
+        # Provider, credential and runtime startup failures do not invalidate a successfully
+        # restored snapshot. Only the restore operation itself sets recovery_failed.
         await _cleanup_workspace(session)
         record(session, "error", {"message": "The session could not be started. Check provider and repository access."})
         detail = "Workspace provisioning failed"

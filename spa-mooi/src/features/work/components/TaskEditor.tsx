@@ -95,10 +95,10 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge tone={state.tone}>{state.label}</Badge>
+        <Badge tone={state.tone}>{task.status === 'queued' && task.contextHandoff === 'resume' ? 'Queued for recovery' : state.label}</Badge>
         {attempts > 0 ? <span className="text-xs text-ink-subtle">Attempt {attempts + 1}</span> : null}
         {segmentLabel(task) ? <span className="text-xs text-ink-subtle">{segmentLabel(task)}</span> : null}
-        {task.sessionId ? (
+        {task.sessionId && task.sessionAvailable === true ? (
           <Link to={sessionPath(projectId, task.sessionId)}
             className="inline-flex items-center gap-1 text-xs font-semibold text-brand underline-offset-4 hover:underline">
             Open its session <ArrowUpRight className="size-3.5" />

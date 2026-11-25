@@ -400,6 +400,13 @@ public class ProjectWorkFeature {
         return work.recovery(taskId, attempt);
     }
 
+    @PostMapping("/internal/work/tasks/{taskId}/recovery/invalidate")
+    @Auth.ServiceOnly
+    public TaskRecoveryPayload invalidateRecovery(@PathVariable UUID taskId,
+                                                   @Valid @RequestBody RecoveryInvalidation invalidation) {
+        return work.invalidateRecovery(taskId, invalidation);
+    }
+
     /** A failed QA run: the defect it found becomes a fix task, and the QA waits for it to run again. */
     @PostMapping("/internal/work/tasks/{taskId}/fix")
     @Auth.ServiceOnly
@@ -925,6 +932,17 @@ public class ProjectWorkFeature {
             if (task.getStatus() != TaskStatus.attention || task.getSessionId() != null) {
                 throw conflict("Clean restart requires a task in attention without a session");
             }
+            String disposition = task.getRecoveryDisposition();
+            if ("clean_restart".equals(disposition)) {
+                throw conflict("Clean restart has already been accepted");
+            }
+            boolean classified = disposition != null
+                    && Set.of("missing", "invalid", "incomplete", "unrestorable").contains(disposition);
+            boolean recoveryUsable = recoveries.findByTaskIdAndAttempt(taskId, task.getAttempts())
+                    .map(TaskRecovery::isSnapshotValid).orElse(false);
+            if (!classified || recoveryUsable) {
+                throw conflict("Clean restart is available only after recovery is classified as unusable");
+            }
             // Persist invalidation in this transaction. Bundle cleanup belongs to the runner,
             // after this commit; historical metadata is retained for audit.
             task.setRecoveryDisposition("clean_restart");
@@ -1117,6 +1135,11 @@ public class ProjectWorkFeature {
                     && progress.status() == TaskStatus.running && progress.sessionId() != null) {
                 task.setRecoveryDisposition(null);
             }
+            if (progress.status() == TaskStatus.running && progress.sessionId() != null
+                    && task.getRecoveryDisposition() != null
+                    && Set.of("missing", "invalid", "incomplete", "unrestorable").contains(task.getRecoveryDisposition())) {
+                task.setRecoveryDisposition(null);
+            }
             if (progress.segments() != null) {
                 if (progress.segments() < task.getSegments()) {
                     throw conflict("A stale segment cannot update task progress");
@@ -1127,6 +1150,9 @@ public class ProjectWorkFeature {
                 task.setContextHandoff(progress.contextHandoff());
             }
             task.setReport(progress.report());
+            if (progress.recoveryState() != null) {
+                task.setRecoveryDisposition(progress.recoveryState());
+            }
             if (progress.status() == TaskStatus.running && task.getQaOfId() != null
                     && !java.util.Objects.equals(previousSessionId, progress.sessionId())) {
                 task.setQaReport(null);
@@ -1255,6 +1281,22 @@ public class ProjectWorkFeature {
             }
             return recoveries.findByTaskIdAndAttempt(taskId, attempt).map(WorkService::toRecoveryPayload)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Recovery evidence not found"));
+        }
+
+        @Transactional
+        public TaskRecoveryPayload invalidateRecovery(UUID taskId, RecoveryInvalidation invalidation) {
+            WorkTask task = tasks.findLockedById(taskId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            if (task.getAttempts() != invalidation.attempt() || task.getStatus() == TaskStatus.done
+                    || task.getStatus() == TaskStatus.cancelled) {
+                throw conflict("Recovery invalidation does not match an active task attempt");
+            }
+            TaskRecovery row = recoveries.findLockedByTaskIdAndAttempt(taskId, invalidation.attempt())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Recovery evidence not found"));
+            row.setSnapshotValid(false);
+            row.setValidityReason(invalidation.reason());
+            row.setUpdatedAt(OffsetDateTime.now(clock));
+            return toRecoveryPayload(recoveries.save(row));
         }
 
         private static boolean sameRecovery(TaskRecoveryPayload existing, TaskRecoveryUpdate update) {
@@ -1779,7 +1821,10 @@ public class ProjectWorkFeature {
         private RecoveryDisposition recoveryDisposition(WorkTask task, Map<UUID, TaskRecovery> currentRecovery) {
             boolean pending = "clean_restart".equals(task.getRecoveryDisposition());
             String state;
-            if (task.getDiscardedAttempt() != null && task.getAttempts() <= task.getDiscardedAttempt()) {
+            if (task.getRecoveryDisposition() != null
+                    && Set.of("missing", "invalid", "incomplete", "unrestorable").contains(task.getRecoveryDisposition())) {
+                state = task.getRecoveryDisposition();
+            } else if (task.getDiscardedAttempt() != null && task.getAttempts() <= task.getDiscardedAttempt()) {
                 state = "discarded";
             } else if (task.getAttempts() == 0) {
                 state = "normal";
@@ -3338,7 +3383,8 @@ public class ProjectWorkFeature {
                                @Size(max = 50_000) String report, Map<String, Object> qaReport,
                                @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha,
-                               Map<String, Object> qaHandoff) {
+                               Map<String, Object> qaHandoff,
+                               @Pattern(regexp = "missing|invalid|incomplete|unrestorable") String recoveryState) {
     }
 
     /**
@@ -3373,6 +3419,8 @@ public class ProjectWorkFeature {
                                        String validityReason,
                                        OffsetDateTime updatedAt) {
     }
+
+    public record RecoveryInvalidation(@Min(0) int attempt, @NotBlank @Size(max = 2_000) String reason) { }
 
     public enum QaOutcome { passed, defect, blocked }
 

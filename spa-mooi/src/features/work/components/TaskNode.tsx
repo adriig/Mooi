@@ -65,7 +65,7 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
           <span className={cn('ml-auto inline-flex items-center gap-1 text-[10.5px] font-semibold',
             { neutral: 'text-ink-subtle', info: 'text-info', success: 'text-success', warning: 'text-warning', danger: 'text-danger', accent: 'text-accent', brand: 'text-brand' }[status.tone])}>
             <StateIcon className={cn('size-3.5', state === 'running' && 'animate-spin')} />
-            {status.label}
+            {task.status === 'queued' && task.contextHandoff === 'resume' ? 'Queued for recovery' : status.label}
           </span>
         </span>
         <span className={cn('line-clamp-2 text-[13px] leading-snug font-semibold text-ink', done && 'text-ink-muted line-through decoration-ink-subtle')}>

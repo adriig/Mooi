@@ -55,6 +55,7 @@ class WorkCleanRestartTest {
 
     @Test
     void persistsDiscardAndClearsOnlyTransientState() {
+        task.setRecoveryDisposition("missing");
         task.setQaReport("{\"outcome\":\"defect\"}");
         task.setQaRounds(2);
         var payload = work.restartCleanTask(owner, project, itemId, task.getId()).tasks().getFirst();
@@ -79,6 +80,21 @@ class WorkCleanRestartTest {
     }
 
     @Test
+    void refusesCleanRestartWhileCurrentSnapshotIsStillValid() {
+        task.setRecoveryDisposition("unrestorable");
+        var snapshot = mock(TaskRecovery.class);
+        when(snapshot.isSnapshotValid()).thenReturn(true);
+        when(recoveries.findByTaskIdAndAttempt(task.getId(), task.getAttempts())).thenReturn(Optional.of(snapshot));
+
+        var failure = assertThrows(ResponseStatusException.class,
+                () -> work.restartCleanTask(owner, project, itemId, task.getId()));
+
+        assertEquals(409, failure.getStatusCode().value());
+        assertEquals(TaskStatus.attention, task.getStatus());
+        verify(tasks, never()).save(task);
+    }
+
+    @Test
     void reconcilesDoneItemsByCancellingUnfinishedTasksAndReturningTheirSessionsForClosure() {
         UUID liveSession = UUID.randomUUID();
         item.setStatus(ItemStatus.done);
@@ -98,6 +114,7 @@ class WorkCleanRestartTest {
 
     @Test
     void repeatedDecisionIsAStableConflictAndCannotReenableEvidence() {
+        task.setRecoveryDisposition("missing");
         work.restartCleanTask(owner, project, itemId, task.getId());
         var first = assertThrows(ResponseStatusException.class,
                 () -> work.restartCleanTask(owner, project, itemId, task.getId()));
@@ -110,11 +127,12 @@ class WorkCleanRestartTest {
         when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
         assertEquals(409, assertThrows(ResponseStatusException.class,
                 () -> work.recovery(task.getId(), 4)).getStatusCode().value());
-        verify(recoveries, never()).findByTaskIdAndAttempt(any(), anyInt());
+        verify(recoveries).findByTaskIdAndAttempt(task.getId(), 4);
     }
 
     @Test
     void discardedAttemptRejectsDelayedRecoveryWritesAndProgress() {
+        task.setRecoveryDisposition("missing");
         work.restartCleanTask(owner, project, itemId, task.getId());
         when(tasks.findLockedById(task.getId())).thenReturn(Optional.of(task));
         when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
@@ -125,7 +143,7 @@ class WorkCleanRestartTest {
         assertEquals(409, assertThrows(ResponseStatusException.class,
                 () -> work.saveRecovery(task.getId(), update)).getStatusCode().value());
         var progress = new TaskProgress(TaskStatus.attention, null, 4, 0, 0,
-                null, null, "late report", null, null, null, null);
+                null, null, "late report", null, null, null, null, null);
         assertEquals(409, assertThrows(ResponseStatusException.class,
                 () -> work.progress(task.getId(), progress)).getStatusCode().value());
         assertEquals(TaskStatus.planned, task.getStatus());
@@ -134,6 +152,7 @@ class WorkCleanRestartTest {
 
     @Test
     void cleanDispositionSurvivesWaitingAndIsConsumedOnlyWithAcceptedRunningSession() {
+        task.setRecoveryDisposition("missing");
         work.restartCleanTask(owner, project, itemId, task.getId());
         when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
         when(tasks.findLockedById(task.getId())).thenReturn(Optional.of(task));
@@ -161,11 +180,11 @@ class WorkCleanRestartTest {
         assertNull(task.getRecoveryDisposition());
         assertEquals(409, assertThrows(ResponseStatusException.class,
                 () -> work.recovery(task.getId(), 4)).getStatusCode().value());
-        verify(recoveries, never()).findByTaskIdAndAttempt(any(), anyInt());
+        verify(recoveries).findByTaskIdAndAttempt(task.getId(), 4);
     }
 
     private TaskProgress launchProgress(TaskStatus status, UUID session) {
-        return new TaskProgress(status, session, 5, 0, 0, null, null, null, null, null, null, null);
+        return new TaskProgress(status, session, 5, 0, 0, null, null, null, null, null, null, null, null);
     }
 
     @Test

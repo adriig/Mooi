@@ -453,6 +453,12 @@ async def fetch_task_recovery(task_id: UUID, attempt: int) -> dict:
                        params={"attempt": attempt}) or {}
 
 
+async def invalidate_task_recovery(task_id: UUID, attempt: int, reason: str) -> dict:
+    """Durably reject a snapshot whose physical bundle failed validation during restore."""
+    return await _send("POST", f"/internal/work/tasks/{task_id}/recovery/invalidate", None,
+                       "Task not found", {"attempt": attempt, "reason": reason}) or {}
+
+
 async def report_defect(qa_task_id: UUID, report: dict) -> dict:
     return await _send("POST", f"/internal/work/tasks/{qa_task_id}/fix", None, "Task not found",
                        report) or {}

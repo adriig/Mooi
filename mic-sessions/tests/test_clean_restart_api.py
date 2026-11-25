@@ -26,20 +26,23 @@ class CleanRestartApiTest(unittest.IsolatedAsyncioTestCase):
             return self.item
 
         with patch.object(factory.mooi, "send_work", side_effect=save) as send, \
+                patch.object(factory.mooi, "fetch_work", new=AsyncMock(return_value={"items": [self.item]})), \
                 patch.object(factory.sessions._channels, "publish", side_effect=lambda *a: calls.append("event")) as event, \
                 patch.object(factory, "wake", side_effect=lambda: calls.append("wake")):
             result = await factory.restart_clean_task(self.project, self.item_id, self.task_id, self.caller)
         send.assert_awaited_once_with(self.caller, "POST", self.project,
                                      f"/items/{self.item_id}/tasks/{self.task_id}/restart-clean")
+        published = {**self.item, "tasks": [{**self.item["tasks"][0], "sessionAvailable": False}]}
         event.assert_called_once_with(self.caller.player_id, "work.item",
-                                      {"projectId": str(self.project), "item": self.item})
-        self.assertEqual(result, self.item)
+                                      {"projectId": str(self.project), "item": published})
+        self.assertEqual(result, published)
         self.assertEqual(calls, ["committed", "event", "wake"])
 
     async def test_planned_and_paused_items_are_not_started(self):
         for status in ("planned", "paused"):
             self.item["status"] = status
             with patch.object(factory.mooi, "send_work", new=AsyncMock(return_value=self.item)), \
+                    patch.object(factory.mooi, "fetch_work", new=AsyncMock(return_value={"items": [self.item]})), \
                     patch.object(factory.sessions._channels, "publish"), patch.object(factory, "wake") as wake:
                 await factory._restart_clean_task(self.caller, self.project, self.item_id, self.task_id)
             wake.assert_not_called()
@@ -48,6 +51,7 @@ class CleanRestartApiTest(unittest.IsolatedAsyncioTestCase):
         for error in (ApiException.conflict("Clean restart requires a task in attention without a session"),
                       ApiException.not_found("Project not found")):
             with patch.object(factory.mooi, "send_work", new=AsyncMock(side_effect=error)), \
+                    patch.object(factory.mooi, "fetch_work", new=AsyncMock(return_value={"items": [self.item]})), \
                     patch.object(factory.sessions._channels, "publish") as event, \
                     patch.object(factory, "wake") as wake:
                 with self.assertRaises(ApiException):
