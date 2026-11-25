@@ -24,7 +24,7 @@ const FeatureTaskNode = ({ data }: { data: { task: WorkTask } }) => {
 
 const NODE_TYPES = { featureTask: FeatureTaskNode };
 
-/** A feature's task map opened directly from To-dos, in the same expandable dialog used by Board. */
+/** A feature's task map opened directly from Work, in the same expandable dialog used by Board. */
 export const WorkFeatureGraphDialog = ({ item, onClose }: { item: WorkItem; onClose: () => void }) => {
   const theme = useThemeStore((state) => state.theme);
   const { nodes, edges } = useMemo(() => {

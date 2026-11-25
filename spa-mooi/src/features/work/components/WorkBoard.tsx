@@ -69,7 +69,7 @@ const TaskGraph = ({ nodes, edges, theme, className, centerOnOpen = false }: Tas
 /**
  * The Board: one feature's whole map, its tasks as a left-to-right dependency graph coloured by
  * category. Nodes change auto-merge, tests and who runs them in place; a click opens the task. The
- * chosen feature lives in `?feature=`, so links from To-dos land on it.
+ * chosen feature lives in `?feature=`, so links from Work land on it.
  */
 export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
   const work = useProjectWork(projectId);

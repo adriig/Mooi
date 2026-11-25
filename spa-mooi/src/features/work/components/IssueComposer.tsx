@@ -17,7 +17,7 @@ interface IssueComposerProps {
 }
 
 /**
- * Opens a defect or debt issue on GitHub straight from To-dos. Features are not created here: they
+ * Opens a defect or debt issue on GitHub straight from Work. Features are not created here: they
  * are designed by a session agent, which breaks them into tasks.
  */
 export const IssueComposer = ({ disabled, projectId, projects, onProjectChange, onCreate }: IssueComposerProps) => {

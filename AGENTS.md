@@ -61,7 +61,7 @@ from it. Where they differ, this context wins over the current implementation (s
 - **Work planning is decided in the session**: creating a session never plans work. Whatever the user asks
   in a plain session, its agent decides whether it is a single task (done right there), a feature, a defect
   or debt, and records the last three on the project's software factory (see *Software factory*) through
-  the same platform API as the To-dos and Board views.
+  the same platform API as the Planification and Board views.
 - Provider integration through **adapters** behind one provider-agnostic API: a provider may offer
   several (Claude: **Claude SDK**, the default, and **Claude CLI**, which drives the Claude Code CLI
   natively; Codex: its SDK; Antigravity, which ships no agent SDK: one adapter, **Antigravity CLI**, which
@@ -108,11 +108,11 @@ from it. Where they differ, this context wins over the current implementation (s
 - **Agentic merge**: merging an outdated branch with conflicts makes the agent resolve them, preserving
   both sides' features.
 
-## Software factory: To-dos and Board
+## Software factory: Planification and Board
 
 Each project plans and builds its work as a software factory: agents design it, the platform runs it.
 
-- **Work items** are of three kinds, and nothing else reaches To-dos:
+- **Work items** are of three kinds, and nothing else reaches Planification:
   - **Feature**: work worth several tasks, designed by a session agent acting as orchestrator. It holds a
     spec and its tasks; it lives in the platform. Features are independent of each other: at most a whole
     feature depends on another whole feature, never a task on a task of another feature.
@@ -136,7 +136,7 @@ Each project plans and builds its work as a software factory: agents design it, 
 - **Model assignment**: an assignment expert picks each task's provider, model and effort from the user's
   linked accounts and their remaining quota, with ordered fallbacks, so no account runs out of credits. The
   platform checks quota again when a task launches and falls back to the next alternative when needed.
-- **To-dos** entry in the main menu is one Kanban board of the features, defects and debt of every project
+- **Planification** entry in the main menu is one Kanban board of the features, defects and debt of every project
   selected in a dropdown with checkboxes, remembered per user on the current device; the board loads the
   selected projects and each card shows its project. Columns are derived from state, never dragged:
   **NEW** (open defects and improvements/debt whose validity, scope or acceptance criteria are not
@@ -155,7 +155,7 @@ Each project plans and builds its work as a software factory: agents design it, 
   Items with existing complete execution criteria remain defined; features never enter NEW. Headers
   show counts in compact pills (`1.2K`). Cards offer Start, Pause or Resume (Start only on DEFINED)
   and show merge commits and, when deployed, the version. A kind filter (All, Features, Defects, Debt) and
-  creating defects and debt stay; status filters and factory settings are not on To-dos. Phones show one
+  creating defects and debt stay; status filters and factory settings are not on Planification. Phones show one
   column at a time, chosen with one tab per column. Opening an item shows its task breakdown, every task's
   settings, merge commit and deployed version.
 - **Merge commit and deployed version**: a development or fix task records its merge commit; a task and
@@ -204,7 +204,7 @@ Each project plans and builds its work as a software factory: agents design it, 
 
 All of this is deterministic runner code, never a supervisor LLM (only the change analyst is a one-off agent
 session). State is durable in the platform, never only in runner memory, and new states and reasons show live
-in To-dos, the Board and the task editor.
+in Planification, the Board and the task editor.
 
 - **Context handoff**: when a task's session passes `contextHandoffPercent`, the runner asks the agent for a
   checkpoint (state, next step, files), saves the recovery snapshot and continues the task in a new session

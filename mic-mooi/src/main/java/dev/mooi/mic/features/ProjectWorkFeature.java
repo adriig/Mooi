@@ -70,7 +70,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Feature: a project's software factory, the work behind its To-dos and Board views.
+ * Feature: a project's software factory, the work behind its Planification and Board views.
  *
  * <p>Three kinds of work item reach those views. A <b>feature</b> lives here only: a spec and the
  * tasks a session agent (the orchestrator) broke it into, with blocking dependencies that never leave
@@ -1655,7 +1655,7 @@ public class ProjectWorkFeature {
         @Column(name = "report", columnDefinition = "text")
         private String report;
 
-        /** Latest structured QA delivery, retained for the Board, To-dos and chat API. */
+        /** Latest structured QA delivery, retained for the Board, Planification and chat API. */
         @Column(name = "qa_report", columnDefinition = "text")
         private String qaReport;
 

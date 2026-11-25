@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { TODO_PROJECT_SELECTION_STORAGE_KEY, useTodoProjectSelectionStore } from '@/stores/todoProjectSelectionStore';
 
-/** Rehydrates the To-dos project filter after another window changes it or this window resumes. */
+/** Rehydrates the Work project filter after another window changes it or this window resumes. */
 export const useTodoProjectSelectionStorageSync = (): void => {
   useEffect(() => {
     const refresh = () => {

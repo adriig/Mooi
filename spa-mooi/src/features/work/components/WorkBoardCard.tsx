@@ -46,7 +46,7 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
         initialMessage: `Define issue #${entry.issue.number} (${entry.kind}): ${entry.title}\n\nIssue: ${entry.issue.htmlUrl ?? ''}\n${entry.issue.body}\n\nRead the repository without changing any files. Determine whether this report is valid, clarify scope and verifiable acceptance criteria, decide whether it is a defect or improvement, and recommend whether it should be split into issues or raised to a feature. Do not edit GitHub issues or create work items, tasks, or features. Present a reviewable proposal; persist changes only after the user accepts through the software factory API.`,
       });
       useSessionsStore.getState().upsertSession(session);
-      navigate(sessionPath(session.projectId, session.id), { state: backLinkState({ to: '/todos', label: 'To-dos' }) });
+      navigate(sessionPath(session.projectId, session.id), { state: backLinkState({ to: '/todos', label: 'Planification' }) });
     } catch (error) {
       setDefineError((error as Error).message || 'Could not create the definition session.');
     } finally {

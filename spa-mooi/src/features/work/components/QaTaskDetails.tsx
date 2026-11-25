@@ -13,7 +13,7 @@ interface QaTaskDetailsProps {
 const priorityTone = (priority: string): 'danger' | 'warning' | 'neutral' =>
   priority === 'critical' || priority === 'high' ? 'danger' : priority === 'medium' ? 'warning' : 'neutral';
 
-/** The structured QA delivery and its generated fix links, shared by To-dos and Board. */
+/** The structured QA delivery and its generated fix links, shared by Work and Board. */
 export const QaTaskDetails = ({ task, tasks, onOpenTask }: QaTaskDetailsProps) => {
   const findings = qaFindings(task);
   const blocker = qaBlocker(task);

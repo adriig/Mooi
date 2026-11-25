@@ -26,7 +26,7 @@ const itemColumn = (item: WorkItem): WorkColumn => {
 export const entryDeployment = (entry: WorkEntry): WorkItemDeployment | null =>
   entry.item ? entry.item.deployment ?? null : entry.issue?.state === 'closed' ? UNKNOWN : null;
 
-/** The To-dos cards: every feature, and every defect and debt issue joined with the item that runs it. */
+/** Work cards: every feature, and every defect and debt issue joined with the item that runs it. */
 export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[] => {
   const byIssue = new Map(items.filter((item) => item.issueNumber !== null).map((item) => [item.issueNumber, item]));
   const features: WorkEntry[] = items.filter((item) => item.kind === 'feature').map((item) => ({

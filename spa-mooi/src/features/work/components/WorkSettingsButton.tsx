@@ -20,7 +20,7 @@ const FIELDS: { key: keyof WorkSettings; label: string; hint: string; min: numbe
     hint: 'Agentic merge attempts when a task conflicts with the default branch. 0 leaves conflicts to you.' },
 ];
 
-/** The project's factory limits, from To-dos and the Board alike; agents change the same settings. */
+/** The project's factory limits, from Work and the Board alike; agents change the same settings. */
 export const WorkSettingsButton = ({ projectId }: WorkSettingsButtonProps) => {
   const [open, setOpen] = useState(false);
   const { settings, error, saving, save } = useWorkSettings(projectId, open);

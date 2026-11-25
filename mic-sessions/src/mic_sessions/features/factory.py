@@ -1,7 +1,7 @@
 """Feature: the software factory — a project's features, defects and debt, and the runner that builds them.
 
 Work items live in `mic-mooi` (features) and on GitHub (defects and debt, as labelled issues); this
-feature is the one path to them, from the To-dos and Board views and from session agents alike, and
+feature is the one path to them, from the Planification and Board views and from session agents alike, and
 announces every change on the player's live channel:
 
 - `work.item` `{projectId, item}`: an item was created or changed (its tasks travel with it);
@@ -208,7 +208,7 @@ async def _save_settings(caller: Caller, project_id: UUID, settings: Json) -> Js
     return saved
 
 
-# --- the player's views (To-dos and Board) ------------------------------------------------------
+# --- the player's views (Planification and Board) -----------------------------------------------
 
 
 @router.get("/projects/{project_id}/work/settings")
@@ -573,7 +573,7 @@ def _work_section(session: Session, root: str) -> str:
     return f"""## Project work: features, defects and debt (the software factory)
 Mooi runs this project as a software factory. Whenever the user asks for work, first decide what it is, and say which one you chose:
 - **A single task** (one focused change): do it right here in this session. Never record it.
-- **A feature** (work worth several tasks): do not implement it here. Design it as the factory's orchestrator and record it; the user reviews it in the To-dos and Board tabs and presses Start, and the platform then runs every task in its own session.
+- **A feature** (work worth several tasks): do not implement it here. Design it as the factory's orchestrator and record it; the user reviews it in the Planification and Board tabs and presses Start, and the platform then runs every task in its own session.
 - **A defect** (something that does not work as it should) or **debt** (technical debt to pay back): record it as a GitHub issue through the platform API, never with your own tools. Fix it here only if the user asks you to.
 Never start work items yourself: Start belongs to the user.
 

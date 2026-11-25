@@ -56,7 +56,7 @@ export const TodosPage = () => {
     <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-5 pt-7 pb-[calc(1.75rem+var(--safe-bottom))] sm:px-8 lg:px-10 lg:pt-10 lg:pb-10">
       <header>
         <p className="mb-2 font-mono text-[10.5px] font-medium tracking-[0.12em] text-ink-subtle uppercase">Workspace</p>
-        <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">To-dos</h1>
+        <h1 className="text-[30px] leading-[1.1] font-semibold tracking-[-0.04em] text-ink sm:text-[34px]">Planification</h1>
         <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-muted">
           {projectId ? 'Features, defects and improvements of this project, from defined to deployed in production.' : 'Features, defects and improvements of every project, from defined to deployed in production.'}
         </p>
@@ -83,7 +83,7 @@ export const TodosPage = () => {
       ) : projects.length === 0 ? (
         !error && <EmptyState icon={FolderGit2} title="No projects yet" description="Add a project to your workspace to plan its work here." />
       ) : visibleProjects.length === 0 || !composerId ? (
-        <EmptyState icon={FolderGit2} title="No projects selected" description="Choose projects from the Projects dropdown to see their to-dos." />
+        <EmptyState icon={FolderGit2} title="No projects selected" description="Choose projects from the Projects dropdown to see their work." />
       ) : (
         <>
           <ProjectIssueComposer projects={visibleProjects} projectId={composerId} onProjectChange={setComposerProject} />

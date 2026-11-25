@@ -41,7 +41,7 @@ interface WorkItemDialogProps {
 }
 
 /**
- * A feature, defect or debt item opened from To-dos: what it is about, its task breakdown with every
+ * A feature, defect or debt item opened from Work: what it is about, its task breakdown with every
  * task's settings, and the control that starts it. Defects and debt show their GitHub issue; the
  * item that runs one is created the first time its settings are opened.
  */
