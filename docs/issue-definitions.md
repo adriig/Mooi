@@ -35,6 +35,12 @@ aceptación de propuestas ni operaciones de GitHub Issues. Las herramientas de e
 se rechazan por separado. Un rechazo identifica los comandos permitidos para que el agente pueda
 corregir la operación; no se solicita elevación de privilegios.
 
+Los cinco adaptadores reenvían el checkout de su sesión al evaluar comandos; los dos adaptadores
+Claude también inicializan el prefijo API desde las instrucciones de Define. Si falta el checkout,
+las lecturas se rechazan sin recurrir al directorio del servicio; si falta el prefijo, las peticiones
+API se rechazan. El mensaje común enumera los comandos y operaciones permitidos e indica reabrir
+Define cuando falta ese contexto.
+
 Ejemplo de propuesta para un issue individual:
 
 ```json

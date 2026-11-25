@@ -7,6 +7,23 @@ from pathlib import Path
 from typing import Any
 
 
+def definition_command_denial(api_prefix: str | None, workspace: Path | None) -> str:
+    """Explain the same execution boundary for every adapter, including missing session context."""
+    message = (
+        "Define command denied. Use one read-only command with checkout-relative paths and no '..': "
+        "rg, sed -n '1,20p', ls, cat, head, tail, pwd or file. "
+        "Use python -c with urllib only for GET definition, PUT definition/proposal "
+        "or PATCH an existing task of this issue through this session's scoped API. "
+        "File writes, shell composition, paths outside the checkout, other HTTP destinations, deployments, "
+        "proposal acceptance and GitHub Issues operations are not allowed."
+    )
+    if workspace is None:
+        message += " The checkout path is unavailable; reopen Define before reading repository files."
+    if not api_prefix:
+        message += " The definition API scope is unavailable; reopen Define before calling the API."
+    return message
+
+
 def definition_api_command(command: Any, api_prefix: str | None, workspace: Path | None = None) -> bool:
     """Allow bounded repository reads and one-line Python calls to scoped definition API routes.
 
@@ -60,9 +77,7 @@ def definition_api_command(command: Any, api_prefix: str | None, workspace: Path
         if workspace is None:
             return False
         root = workspace.resolve()
-        if any(item != "-" and not (root / item).resolve().is_relative_to(root) for item in args):
-            return False
-        return True
+        return not any(item != "-" and not (root / item).resolve().is_relative_to(root) for item in args)
     if executable not in ("python", "python3") or not api_prefix:
         return False
     if len(tokens) != 3 or tokens[1] != "-c":
@@ -111,9 +126,11 @@ def definition_api_command(command: Any, api_prefix: str | None, workspace: Path
         if function in ("urllib.request.Request", "Request"):
             url = literal(node.args[0]) if node.args else None
             method = next((literal(item.value) for item in node.keywords if item.arg == "method"), "GET")
+            if not isinstance(url, str) or not isinstance(method, str):
+                return False
             issue_prefix = api_prefix.removesuffix("/definition")
             task_route = (re.fullmatch(re.escape(f"{issue_prefix}/tasks/") + r"[0-9a-fA-F-]{36}", url)
-                          if "/issues/" in api_prefix and isinstance(url, str) else None)
+                          if "/issues/" in api_prefix else None)
             allowed = ((url == api_prefix and method == "GET")
                        or (url == f"{api_prefix}/proposal" and method == "PUT")
                        or (task_route is not None and method == "PATCH"))

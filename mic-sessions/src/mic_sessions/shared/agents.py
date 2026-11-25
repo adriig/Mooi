@@ -68,8 +68,8 @@ from claude_agent_sdk import (
     PermissionResultAllow,
     PermissionResultDeny,
     ProcessError,
-    ResultMessage,
     RateLimitEvent,
+    ResultMessage,
     ServerToolResultBlock,
     ServerToolUseBlock,
     StreamEvent,
@@ -83,14 +83,19 @@ from claude_agent_sdk import (
 )
 
 from mic_sessions.shared import antigravity, claude_cli, opencode
+from mic_sessions.shared import images as session_images
 from mic_sessions.shared.agent_conduct import conduct_instructions
+from mic_sessions.shared.browser import playwright_server
 from mic_sessions.shared.definition_execution import (
     definition_api_command as _definition_api_command_impl,
+)
+from mic_sessions.shared.definition_execution import (
     definition_api_prefix as _definition_api_prefix_impl,
 )
-from mic_sessions.shared.browser import playwright_server
+from mic_sessions.shared.definition_execution import (
+    definition_command_denial as _definition_command_denial,
+)
 from mic_sessions.shared.env import get_settings
-from mic_sessions.shared import images as session_images
 from mic_sessions.shared.images import Image
 from mic_sessions.shared.mooi import Credential
 from mic_sessions.shared.traces import TraceSource, codex_rollout
@@ -114,8 +119,8 @@ _QUESTION_TOOL = "AskUserQuestion"
 _READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch", "WebFetch", "Bash"}
 
 
-def _definition_api_command(command: Any, api_prefix: str | None) -> bool:
-    return _definition_api_command_impl(command, api_prefix)
+def _definition_api_command(command: Any, api_prefix: str | None, workspace: Path | None) -> bool:
+    return _definition_api_command_impl(command, api_prefix, workspace)
 
 
 def _definition_api_prefix(instructions: str) -> str | None:
@@ -755,6 +760,7 @@ class ClaudeAgentRuntime:
         self._instructions = instructions
         self._environment = dict(environment or {})
         self._read_only = read_only
+        self._definition_api_prefix = _definition_api_prefix(instructions) if read_only else None
         self._credential = credential
         self._workspace = workspace
         self._branch = branch
@@ -1223,12 +1229,13 @@ class ClaudeAgentRuntime:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
-                return PermissionResultDeny(message="Definition sessions allow only read tools and scoped API writes")
+                return PermissionResultDeny(message=_definition_command_denial(
+                    self._definition_api_prefix, self._workspace))
             if self._read_only and tool_name == "Bash" and not _definition_api_command(
                 input_data.get("command"), self._definition_api_prefix, self._workspace
             ):
-                return PermissionResultDeny(message=("Define command denied. Use read-only commands (rg, sed, ls) "
-                                                    "or Python urllib only for this session's definition API."))
+                return PermissionResultDeny(message=_definition_command_denial(
+                    self._definition_api_prefix, self._workspace))
             return PermissionResultAllow(updated_input=input_data)
 
         request_id = uuid4().hex
@@ -1630,6 +1637,7 @@ class ClaudeCliAgentRuntime:
         self._instructions = instructions
         self._environment = dict(environment or {})
         self._read_only = read_only
+        self._definition_api_prefix = _definition_api_prefix(instructions) if read_only else None
         self._credential = credential
         self._workspace = workspace
         self._branch = branch
@@ -2003,13 +2011,13 @@ class ClaudeCliAgentRuntime:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
-                return {"behavior": "deny", "message": "Definition sessions allow only read tools and scoped API writes"}
+                return {"behavior": "deny", "message": _definition_command_denial(
+                    self._definition_api_prefix, self._workspace)}
             if self._read_only and tool_name == "Bash" and not _definition_api_command(
                 input_data.get("command"), self._definition_api_prefix, self._workspace
             ):
-                return {"behavior": "deny", "message": (
-                    "Define command denied. Use read-only commands (rg, sed, ls) or Python urllib only for "
-                    "this session's definition API.")}
+                return {"behavior": "deny", "message": _definition_command_denial(
+                    self._definition_api_prefix, self._workspace)}
             return {"behavior": "allow", "updatedInput": input_data}
         request_id = uuid4().hex
         questions = list(input_data.get("questions") or [])
@@ -2535,10 +2543,8 @@ class CodexAgentRuntime:
                 params.get("command"), self._definition_api_prefix, self._workspace
             ):
                 return {"decision": "accept"}
-            if method == "item/commandExecution/requestApproval":
-                await self._publish(agent_error(
-                    "Define command denied. Use read-only repository commands or Python urllib only for this "
-                    "session's definition API."))
+            await self._publish(agent_error(_definition_command_denial(
+                self._definition_api_prefix, self._workspace)))
             return decline(method)
         self._pending[request_id] = (future, is_question)
         try:
@@ -3602,12 +3608,10 @@ class AntigravityCliAgentRuntime:
             _antigravity_value(args, "CommandLine", "Command", "command"), self._definition_api_prefix,
             self._workspace,
         ):
-            return antigravity.deny(
-                "Define command denied. Use read-only repository commands or Python urllib only for this session's "
-                "definition API.")
+            return antigravity.deny(_definition_command_denial(self._definition_api_prefix, self._workspace))
         if self._read_only and name in {"write_file", "write_to_file", "edit_file", "replace_file_content",
                                         "multi_replace_file_content", "sed_file", "notebook_edit"}:
-            return antigravity.deny("Definition sessions cannot modify repository files")
+            return antigravity.deny(_definition_command_denial(self._definition_api_prefix, self._workspace))
         asked = antigravity.questions(payload)
         if asked is None:
             return antigravity.allow()
@@ -4297,9 +4301,8 @@ class OpenCodeAcpAgentRuntime:
             tool_call = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
             raw_input = tool_call.get("rawInput") if isinstance(tool_call.get("rawInput"), dict) else {}
             if not _definition_api_command(raw_input.get("command"), self._definition_api_prefix, self._workspace):
-                await self._publish(agent_error(
-                    "Define command denied. Use read-only repository commands or Python urllib only for this "
-                    "session's definition API."))
+                await self._publish(agent_error(_definition_command_denial(
+                    self._definition_api_prefix, self._workspace)))
                 return {"outcome": {"outcome": "cancelled"}}
         selected = next((item for item in options if item.get("kind") == "allow_once"), None) or next(
             (item for item in options if str(item.get("kind", "")).startswith("allow")), None)
