@@ -1,5 +1,6 @@
 import type { Tone } from '@/shared/types/Tone';
 import type { WorkChangeStatus } from '@/features/work/types/WorkChangeRequest';
+import type { WorkItem } from '@/features/work/types/WorkItem';
 import type { WorkItemStatus } from '@/features/work/types/WorkItemStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import type { WorkTaskStatus } from '@/features/work/types/WorkTaskStatus';
@@ -40,3 +41,23 @@ export const taskState = (task: WorkTask, tasks: WorkTask[]): WorkTaskStatus | '
 /** A task's settings may change until its session starts. */
 export const taskEditable = (task: WorkTask): boolean =>
   task.status === 'planned' || task.status === 'queued' || task.status === 'attention';
+
+export type OpenChangeStatus = 'queued' | 'analyzing' | 'awaiting_confirmation';
+export const OPEN_CHANGE_STATUSES: OpenChangeStatus[] = ['queued', 'analyzing', 'awaiting_confirmation'];
+
+/** Change requests still open, by status; applied and rejected ones never keep an item active. */
+export const openChangeCounts = (item: WorkItem | null | undefined): { status: OpenChangeStatus; count: number }[] => {
+  const changes = item?.changeRequests ?? [];
+  return OPEN_CHANGE_STATUSES
+    .map((status) => ({ status, count: changes.filter((change) => change.status === status).length }))
+    .filter((entry) => entry.count > 0);
+};
+
+/** The item's task-execution state: a running item whose tasks are all done only waits on change requests. */
+export const itemStatus = (item: WorkItem): { label: string; tone: Tone } => {
+  const tasksComplete = item.tasks.length > 0 && item.tasks.every((task) => task.status === 'done');
+  if (item.status === 'running' && tasksComplete && openChangeCounts(item).length > 0) {
+    return { label: 'Tasks complete', tone: 'success' };
+  }
+  return ITEM_STATUS[item.status];
+};

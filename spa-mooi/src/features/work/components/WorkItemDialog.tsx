@@ -19,7 +19,8 @@ import { taskStyle } from '@/features/work/lib/taskCategories';
 import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
 import { entryDeployment } from '@/features/work/lib/workEntries';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
-import { ITEM_STATUS, TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
+import { WorkChangeBadges } from '@/features/work/components/WorkChangeBadges';
+import { ITEM_STATUS, TASK_STATUS, itemStatus, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
 import type { WorkItem } from '@/features/work/types/WorkItem';
 import { Badge } from '@/shared/components/Badge';
@@ -60,7 +61,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
   const text = item?.spec || entry.issue?.body || '';
   const tasks = item?.tasks ?? [];
   const done = tasks.filter((task) => task.status === 'done').length;
-  const status = item ? ITEM_STATUS[item.status] : entry.issue?.state === 'closed' ? ITEM_STATUS.done : ITEM_STATUS.planned;
+  const status = item ? itemStatus(item) : entry.issue?.state === 'closed' ? ITEM_STATUS.done : ITEM_STATUS.planned;
   const deployment = entryDeployment(entry);
   const hasReassignableTasks = tasks.some((task) =>
     task.status === 'planned' || task.status === 'queued'
@@ -93,6 +94,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={kind.tone} icon={kind.icon}>{kind.label}</Badge>
           <Badge tone={status.tone}>{status.label}</Badge>
+          <WorkChangeBadges item={item} />
           {item?.status === 'paused' && item.pauseReason ? (
             <span className="inline-flex min-w-0 items-start gap-1 text-xs font-medium text-warning">
               <KeyRound className="mt-px size-3.5 shrink-0" /> <span className="break-words">{item.pauseReason}</span>

@@ -7,6 +7,8 @@ import { entryDeployment } from '@/features/work/lib/workEntries';
 import { mergeCommits } from '@/features/work/lib/mergeCommits';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
+import { WorkChangeBadges } from '@/features/work/components/WorkChangeBadges';
+import { openChangeCounts } from '@/features/work/lib/workStatus';
 import { Badge } from '@/shared/components/Badge';
 import { Initials } from '@/shared/components/Initials';
 import { toneStyles } from '@/shared/styles/toneStyles';
@@ -35,6 +37,7 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
   const done = tasks.filter((task) => task.status === 'done').length;
   const attention = tasks.filter((task) => task.status === 'attention' || task.status === 'review').length;
   const pendingChanges = (entry.item?.changeRequests ?? []).filter((change) => change.status === 'awaiting_confirmation').length;
+  const changes = openChangeCounts(entry.item);
   const running = tasks.filter((task) => task.status === 'running' || task.status === 'merging').length;
   const commits = entry.column === 'pendingDeploy' || entry.column === 'deployed' ? mergeCommits(entry.item) : [];
   const deployment = entry.column === 'deployed' ? entryDeployment(entry) : null;
@@ -78,6 +81,14 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
           </span>
         );
       })}
+
+      {entry.item && entry.item.status === 'running' && tasks.length > 0 && done === tasks.length && changes.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 px-1.5"><Badge tone="success">Tasks complete</Badge><WorkChangeBadges item={entry.item} /></div>
+      ) : null}
+
+      {entry.item && !(entry.item.status === 'running' && tasks.length > 0 && done === tasks.length && changes.length > 0) && changes.some((change) => change.status !== 'awaiting_confirmation') ? (
+        <div className="flex flex-wrap gap-1.5 px-1.5"><WorkChangeBadges item={entry.item} /></div>
+      ) : null}
 
       {entry.item?.status === 'paused' ? (
         <div className="flex flex-col gap-1 px-1.5">

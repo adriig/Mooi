@@ -14,7 +14,8 @@ import { WorkSettingsButton } from '@/features/work/components/WorkSettingsButto
 import { useProjectWork } from '@/features/work/hooks/useProjectWork';
 import { layoutTaskGraph } from '@/features/work/lib/layoutTaskGraph';
 import { DEFECT_TASK_STYLE, TASK_CATEGORIES, taskStyle } from '@/features/work/lib/taskCategories';
-import { ITEM_STATUS } from '@/features/work/lib/workStatus';
+import { WorkChangeBadges } from '@/features/work/components/WorkChangeBadges';
+import { itemStatus } from '@/features/work/lib/workStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import { Badge } from '@/shared/components/Badge';
 import { Button } from '@/shared/components/Button';
@@ -144,7 +145,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
     );
   }
 
-  const status = ITEM_STATUS[feature.status];
+  const status = itemStatus(feature);
   const done = tasks.filter((task) => task.status === 'done').length;
   const hasReassignableTasks = tasks.some((task) =>
     task.status === 'planned' || task.status === 'queued'
@@ -183,6 +184,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
         ) : null}
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={status.tone}>{status.label}</Badge>
+          <WorkChangeBadges item={feature} />
           {feature.status === 'paused' && feature.pauseReason ? (
             <span className="text-xs font-medium text-warning">{feature.pauseReason}</span>
           ) : null}
