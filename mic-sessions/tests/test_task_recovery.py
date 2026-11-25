@@ -3,6 +3,8 @@ import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from mic_sessions.shared.web import ApiException
@@ -108,6 +110,33 @@ class TaskRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((restored / "README.md").exists())
         self.assertEqual(git(restored, "status", "--porcelain", "--untracked-files=all"), "")
         self.assertEqual(recovery_refs(restored), [])
+
+    async def test_new_task_branch_clones_current_integrated_base_without_old_workspace_changes(self):
+        (self.workspace / "unmerged.txt").write_text("previous attempt")
+        await self.capture()
+        (self.origin / "integrated.txt").write_text("new default branch work")
+        git(self.origin, "add", "-A")
+        git(self.origin, "commit", "-q", "-m", "integrated change")
+        integrated = git(self.origin, "rev-parse", "HEAD")
+        real_git = self.workspaces._git
+
+        async def local_clone(*args, **kwargs):
+            if "clone" in args:
+                args = tuple(str(self.origin) if str(arg).startswith("https://github.com/") else arg
+                             for arg in args)
+            return await real_git(*args, **kwargs)
+
+        project = SimpleNamespace(full_name="test/repo", default_branch="main")
+        branch = f"factory/task-{uuid4().hex}"
+        with patch.object(self.workspaces, "_git", side_effect=local_clone):
+            fresh = await self.workspaces.create_workspace(project, uuid4(), branch, "test")
+        self.assertNotEqual(fresh.path, self.workspace)
+        self.assertEqual(fresh.base_commit, integrated)
+        self.assertEqual(git(fresh.path, "rev-parse", "HEAD"), integrated)
+        self.assertEqual(git(fresh.path, "branch", "--show-current"), branch)
+        self.assertTrue((fresh.path / "integrated.txt").exists())
+        self.assertFalse((fresh.path / "unmerged.txt").exists())
+        self.assertTrue((self.workspace / "unmerged.txt").exists())
 
     async def test_local_commits_are_collapsed_into_the_snapshot(self):
         (self.workspace / "app.py").write_text("print('committed')\n")

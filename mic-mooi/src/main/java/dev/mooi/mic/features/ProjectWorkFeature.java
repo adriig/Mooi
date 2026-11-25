@@ -1075,6 +1075,12 @@ public class ProjectWorkFeature {
             task.setSessionId(progress.sessionId());
             // A stale runner snapshot must not rewind the attempt its recovery evidence is keyed by.
             task.setAttempts(Math.max(task.getAttempts(), progress.attempts()));
+            // Consume explicit clean-start intent atomically with launch acceptance. Queues,
+            // provisioning errors and stale/rejected launches must leave it durable for restart.
+            if ("clean_restart".equals(task.getRecoveryDisposition())
+                    && progress.status() == TaskStatus.running && progress.sessionId() != null) {
+                task.setRecoveryDisposition(null);
+            }
             if (progress.segments() != null) {
                 if (progress.segments() < task.getSegments()) {
                     throw conflict("A stale segment cannot update task progress");

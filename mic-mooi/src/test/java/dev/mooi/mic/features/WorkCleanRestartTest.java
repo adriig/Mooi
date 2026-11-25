@@ -115,6 +115,40 @@ class WorkCleanRestartTest {
     }
 
     @Test
+    void cleanDispositionSurvivesWaitingAndIsConsumedOnlyWithAcceptedRunningSession() {
+        work.restartCleanTask(owner, project, itemId, task.getId());
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(tasks.findLockedById(task.getId())).thenReturn(Optional.of(task));
+        work.progress(task.getId(), launchProgress(TaskStatus.queued, null));
+        assertEquals("clean_restart", task.getRecoveryDisposition());
+        assertEquals(5, task.getAttempts());
+        item.setStatus(ItemStatus.paused);
+        UUID session = UUID.randomUUID();
+        work.progress(task.getId(), launchProgress(TaskStatus.running, session));
+        assertNull(task.getSessionId());
+        assertEquals("clean_restart", task.getRecoveryDisposition());
+        item.setStatus(ItemStatus.running);
+        work.progress(task.getId(), launchProgress(TaskStatus.attention, null));
+        assertEquals("clean_restart", task.getRecoveryDisposition());
+        work.progress(task.getId(), launchProgress(TaskStatus.running, null));
+        assertEquals("clean_restart", task.getRecoveryDisposition());
+        work.progress(task.getId(), launchProgress(TaskStatus.running, session));
+        assertEquals(session, task.getSessionId());
+        assertNull(task.getRecoveryDisposition());
+        assertEquals(4, task.getDiscardedAttempt());
+        // Receipt replay is harmless and cannot re-enable old evidence.
+        work.progress(task.getId(), launchProgress(TaskStatus.running, session));
+        assertNull(task.getRecoveryDisposition());
+        assertEquals(409, assertThrows(ResponseStatusException.class,
+                () -> work.recovery(task.getId(), 4)).getStatusCode().value());
+        verify(recoveries, never()).findByTaskIdAndAttempt(any(), anyInt());
+    }
+
+    private TaskProgress launchProgress(TaskStatus status, UUID session) {
+        return new TaskProgress(status, session, 5, 0, 0, null, null, null, null, null, null, null);
+    }
+
+    @Test
     void validatesOwnerProjectItemAndTaskMembership() {
         assertEquals(404, assertThrows(ResponseStatusException.class,
                 () -> work.restartCleanTask(UUID.randomUUID(), project, itemId, task.getId()))

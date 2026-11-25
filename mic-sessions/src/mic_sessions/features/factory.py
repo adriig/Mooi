@@ -1648,6 +1648,10 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
     else:
         task_id, player_hint = UUID(run_or_task["id"]), None
         attempts = run_or_task.get("attempts", 0) if attempts is None else attempts
+        if _clean_restart_pending(run_or_task):
+            # Waiting for capacity must also use a non-discarded attempt. The disposition itself
+            # stays durable until mic-mooi accepts a running session, not merely queued progress.
+            attempts = max(attempts, run_or_task["recoveryDisposition"]["discardedAttempt"] + 1)
     body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
             "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha,
             "qaHandoff": qa_handoff}
@@ -1682,6 +1686,25 @@ async def _task_recovery(task_id: UUID, attempt: int, segment: int | None = None
         return {**recovery, "snapshotValid": False,
                 "validityReason": "Saved recovery metadata does not match this task attempt and segment"}
     return recovery
+
+
+def _clean_restart_pending(task: Json) -> bool:
+    return bool((task.get("recoveryDisposition") or {}).get("restartPending"))
+
+
+async def _cleanup_discarded_recovery(item: Json, task: Json, player_id: UUID) -> None:
+    # The API has already durably invalidated these attempts. Cleanup never changes eligibility
+    # or removes the historical metadata, and is safe to repeat after a process restart.
+    for attempt in range(task["recoveryDisposition"]["discardedAttempt"] + 1):
+        try:
+            deleted = await workspaces.delete_recovery_attempt(
+                player_id, UUID(item["projectId"]), UUID(item["id"]), UUID(task["id"]), attempt)
+            if not deleted:
+                LOG.warning("Task %s discarded recovery cleanup deferred for attempt %s; evidence remains ineligible",
+                            task["id"], attempt)
+        except Exception:
+            LOG.warning("Task %s discarded recovery cleanup failed for attempt %s; evidence remains ineligible",
+                        task["id"], attempt, exc_info=True)
 
 
 async def _retire_task_recovery(owner_id: UUID, project_id: UUID, item_id: UUID, task_id: UUID,
@@ -1834,6 +1857,8 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     # A missing session is resumable only from a validated durable snapshot. Never turn a lost
     # workspace into a clean launch: the user gets an explicit attention state instead.
     for task in tasks:
+        if _clean_restart_pending(task):
+            continue
         session_id = task.get("sessionId")
         if task["status"] not in ("running", "merging", "review", "attention") or not session_id:
             continue
@@ -2029,18 +2054,36 @@ async def _wait(task: Json, reason: str) -> None:
 
 async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, settings: Json, *,
                   recovery: Json | None = None) -> None:
-    quota_wait = str(task.get("report") or "").startswith(_QUOTA_WAIT)
-    if recovery is None and task.get("contextHandoff") in ("resume", "handoff"):
+    clean_restart = _clean_restart_pending(task)
+    if clean_restart:
+        recovery = None
+    elif (recovery is None and not task.get("qaOf")
+          and (task.get("recoveryDisposition") or {}).get("state") in ("invalid", "incomplete", "unrestorable")):
+        # Retry preserves unusable evidence. In particular, an absent previous-attempt lookup
+        # must not turn structured evidence of a failed restore into an implicit clean start.
+        await _report(task, "attention", report="Task recovery is unusable and needs attention; "
+                      "Retry preserves saved evidence. A clean restart requires an explicit user decision.")
+        return
+    quota_wait = not clean_restart and str(task.get("report") or "").startswith(_QUOTA_WAIT)
+    if not clean_restart and recovery is None and task.get("contextHandoff") in ("resume", "handoff"):
         source_segment = task.get("segments", 0) - (1 if task.get("contextHandoff") == "resume" else 0)
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"], source_segment)
         if recovery is None:
             await _report(task, "attention", report=_recovery_problem(None))
             return
-    elif recovery is None and (quota_wait or not (task.get("qaOf") and task["status"] in ("planned", "queued"))):
+    elif (not clean_restart and recovery is None
+          and (quota_wait or not (task.get("qaOf") and task["status"] in ("planned", "queued")))):
         source_attempt = task["attempts"] if quota_wait else max(0, task["attempts"] - 1)
+        discarded = (task.get("recoveryDisposition") or {}).get("discardedAttempt")
+        if discarded is not None and source_attempt <= discarded:
+            await _report(task, "attention", report="No eligible recovery snapshot exists after the discarded attempt")
+            return
         recovery = await _task_recovery(UUID(task["id"]), source_attempt, task.get("segments", 0))
         if quota_wait and recovery is None:
             await _report(task, "attention", report="Task recovery needs attention: no saved quota checkpoint")
+            return
+        if recovery is None and task["attempts"] > 0 and not task.get("qaOf"):
+            await _report(task, "attention", report=_recovery_problem(None))
             return
     if recovery is not None:
         problem = _recovery_problem(recovery)
@@ -2078,8 +2121,15 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
             or task.get("status") not in ("planned", "queued", "review", "merging")
             or task.get("sessionId")):
         return
+    # An assignment lookup may race a user decision or another runner's accepted launch.
+    # Reconcile from the fresh durable intent on the next tick instead of using stale evidence.
+    if clean_restart != _clean_restart_pending(task):
+        return
+    if clean_restart:
+        task = {**task, "attempts": max(task["attempts"], task["recoveryDisposition"]["discardedAttempt"] + 1)}
+        await _cleanup_discarded_recovery(item, task, player_id)
     key = re.sub(r"[^a-z0-9-]+", "-", task["key"].lower()).strip("-")[:40] or "task"
-    branch = recovery["branch"] if recovery else f"factory/{key}-{uuid4().hex[:6]}"
+    branch = recovery["branch"] if recovery else f"factory/{key}-{uuid4().hex if clean_restart else uuid4().hex[:6]}"
     recovery_context = _recovery_context(recovery, item, task, player_id) if recovery else None
     qa_report_pending = bool(task.get("qaOf") and task["status"] not in ("planned", "queued")
                              and task.get("sessionId") and isinstance(task.get("qaReport"), dict))
@@ -2382,6 +2432,12 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
     kind = {"feature": "Feature", "defect": "Defect", "debt": "Debt"}[item["kind"]]
     issue = f" (GitHub issue #{item['issueNumber']})" if item.get("issueNumber") else ""
     lines = [f"# {kind}{issue}: {item['title']}"]
+    if _clean_restart_pending(task):
+        lines += ["", "## Explicit clean restart", "",
+                  "This session starts clean from the currently integrated default branch because the user "
+                  "explicitly discarded the previous unrecoverable task state. Previous unmerged work "
+                  "was discarded; no previous task work was restored."]
+        recovery = None
     if memory := _design_memory_brief(item, task):
         lines += ["", memory]
     seen: dict[str, str] = {}
