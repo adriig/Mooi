@@ -5,6 +5,12 @@ import type { WorkTaskStatus } from '@/features/work/types/WorkTaskStatus';
 export type QaFindingPriority = 'critical' | 'high' | 'medium' | 'low';
 export type QaBlockerCategory = 'access' | 'credentials' | 'infrastructure' | 'capacity';
 
+export interface RecoveryDisposition {
+  state: 'normal' | 'missing' | 'recoverable' | 'invalid' | 'incomplete' | 'unrestorable' | 'discarded' | string;
+  restartPending?: boolean;
+  discardedAttempt?: number | null;
+}
+
 /** Structured, bounded evidence from one independent QA delivery. */
 export interface QaFinding {
   id: string;
@@ -63,6 +69,8 @@ export interface WorkTask {
   segments?: number;
   stalledSegments?: number;
   lastSnapshotRevision?: string | null;
+  /** Structured platform recovery state. Never infer restart eligibility from report text. */
+  recoveryDisposition?: RecoveryDisposition | null;
   contextHandoff?: 'requested' | 'checkpoint' | 'forced' | 'handoff' | 'resume' | null;
   report: string | null;
   /** Structured QA delivery (camelCase API contract). */

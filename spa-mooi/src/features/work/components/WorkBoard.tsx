@@ -5,7 +5,7 @@ import '@xyflow/react/dist/style.css';
 import { Maximize, Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
-  deleteWorkTask, pauseWorkItem, reassignWorkTasks, retryWorkTask, startWorkItem, updateWorkTask,
+  deleteWorkTask, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, retryWorkTask, startWorkItem, updateWorkTask,
 } from '@/features/work/api/workApi';
 import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskNode, type TaskFlowNode } from '@/features/work/components/TaskNode';
@@ -81,6 +81,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
   const [boardExpanded, setBoardExpanded] = useState(false);
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [reassignMessage, setReassignMessage] = useState<string | null>(null);
+  const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const features = useMemo(() => (items ?? []).filter((item) => item.kind === 'feature'), [items]);
   const showCompleted = searchParams.get('completed') === '1';
   const selectableFeatures = showCompleted ? features : features.filter((item) => item.status !== 'done');
@@ -203,6 +204,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
       </div>
       {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
       {reassignMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{reassignMessage}</p> : null}
+      {restartMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{restartMessage}</p> : null}
 
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-subtle">
         {Object.entries({ ...TASK_CATEGORIES, defect: DEFECT_TASK_STYLE }).map(([id, category]) => (
@@ -226,6 +228,11 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
           <TaskEditor projectId={projectId} task={openTask} tasks={tasks} connections={connections} busy={busy}
             onSave={(update) => run(() => updateWorkTask(projectId, feature.id, openTask.id, update))}
             onDelete={() => { void run(() => deleteWorkTask(projectId, feature.id, openTask.id)); setOpenTaskId(null); }}
+            onRestartClean={async () => {
+              const success = Boolean(await run(() => restartWorkTaskClean(projectId, feature.id, openTask.id)));
+              if (success) setRestartMessage('Tarea reiniciada desde cero.');
+              return success;
+            }}
             onOpenTask={(target) => setOpenTaskId(target.id)} />
         </Modal>
       ) : null}

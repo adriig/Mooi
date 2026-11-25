@@ -54,6 +54,11 @@ export const retryWorkTask = (projectId: string, itemId: string, taskId: string)
   send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}/retry`), 'POST',
     'Could not restart this task.');
 
+/** Explicitly discards unusable recovery evidence; ordinary Retry keeps its recovery-preserving contract. */
+export const restartWorkTaskClean = (projectId: string, itemId: string, taskId: string) =>
+  send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}/restart-clean`), 'POST',
+    'Could not restart this task from a clean workspace.');
+
 export const reassignWorkTasks = (projectId: string, itemId: string) =>
   send<{ item: WorkItem; changedCount: number; eligibleCount: number }>(
     workPath(projectId, `/items/${itemId}/reassign`), 'POST', 'Could not recalculate task assignments.');

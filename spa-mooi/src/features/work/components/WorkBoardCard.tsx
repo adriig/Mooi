@@ -3,11 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { sessionPath } from '@/app/paths';
 import { useSessionsStore } from '@/stores/sessionsStore';
 import { backLinkState } from '@/shared/utils/backLinkState';
-import { defineWorkIssue, ensureIssueItem, pauseWorkItem, startWorkItem } from '@/features/work/api/workApi';
+import { defineWorkIssue, ensureIssueItem, pauseWorkItem, restartWorkTaskClean, startWorkItem } from '@/features/work/api/workApi';
 import { WorkCard } from '@/features/work/components/WorkCard';
+import { RestartCleanControl } from '@/features/work/components/RestartCleanControl';
 import { IssueDefinitionProposalDialog } from '@/features/work/components/IssueDefinitionProposalDialog';
 import { useIssueDefinition } from '@/features/work/hooks/useIssueDefinition';
 import { useProjectWork } from '@/features/work/hooks/useProjectWork';
+import { canRestartTaskClean } from '@/features/work/lib/cleanRestart';
 import type { WorkEntry } from '@/features/work/types/WorkEntry';
 import type { Project } from '@/features/projects/types/Project';
 
@@ -20,10 +22,11 @@ interface WorkBoardCardProps {
 
 /** A card wired to its own project's start and pause actions. */
 export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoardCardProps) => {
-  const { run, busy } = useProjectWork(project.id, false);
+  const { run, busy, actionError } = useProjectWork(project.id, false);
   const navigate = useNavigate();
   const [defining, setDefining] = useState(false);
   const [defineError, setDefineError] = useState<string | null>(null);
+  const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const definition = useIssueDefinition(project.id, entry.issue?.number ?? 0, reviewing && Boolean(entry.issue));
   const start = async () => {
@@ -50,6 +53,19 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
       onStart={() => { void start(); }}
       onDefine={() => { void define(); }} onReviewProposal={() => setReviewing(true)}
       onPause={() => { if (entry.item) void run(() => pauseWorkItem(project.id, entry.item!.id)); }} />
+    {entry.item?.tasks.filter(canRestartTaskClean).map((task) => (
+      <div key={task.id} className="flex flex-wrap items-center gap-2 px-1.5">
+        <span className="min-w-0 flex-1 truncate text-xs text-ink-muted">{task.title}</span>
+        <RestartCleanControl task={task} busy={busy || defining}
+          onRestart={async () => {
+            const success = Boolean(await run(() => restartWorkTaskClean(project.id, entry.item!.id, task.id)));
+            if (success) setRestartMessage('Task restarted from a clean workspace.');
+            return success;
+          }} />
+      </div>
+    ))}
+    {restartMessage ? <p role="status" className="mx-1.5 text-xs text-success">{restartMessage}</p> : null}
+    {actionError ? <p role="alert" className="mx-1.5 rounded-control bg-danger-soft px-2 py-1.5 text-xs text-danger">{actionError}</p> : null}
     {reviewing && entry.issue ? <IssueDefinitionProposalDialog issueNumber={entry.issue.number} definition={definition.definition}
       busy={definition.busy || defining} error={definition.error} onAccept={(proposalId) => { void definition.accept(proposalId); }}
       onReopen={(proposalId) => { void definition.reopen(proposalId); }} onDefine={() => { setReviewing(false); void define(); }}

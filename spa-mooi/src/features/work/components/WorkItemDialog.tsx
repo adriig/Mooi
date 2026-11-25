@@ -4,7 +4,7 @@ import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, KeyRound, Network,
 import { projectPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
-  deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, reassignWorkTasks, startWorkItem,
+  deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, startWorkItem,
   updateWorkIssue, updateWorkItem,
   updateWorkTask,
 } from '@/features/work/api/workApi';
@@ -57,6 +57,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmReassign, setConfirmReassign] = useState(false);
   const [reassignMessage, setReassignMessage] = useState<string | null>(null);
+  const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const kind = WORK_KINDS[entry.kind];
   const text = item?.spec || entry.issue?.body || '';
   const tasks = item?.tasks ?? [];
@@ -147,6 +148,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
         </div>
 
         {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
+        {restartMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{restartMessage}</p> : null}
         {entry.issue && (entry.column === 'new' || issueDefinition.definition?.state === 'DEFINED') ? (
           <section className="flex flex-col gap-3 rounded-card border border-line p-4">
             <div className="flex items-center justify-between gap-3">
@@ -284,6 +286,11 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                         <TaskEditor projectId={projectId} task={task} tasks={tasks} connections={connections} busy={busy}
                           onSave={(update) => run(() => updateWorkTask(projectId, item.id, task.id, update))}
                           onDelete={() => { void run(() => deleteWorkTask(projectId, item.id, task.id)); }}
+                          onRestartClean={async () => {
+                            const success = Boolean(await run(() => restartWorkTaskClean(projectId, item.id, task.id)));
+                            if (success) setRestartMessage('Tarea reiniciada desde cero.');
+                            return success;
+                          }}
                           onOpenTask={(target) => setOpenTask(target.id)} />
                       </div>
                     ) : null}

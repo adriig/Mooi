@@ -4,6 +4,7 @@ import { ArrowUpRight, Trash2 } from 'lucide-react';
 import { sessionPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { QaTaskDetails } from '@/features/work/components/QaTaskDetails';
+import { RestartCleanControl } from '@/features/work/components/RestartCleanControl';
 import { TaskAssignmentFields } from '@/features/work/components/TaskAssignmentFields';
 import { EDITABLE_CATEGORIES, TASK_CATEGORIES } from '@/features/work/lib/taskCategories';
 import { segmentLabel, taskNotice } from '@/features/work/lib/taskNotice';
@@ -25,6 +26,7 @@ interface TaskEditorProps {
   onSave: (update: WorkTaskUpdate) => Promise<unknown>;
   onDelete: () => void;
   onOpenTask: (task: WorkTask) => void;
+  onRestartClean: () => Promise<boolean>;
 }
 
 const input = 'w-full min-w-0 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-70';
@@ -52,7 +54,7 @@ const dependants = (taskId: string, tasks: WorkTask[]): Set<string> => {
  * Everything about one task, as the orchestrator prefilled it: what to do, how to check it, who
  * runs it and what it waits for. Editable until its session starts; afterwards it shows how it went.
  */
-export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete, onOpenTask }: TaskEditorProps) => {
+export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete, onOpenTask, onRestartClean }: TaskEditorProps) => {
   const editable = taskEditable(task);
   const qa = task.qaOf !== null;
   const [title, setTitle] = useState(task.title);
@@ -115,6 +117,10 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
         </p>
       ) : null}
       <QaTaskDetails task={task} tasks={tasks} onOpenTask={onOpenTask} />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <RestartCleanControl task={task} busy={busy} onRestart={onRestartClean} />
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-[1fr_12rem]">
         <label className="flex min-w-0 flex-col gap-1.5">
