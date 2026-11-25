@@ -102,8 +102,13 @@ export const useLiveStore = create<LiveState>((set) => ({
     }
     if (frame.type === 'work.definition') {
       const current = state.work[projectId] ?? EMPTY_WORK;
+      const number = Number(data.number);
+      const hasProposal = Boolean((data.definition as IssueDefinition | undefined)?.proposal);
+      const issues = current.issues?.map((issue) => issue.number === number ? { ...issue, hasProposal } : issue) ?? null;
+      const items = current.items?.map((item) => item.issueNumber === number ? { ...item, hasProposal } : item) ?? null;
       return { work: { ...state.work, [projectId]: { ...current,
-        issueDefinitions: { ...(current.issueDefinitions ?? {}), [Number(data.number)]: data.definition as IssueDefinition } } } };
+        issues, items,
+        issueDefinitions: { ...(current.issueDefinitions ?? {}), [number]: data.definition as IssueDefinition } } } };
     }
     if (frame.type === 'work.removed') {
       const current = state.work[projectId];

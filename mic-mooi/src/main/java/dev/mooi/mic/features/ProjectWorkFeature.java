@@ -1750,7 +1750,7 @@ public class ProjectWorkFeature {
                     item.getStatus() == ItemStatus.paused ? item.getPauseReason() : null, item.getDependsOnId(),
                     item.getStartedAt(),
                     item.getFinishedAt(), item.getCreatedAt(), item.getUpdatedAt(), deployment(item, all),
-                    definitionState(item),
+                    definitionState(item), hasProposal(item),
                     all.stream().sorted(Comparator.comparingInt(WorkTask::getPosition)
                                     .thenComparing(task -> task.getQaOfId() != null)
                                     .thenComparing(WorkTask::getCreatedAt, Comparator.nullsLast(Comparator.naturalOrder())))
@@ -1776,6 +1776,11 @@ public class ProjectWorkFeature {
             return item.getKind() == ItemKind.feature ? DefinitionState.DEFINED
                     : definitions.findByProjectIdAndIssueNumber(item.getProjectId(), item.getIssueNumber())
                             .map(IssueDefinition::getState).orElse(DefinitionState.NEW);
+        }
+
+        private boolean hasProposal(WorkItem item) {
+            return item.getKind() != ItemKind.feature && definitions.findByProjectIdAndIssueNumber(
+                    item.getProjectId(), item.getIssueNumber()).map(row -> row.getProposal() != null).orElse(false);
         }
 
         private boolean executable(WorkItem item) {
@@ -2223,7 +2228,9 @@ public class ProjectWorkFeature {
         private IssuePayload toPayload(UUID projectId, Github.Issue issue, ItemKind kind) {
             return new IssuePayload(issue.number(), kind, issue.title(), issue.body(), issue.state(), issue.htmlUrl(),
                     issue.createdAt(), issue.closedAt(), definitions.findByProjectIdAndIssueNumber(projectId, issue.number())
-                            .map(IssueDefinition::getState).orElse(DefinitionState.NEW));
+                            .map(IssueDefinition::getState).orElse(DefinitionState.NEW),
+                    definitions.findByProjectIdAndIssueNumber(projectId, issue.number())
+                            .map(row -> row.getProposal() != null).orElse(false));
         }
 
         /** Read-only like every non-owning feature: mic-sessions renews the grant before calling here. */
@@ -3363,7 +3370,7 @@ public class ProjectWorkFeature {
                               ItemStatus status, String pauseReason, UUID dependsOn, OffsetDateTime startedAt,
                               OffsetDateTime finishedAt,
                               OffsetDateTime createdAt, OffsetDateTime updatedAt, DeploymentPayload deployment,
-                              DefinitionState definitionState,
+                              DefinitionState definitionState, boolean hasProposal,
                               List<TaskPayload> tasks, List<ChangeRequestPayload> changeRequests) {
     }
 
@@ -3378,7 +3385,8 @@ public class ProjectWorkFeature {
     }
 
     public record IssuePayload(int number, ItemKind kind, String title, String body, String state, String htmlUrl,
-                               OffsetDateTime createdAt, OffsetDateTime closedAt, DefinitionState definitionState) {
+                               OffsetDateTime createdAt, OffsetDateTime closedAt, DefinitionState definitionState,
+                               boolean hasProposal) {
     }
 
     public record IssuesPayload(List<IssuePayload> issues, List<ItemPayload> items) {

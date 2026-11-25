@@ -21,6 +21,8 @@ export interface WorkItem {
   status: WorkItemStatus;
   /** Features are always defined; issues require an accepted definition before Start. */
   definitionState?: 'NEW' | 'DEFINED';
+  /** An issue definition proposal has been saved. */
+  hasProposal?: boolean;
   /** Why the platform paused it on its own (e.g. its factory credential was revoked); null for a manual pause. */
   pauseReason?: string | null;
   /** Another item of the project that must be done first. */

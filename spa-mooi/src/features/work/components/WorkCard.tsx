@@ -131,8 +131,10 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
       ) : null}
       {entry.column === 'new' ? (
         <div className="flex justify-end gap-2 px-1">
-          {entry.issue ? <Button size="sm" variant="secondary" disabled={busy} onClick={onReviewProposal}><FileCheck2 className="size-4" /> Revisar propuesta</Button> : null}
-          <Button size="sm" variant="brand" disabled={busy} onClick={onDefine}>Define</Button>
+          <Button size="sm" variant={entry.issue?.hasProposal ? 'secondary' : 'brand'} disabled={busy}
+            onClick={entry.issue?.hasProposal ? onReviewProposal : onDefine}>
+            <FileCheck2 className="size-4" /> {entry.issue?.hasProposal ? 'Validate' : 'Define'}
+          </Button>
         </div>
       ) : null}
     </li>
