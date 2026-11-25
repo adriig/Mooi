@@ -388,6 +388,14 @@ in Planification, the Board and the task editor.
   restarts and stream on the owner's live channel. Findings cite saved evidence, recommendations give
   justified priorities/actions/verification, and general suggestions stay separate. Evidence collection
   is read-only: it never changes configuration, reconnects accounts or starts GEO runs or audits.
+  Generating a diagnosis uses linked provider accounts through their existing adapters, factory quota
+  eligibility and ordered account/model fallback, while holding a headless slot of the account session
+  limit. It creates no visible session or new credentials. Generation is structured and checked against
+  saved evidence before publication; unavailable accounts/quotas, invalid output, agent failure, partial
+  coverage and no data are explicit retryable or terminal states. The user API and session agent API
+  expose the same create, list, read, collect and generate operations, with owner/project authorization
+  and live `analytics.analysis` updates. Hostile content in source data is untrusted input. Diagnosis
+  never launches GEO runs, audits, reconnections, project edits or automatic recommendations.
 - **GEO** includes AI-referral traffic from tracker visits; AI visibility monitoring that runs tracked
   prompts through the user's already linked provider accounts, manually or on a weekly schedule, while
   respecting account quotas; and an on-demand SEO & GEO audit of production sites. Audits check AI crawler

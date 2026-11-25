@@ -135,3 +135,5 @@ databaseChangeLog:
       file: db/changelog/changes/064-work-clean-restart.yaml
   - include:
       file: db/changelog/changes/065-analytics-analyses.yaml
+  - include:
+      file: db/changelog/changes/066-analytics-analysis-generation.yaml

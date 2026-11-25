@@ -46,7 +46,7 @@ public class AnalyticsAnalysisFeature {
     @Auth.Authenticated
     public AnalysisPayload create(@PathVariable UUID projectId, @Valid @RequestBody AnalysisRequest body,
                                   Auth.Principal principal) {
-        return service.create(projectId, principal.player().id(), body);
+        return service.create(projectId, principal.player().id(), principal.sessionId(), body);
     }
 
     @GetMapping("/me/projects/{projectId}/analytics/analyses")
@@ -70,13 +70,17 @@ public class AnalyticsAnalysisFeature {
         return service.collect(projectId, principal.player().id(), id, source);
     }
 
-    /** Generation is service-only; the next task supplies the headless agent and semantic validation. */
+    /** Generation updates come from the sessions service after headless execution and semantic validation. */
     @PutMapping("/internal/projects/{projectId}/analytics/analyses/{id}/generation")
     @Auth.ServiceOnly
     public AnalysisPayload generation(@PathVariable UUID projectId, @PathVariable UUID id,
                                       @RequestParam UUID playerId, @Valid @RequestBody GenerationUpdate body) {
         return service.generation(projectId, playerId, id, body);
     }
+
+    @PostMapping("/internal/analytics/analyses/claim")
+    @Auth.ServiceOnly
+    public List<GenerationClaim> claim() { return service.claim(); }
 
     @GetMapping("/internal/analytics/analyses/events")
     @Auth.ServiceOnly
@@ -89,11 +93,12 @@ public class AnalyticsAnalysisFeature {
     }
 
     public record AnalysisEvent(UUID id, UUID projectId, UUID playerId, GenerationStatus status, long revision) { }
+    public record GenerationClaim(UUID projectId, UUID playerId, UUID authSessionId, AnalysisPayload analysis) { }
 
     public enum Source { tracker, ga4, search_console, ai_referrals, geo_visibility, seo_geo_audits }
     public enum EvidenceStatus { available, partial, not_connected, empty, failed }
     public enum GenerationStatus { collecting, queued, running, completed, partial, no_data, failed,
-        no_account, quota }
+        invalid_output, no_account, quota }
     public enum Priority { high, medium, low }
 
     /** Instants are [from,to); timezone is retained, not inferred from the server. */
@@ -141,10 +146,10 @@ public class AnalyticsAnalysisFeature {
         private final AnalysisStore store;
         private final ObjectMapper json = JsonMapper.shared();
 
-        public AnalysisPayload create(UUID projectId, UUID playerId, AnalysisRequest request) {
+        public AnalysisPayload create(UUID projectId, UUID playerId, UUID authSessionId, AnalysisRequest request) {
             analytics.requireProject(projectId, playerId);
             validatePeriod(request.period());
-            return store.create(projectId, playerId, request);
+            return store.create(projectId, playerId, authSessionId, request);
         }
 
         public AnalysisPayload get(UUID projectId, UUID playerId, UUID id) {
@@ -352,6 +357,8 @@ public class AnalyticsAnalysisFeature {
             return store.generation(project, player, id, update);
         }
 
+        public List<GenerationClaim> claim() { return store.claim(); }
+
         public List<AnalysisEvent> events() { return store.events(); }
         public void acknowledge(UUID id, long revision) { store.acknowledge(id, revision); }
     }
@@ -364,11 +371,36 @@ public class AnalyticsAnalysisFeature {
         private final ObjectMapper json = JsonMapper.shared();
 
         @Transactional
-        public AnalysisPayload create(UUID project, UUID player, AnalysisRequest request) {
+        public AnalysisPayload create(UUID project, UUID player, UUID authSessionId, AnalysisRequest request) {
             repository.insertIfAbsent(request.id(), project, player, json.writeValueAsString(request.period()), Instant.now());
-            AnalysisPayload saved = payload(owned(project, player, request.id(), false));
+            Analysis row = owned(project, player, request.id(), true);
+            row.setAuthSessionId(authSessionId);
+            AnalysisPayload saved = payload(row);
             if (!saved.period().equals(request.period())) throw conflict();
             return saved;
+        }
+
+        @Transactional
+        public List<GenerationClaim> claim() {
+            // A process restart can leave a durable `running` row behind. Re-queue only jobs older
+            // than the longest headless slot wait and provider timeout, then claim atomically below.
+            for (Analysis stale : repository.findByStatusAndUpdatedAtBeforeOrderByUpdatedAtAsc("running",
+                    Instant.now().minus(Duration.ofMinutes(15)), PageRequest.of(0, 20))) {
+                Analysis locked = repository.lockById(stale.getId()).orElse(null);
+                if (locked != null && "running".equals(locked.getStatus())
+                        && locked.getUpdatedAt().isBefore(Instant.now().minus(Duration.ofMinutes(15)))) {
+                    locked.setStatus("queued"); locked.setReason("recovered_after_restart"); touch(locked);
+                }
+            }
+            List<Analysis> queued = repository.findByStatusOrderByUpdatedAtAsc("queued", PageRequest.of(0, 10));
+            List<GenerationClaim> claims = new ArrayList<>();
+            for (Analysis row : queued) {
+                Analysis locked = repository.lockById(row.getId()).orElse(null);
+                if (locked == null || !"queued".equals(locked.getStatus()) || locked.getAuthSessionId() == null) continue;
+                locked.setStatus("running"); locked.setReason(null); touch(locked);
+                claims.add(new GenerationClaim(locked.getProjectId(), locked.getPlayerId(), locked.getAuthSessionId(), payload(locked)));
+            }
+            return claims;
         }
 
         @Transactional(readOnly = true)
@@ -408,11 +440,13 @@ public class AnalyticsAnalysisFeature {
             if (current.revision() != update.revision()) throw conflict();
             boolean terminal = update.status() == GenerationStatus.completed || update.status() == GenerationStatus.partial;
             boolean allowed = switch (current.status()) {
-                case queued -> List.of(GenerationStatus.running, GenerationStatus.failed,
+                case queued -> List.of(GenerationStatus.running, GenerationStatus.failed, GenerationStatus.invalid_output,
                         GenerationStatus.no_account, GenerationStatus.quota).contains(update.status());
                 case running -> List.of(GenerationStatus.completed, GenerationStatus.partial, GenerationStatus.failed,
-                        GenerationStatus.no_account, GenerationStatus.quota, GenerationStatus.queued).contains(update.status());
-                case failed, no_account, quota -> List.of(GenerationStatus.queued, GenerationStatus.running).contains(update.status());
+                        GenerationStatus.invalid_output, GenerationStatus.no_account, GenerationStatus.quota,
+                        GenerationStatus.queued).contains(update.status());
+                case failed, invalid_output, no_account, quota -> List.of(GenerationStatus.queued,
+                        GenerationStatus.running).contains(update.status());
                 default -> false;
             };
             if (!allowed) throw conflict();
@@ -504,6 +538,7 @@ public class AnalyticsAnalysisFeature {
         @Id private UUID id;
         @Column(name = "project_id", nullable = false) private UUID projectId;
         @Column(name = "player_id", nullable = false) private UUID playerId;
+        @Column(name = "auth_session_id") private UUID authSessionId;
         @Column(nullable = false, columnDefinition = "text") private String period;
         @Column(nullable = false, columnDefinition = "text") private String evidence;
         @Column(columnDefinition = "text") private String result;
@@ -522,6 +557,9 @@ public class AnalyticsAnalysisFeature {
         int insertIfAbsent(UUID id, UUID project, UUID player, String period, Instant now);
         List<Analysis> findByProjectIdAndPlayerIdOrderByCreatedAtDescIdDesc(UUID projectId, UUID playerId,
                                                                         org.springframework.data.domain.Pageable page);
+        List<Analysis> findByStatusOrderByUpdatedAtAsc(String status, org.springframework.data.domain.Pageable page);
+        List<Analysis> findByStatusAndUpdatedAtBeforeOrderByUpdatedAtAsc(String status, Instant updatedAt,
+                                                                         org.springframework.data.domain.Pageable page);
         @Lock(LockModeType.PESSIMISTIC_WRITE)
         @Query("select a from AnalyticsAnalysis a where a.id = :id")
         Optional<Analysis> lockById(UUID id);

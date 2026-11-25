@@ -365,6 +365,21 @@ async def acknowledge_analysis_event(analysis_id: UUID, revision: int) -> None:
     _raise_for_status(response, "Analytics event unavailable")
 
 
+async def claim_analysis_generations() -> list[dict]:
+    response = await get_http_client().post(
+        f"{get_settings().mooi_api_base_url}/internal/analytics/analyses/claim",
+        headers=_service_headers(None),
+    )
+    _raise_for_status(response, "Analytics generation queue unavailable")
+    return response.json()
+
+
+async def update_analysis_generation(project_id: UUID, player_id: UUID, analysis_id: UUID,
+                                     payload: dict) -> dict:
+    return await _send("PUT", f"/internal/projects/{project_id}/analytics/analyses/{analysis_id}/generation"
+                       f"?playerId={player_id}", None, "Analytics analysis unavailable", payload)
+
+
 async def fetch_issues(caller: Caller, project_id: UUID) -> dict:
     """Defects and debt as GitHub has them; the grant is renewed first, since this feature only reads it."""
     await fetch_github_token(caller)

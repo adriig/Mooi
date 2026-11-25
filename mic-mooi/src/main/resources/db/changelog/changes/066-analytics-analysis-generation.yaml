@@ -1,0 +1,26 @@
+databaseChangeLog:
+  - changeSet:
+      id: 066-analytics-analysis-generation
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: analytics_analyses
+            columns:
+              - column:
+                  name: auth_session_id
+                  type: uuid
+        - createIndex:
+            tableName: analytics_analyses
+            indexName: ix_analytics_analyses_generation_queue
+            columns:
+              - column:
+                  name: status
+              - column:
+                  name: updated_at
+      rollback:
+        - dropIndex:
+            tableName: analytics_analyses
+            indexName: ix_analytics_analyses_generation_queue
+        - dropColumn:
+            tableName: analytics_analyses
+            columnName: auth_session_id
