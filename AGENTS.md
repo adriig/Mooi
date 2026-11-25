@@ -116,6 +116,10 @@ Each project plans and builds its work as a software factory: agents design it, 
   - **Feature**: work worth several tasks, designed by a session agent acting as orchestrator. It holds a
     spec and its tasks; it lives in the platform. Features are independent of each other: at most a whole
     feature depends on another whole feature, never a task on a task of another feature.
+    Its design is also kept in `docs/features/<slug>-<id8>/`: the platform writes `FEATURE.md` with the
+    spec and task breakdown at Start and when an applied change request modifies them; each development
+    task writes `decisions/<task-key>.md` in its own branch. The platform remains the source of operational
+    state; the repository is readable design memory that works without Mooi.
   - **Defect** and **Debt**: a GitHub issue of the project labelled `defect` or `debt` (created when
     missing). GitHub Issues hold only these two kinds, never features; their execution settings live in the
     platform. A single task asked in a session is developed in that session and never becomes a work item.
