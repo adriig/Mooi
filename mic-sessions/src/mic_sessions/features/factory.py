@@ -454,6 +454,8 @@ async def agent_qa_handoff(session_id: UUID, request: Request) -> Json:
             "files": _handoff_files(handoff.get("files") or []),
             "verifications": [_handoff_text(str(value))[:2_000]
                               for value in (handoff.get("verifications") or [])[:200]],
+            "obstacles": [_handoff_text(str(value))[:2_000]
+                          for value in (handoff.get("obstacles") or [])[:200]],
             "preparation": _handoff_text(str(handoff.get("preparation") or ""))}
 
 
@@ -762,6 +764,7 @@ class TaskRun:
     qa_rounds: int = 0
     outcome: TaskReport | None = None
     nudged: bool = False
+    verification_nudged: bool = False
     resolutions: int = 0
     # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for merge or Resume).
     phase: str = "working"
@@ -1361,14 +1364,16 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
                       "(not reported)")
                 block("Checks reported before QA", "\n".join(
                     f"- {value}" for value in handoff.get("verifications", [])), "(not reported)")
+                block("Known obstacles", "\n".join(
+                    f"- {value}" for value in handoff.get("obstacles", [])), "(none reported)")
                 block("Declared preparation", handoff.get("preparation"), "(not declared)")
-                lines += ["", "This report is orientation only. Independently verify the integrated default branch "
-                          "using the acceptance criteria and this QA task's preparation."]
+                lines += ["", ("This report is orientation only. Independently verify the integrated default branch "
+                                "using the acceptance criteria and this QA task's preparation.")]
             else:
                 lines += ["", "## Legacy evidence limits", "",
                           f"Merged commit: {tested.get('mergeSha') or 'missing; no SHA is available to verify'}",
-                          "Development summary, changed files, prior checks and declared preparation: unavailable "
-                          "in this legacy task record. Do not infer them; validate independently from the criteria."]
+                          ("Development summary, changed files, prior checks and declared preparation: unavailable "
+                           "in this legacy task record. Do not infer them; validate independently from the criteria.")]
             lines += ["", ("For bounded task handoff details, use GET `/sessions/{session_id}/work/agent/qa-handoff`. "
                             "It returns only the task this QA run checks; it never returns a diff or other tasks.")]
         else:
@@ -1596,6 +1601,10 @@ async def _settle(run: TaskRun, session: Session) -> None:
         return
     report = run.outcome
     if report is None:
+        if run.verification_nudged:
+            # The agent has already received the specific correction request. Wait for its
+            # corrected report rather than treating the still-open turn as a missing result.
+            return
         if not run.nudged:
             run.nudged = True
             await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), await _run_caller(run))
@@ -1603,6 +1612,48 @@ async def _settle(run: TaskRun, session: Session) -> None:
         await _report(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
         return
     run.nudged = False
+    if not run.qa and report.outcome == "done":
+        changes = await workspaces.changes(session.workspace, session.base_commit)
+        changed_files = {file.path for file in changes.files}
+        reported_files = set(_handoff_files(report.files))
+        missing_reported = sorted(reported_files - changed_files)
+        unreported_changes = sorted(changed_files - reported_files)
+        for label, paths in (("Reported files not changed", missing_reported),
+                             ("Changed files not reported", unreported_changes)):
+            if paths:
+                shown = paths[:50]
+                suffix = f", and {len(paths) - len(shown)} more" if len(paths) > len(shown) else ""
+                note = _handoff_text(f"{label}: {', '.join(shown)}{suffix}")[:2_000]
+                if note not in report.obstacles:
+                    report.obstacles = report.obstacles[:199]
+                    report.obstacles.append(note)
+        # Persist the comparison notes even when the result is rejected, so recovery retains
+        # the evidence used by the runner.
+        await _persist_recovery(run, session, report=report)
+        if not changed_files:
+            if not run.verification_nudged:
+                run.verification_nudged = True
+                run.outcome = None
+                await sessions.queue_message(
+                    run.session_id,
+                    SendMessageRequest(text=(
+                        "You reported `done`, but this branch has no changes relative to its base commit. "
+                        "Make the required task changes, then report the outcome again. Do not claim completion "
+                        "without a real change."
+                    )),
+                    await _run_caller(run),
+                )
+                return
+            run.outcome = None
+            await _report(
+                run, "attention",
+                report=("Reported done again, but the task branch still has no changes relative to its base "
+                        "commit. No merge was performed."),
+            )
+            return
+        run.verification_nudged = False
+    elif report.outcome == "blocked":
+        run.verification_nudged = False
     if report.outcome == "blocked":
         if run.qa:
             answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
@@ -1696,6 +1747,9 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
                 _handoff_text(value)[:2_000] for value in (outcome.verifications if outcome else [])[:200]
             ],
             "preparation": _handoff_text(outcome.preparation if outcome else ""),
+            "obstacles": [
+                _handoff_text(value)[:2_000] for value in (outcome.obstacles if outcome else [])[:200]
+            ],
         }
     item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None,
                          qa_handoff=handoff)
