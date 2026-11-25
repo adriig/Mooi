@@ -8,4 +8,6 @@ export interface WorkIssue {
   htmlUrl: string | null;
   createdAt: string | null;
   closedAt: string | null;
+  /** Explicit factory definition state; absent legacy open issues are treated as new. */
+  definitionStatus?: 'new' | 'defined';
 }

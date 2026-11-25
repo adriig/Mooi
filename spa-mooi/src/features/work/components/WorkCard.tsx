@@ -21,11 +21,12 @@ interface WorkCardProps {
   onOpen: () => void;
   onStart: () => void;
   onPause: () => void;
+  onDefine?: () => void;
   onViewBoard?: () => void;
 }
 
 /** One feature, defect or debt on the board: what it is, how far it got, where it stands and its run control. */
-export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause, onViewBoard }: WorkCardProps) => {
+export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause, onDefine, onViewBoard }: WorkCardProps) => {
   const kind = WORK_KINDS[entry.kind];
   const Icon = kind.icon;
   const tasks = entry.item?.tasks ?? [];
@@ -88,6 +89,11 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
             </Button>
           ) : null}
           <WorkRunButton item={entry.item} busy={busy} onStart={onStart} onPause={onPause} />
+        </div>
+      ) : null}
+      {entry.column === 'new' ? (
+        <div className="flex justify-end px-1">
+          <Button size="sm" variant="brand" disabled={busy} onClick={onDefine}>Define</Button>
         </div>
       ) : null}
     </li>

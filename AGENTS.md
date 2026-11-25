@@ -139,11 +139,21 @@ Each project plans and builds its work as a software factory: agents design it, 
 - **To-dos** entry in the main menu is one Kanban board of the features, defects and debt of every project
   selected in a dropdown with checkboxes, remembered per user on the current device; the board loads the
   selected projects and each card shows its project. Columns are derived from state, never dragged:
-  **DEFINED** (not started), **IN PROGRESS** (running or paused; cards flag tasks needing the user),
+  **NEW** (open defects and improvements/debt whose validity, scope or acceptance criteria are not
+  defined; legacy open issues without an explicit definition state are NEW), **DEFINED** (not
+  started), **IN PROGRESS** (running or paused; cards flag tasks needing the user),
   **PENDING TO DEPLOY** (all merged, not yet in a successful production deployment; projects without
   production stay here) and **DEPLOYED**, newest first. DEPLOYED shows at most as many cards as the largest
   other column (minimum 5), so it never grows the board, with a **Load more** button for further pages.
-  Headers show counts in compact pills (`1.2K`). Cards offer Start, Pause or Resume (Start only on DEFINED)
+  NEW is always before DEFINED and never contains features. NEW cards offer **Define**, not Start.
+  Define creates or reopens a definition session associated with the item, using read-only repository
+  access and economical model/effort choices that respect the user's accounts and quotas. In that
+  session the user and agent validate the report, clarify scope and verifiable acceptance criteria,
+  choose defect or improvement, and decide whether to split issues or raise a feature. The agent
+  presents a reviewable proposal; only user acceptance persists changes and moves the item to DEFINED.
+  Before acceptance, issues and work items are not changed and subtasks/features are not created.
+  Items with existing complete execution criteria remain defined; features never enter NEW. Headers
+  show counts in compact pills (`1.2K`). Cards offer Start, Pause or Resume (Start only on DEFINED)
   and show merge commits and, when deployed, the version. A kind filter (All, Features, Defects, Debt) and
   creating defects and debt stay; status filters and factory settings are not on To-dos. Phones show one
   column at a time, chosen with one tab per column. Opening an item shows its task breakdown, every task's

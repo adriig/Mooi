@@ -1,2 +1,2 @@
 /** The To-dos board columns, derived from state and never dragged. */
-export type WorkColumn = 'defined' | 'inProgress' | 'pendingDeploy' | 'deployed';
+export type WorkColumn = 'new' | 'defined' | 'inProgress' | 'pendingDeploy' | 'deployed';

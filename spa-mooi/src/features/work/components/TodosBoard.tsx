@@ -37,7 +37,7 @@ const entryKey = (project: Project, entry: WorkEntry) => `${project.id}:${entry.
  */
 export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => {
   const work = useLiveStore((live) => live.work);
-  const [tab, setTab] = useState<WorkColumn>('defined');
+  const [tab, setTab] = useState<WorkColumn>('new');
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [graphItem, setGraphItem] = useState<WorkItem | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -56,11 +56,11 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
       const order = new Map(sortColumn(column, rows.map((row) => row.entry)).map((entry, index) => [entry, index]));
       return rows.sort((a, b) => order.get(a.entry)! - order.get(b.entry)!);
     };
-    return { defined: byColumn('defined'), inProgress: byColumn('inProgress'),
+    return { new: byColumn('new'), defined: byColumn('defined'), inProgress: byColumn('inProgress'),
       pendingDeploy: byColumn('pendingDeploy'), deployed: byColumn('deployed') };
   }, [ofKind]);
 
-  const pageSize = Math.max(MIN_DEPLOYED, columns.defined.length, columns.inProgress.length, columns.pendingDeploy.length);
+  const pageSize = Math.max(MIN_DEPLOYED, columns.new.length, columns.defined.length, columns.inProgress.length, columns.pendingDeploy.length);
   const filterKey = `${kind}|${projects.map((project) => project.id).join(',')}`;
   const [paging, setPaging] = useState({ key: filterKey, pages: 1 });
   const pages = paging.key === filterKey ? paging.pages : 1;
@@ -95,7 +95,7 @@ export const TodosBoard = ({ projects, kind, connections }: TodosBoardProps) => 
     <div className="flex flex-col gap-3">
       <Tabs ariaLabel="Columns" value={tab} onChange={(id) => setTab(id as WorkColumn)} className="border-b border-line lg:hidden"
         items={WORK_COLUMNS.map((column) => ({ id: column.id, label: column.label, count: columns[column.id].length }))} />
-      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-4">
+      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-5">
         {WORK_COLUMNS.map((column) => {
           const rows = column.id === 'deployed' ? shownDeployed : columns[column.id];
           const total = columns[column.id].length;

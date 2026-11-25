@@ -4,6 +4,7 @@ import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem, WorkItemDeployment } from '@/features/work/types/WorkItem';
 
 export const WORK_COLUMNS: { id: WorkColumn; label: string }[] = [
+  { id: 'new', label: 'New' },
   { id: 'defined', label: 'Defined' },
   { id: 'inProgress', label: 'In progress' },
   { id: 'pendingDeploy', label: 'Pending to deploy' },
@@ -33,7 +34,9 @@ export const workEntries = (items: WorkItem[], issues: WorkIssue[]): WorkEntry[]
   }));
   const tracked: WorkEntry[] = issues.map((issue) => {
     const item = byIssue.get(issue.number) ?? null;
-    const column: WorkColumn = item ? itemColumn(item) : issue.state === 'closed' ? 'deployed' : 'defined';
+    const column: WorkColumn = item ? itemColumn(item)
+      : issue.state === 'closed' ? 'deployed'
+        : issue.definitionStatus === 'defined' ? 'defined' : 'new';
     return { key: `#${issue.number}`, kind: issue.kind, title: issue.title, column, item, issue };
   });
   return [...features, ...tracked];
@@ -48,6 +51,8 @@ const finished = (entry: WorkEntry): number => time(entry.item?.finishedAt ?? en
 export const sortColumn = (column: WorkColumn, entries: WorkEntry[]): WorkEntry[] => {
   const sorted = [...entries];
   switch (column) {
+    case 'new':
+      return sorted.sort((a, b) => time(b.issue?.createdAt) - time(a.issue?.createdAt));
     case 'defined':
       return sorted.sort((a, b) => time(b.item?.createdAt ?? b.issue?.createdAt) - time(a.item?.createdAt ?? a.issue?.createdAt));
     case 'inProgress':
