@@ -55,7 +55,10 @@ export interface WorkTask {
   fixOf: string | null;
   status: WorkTaskStatus;
   sessionId: string | null;
+  /** Monotonic across Retry and Start: recovery snapshots are keyed by it. */
   attempts: number;
+  /** `attempts` at the latest Retry or Start; the session limit counts attempts beyond it. */
+  attemptsBase: number;
   report: string | null;
   /** Structured QA delivery (camelCase API contract). */
   qaReport?: QaTaskReport | null;

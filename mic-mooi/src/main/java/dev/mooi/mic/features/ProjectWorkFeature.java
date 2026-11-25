@@ -519,7 +519,7 @@ public class ProjectWorkFeature {
             }
             task.setStatus(TaskStatus.planned);
             task.setSessionId(null);
-            task.setAttempts(0);
+            task.setAttemptsBase(task.getAttempts());
             task.setReport(null);
             task.setStartedAt(null);
             task.setFinishedAt(null);
@@ -566,7 +566,7 @@ public class ProjectWorkFeature {
                                 || (task.getStatus() == TaskStatus.done && ISSUE_CLOSED_REPORT.equals(task.getReport()))))
                     .forEach(task -> {
                         task.setStatus(TaskStatus.planned);
-                        task.setAttempts(0);
+                        task.setAttemptsBase(task.getAttempts());
                         task.setReport(null);
                         task.setStartedAt(null);
                         task.setFinishedAt(null);
@@ -669,7 +669,8 @@ public class ProjectWorkFeature {
             UUID previousSessionId = task.getSessionId();
             task.setStatus(progress.status());
             task.setSessionId(progress.sessionId());
-            task.setAttempts(progress.attempts());
+            // A stale runner snapshot must not rewind the attempt its recovery evidence is keyed by.
+            task.setAttempts(Math.max(task.getAttempts(), progress.attempts()));
             task.setReport(progress.report());
             if (progress.status() == TaskStatus.running && task.getQaOfId() != null
                     && !java.util.Objects.equals(previousSessionId, progress.sessionId())) {
@@ -1310,7 +1311,8 @@ public class ProjectWorkFeature {
                                             task.getEffort()),
                                      readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
                                      task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
-                                     task.getAttempts(), task.getReport(), readQaReport(task.getQaReport()),
+                                     task.getAttempts(), task.getAttemptsBase(), task.getReport(),
+                                     readQaReport(task.getQaReport()),
                                      task.getFindingId(),
                                      task.getQaRounds(), task.getMergeSha(), task.getDeployedVersion(), task.getDeployedAt(),
                                      readQaHandoff(task.getQaHandoff()),
@@ -1641,8 +1643,13 @@ public class ProjectWorkFeature {
         @Column(name = "session_id")
         private UUID sessionId;
 
+        /** Monotonic: recovery snapshots are keyed by attempt, so Retry and Start never rewind it. */
         @Column(name = "attempts", nullable = false)
         private int attempts;
+
+        /** {@code attempts} at the latest Retry or Start; the session limit counts attempts beyond it. */
+        @Column(name = "attempts_base", nullable = false)
+        private int attemptsBase;
 
         @Column(name = "report", columnDefinition = "text")
         private String report;
@@ -2075,7 +2082,8 @@ public class ProjectWorkFeature {
     public record TaskPayload(UUID id, String key, String title, TaskCategory category, String description,
                                String acceptance, Assignment assignment, List<Assignment> alternatives,
                                boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
-                               UUID sessionId, int attempts, String report, Map<String, Object> qaReport,
+                               UUID sessionId, int attempts, int attemptsBase, String report,
+                               Map<String, Object> qaReport,
                                String findingId, int qaRounds, String mergeSha,
                                String deployedVersion, OffsetDateTime deployedAt, Map<String, Object> qaHandoff,
                                List<UUID> dependsOn,

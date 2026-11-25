@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 058-work-task-attempts-base
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_tasks
+            columns:
+              - column:
+                  name: attempts_base
+                  type: int
+                  defaultValueNumeric: 0
+                  constraints:
+                    nullable: false
+      rollback:
+        - dropColumn:
+            tableName: work_tasks
+            columnName: attempts_base

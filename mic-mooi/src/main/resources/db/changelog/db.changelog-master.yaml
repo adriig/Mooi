@@ -115,3 +115,5 @@ databaseChangeLog:
       file: db/changelog/changes/056-work-task-recovery-preparation.yaml
   - include:
       file: db/changelog/changes/057-work-deployed-version.yaml
+  - include:
+      file: db/changelog/changes/058-work-task-attempts-base.yaml

@@ -85,12 +85,13 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
   };
   const dirty = Object.keys(update).length > 0;
   const state = TASK_STATUS[taskState(task, tasks)];
+  const attempts = task.attempts - (task.attemptsBase ?? 0);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={state.tone}>{state.label}</Badge>
-        {task.attempts > 0 ? <span className="text-xs text-ink-subtle">Attempt {task.attempts + 1}</span> : null}
+        {attempts > 0 ? <span className="text-xs text-ink-subtle">Attempt {attempts + 1}</span> : null}
         {task.sessionId ? (
           <Link to={sessionPath(projectId, task.sessionId)}
             className="inline-flex items-center gap-1 text-xs font-semibold text-brand underline-offset-4 hover:underline">

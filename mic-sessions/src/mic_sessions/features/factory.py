@@ -982,8 +982,9 @@ async def _advance(entry: Json, limits: dict[UUID, int]) -> None:
             continue
         _runs.pop(UUID(session_id), None)
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
+        # `attempts` never rewinds (snapshots are keyed by it); Retry and Start move `attemptsBase` instead.
         attempts = task["attempts"] + 1
-        if attempts > limits["maxAttempts"]:
+        if attempts - task.get("attemptsBase", 0) > limits["maxAttempts"]:
             problem = _recovery_problem(recovery)
             detail = "Its session ended several times before finishing. Start the item again to retry."
             if problem:
