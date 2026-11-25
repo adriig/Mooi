@@ -85,9 +85,9 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <Card className="grid gap-4 p-4 sm:p-5 md:grid-cols-3">
-        <div><h2 className="text-sm font-semibold">Statistics</h2><p className="mt-1 text-sm text-ink-muted">Production visits and clicks from the Mooi tracker. Optional Google Analytics 4 (GA4) reports appear separately with their own data.</p></div>
-        <div><h2 className="text-sm font-semibold">SEO · search performance</h2><p className="mt-1 text-sm text-ink-muted">Google Search Console shows organic Google Search impressions, clicks and average position.</p></div>
-        <div><h2 className="text-sm font-semibold">GEO · AI discovery</h2><p className="mt-1 text-sm text-ink-muted">AI referral visits come from tracker referrers. Separate visibility runs test prompts with AI providers; the SEO &amp; GEO audit checks your production site.</p></div>
+        <div><h2 className="text-sm font-semibold">Statistics</h2></div>
+        <div><h2 className="text-sm font-semibold">SEO · search performance</h2></div>
+        <div><h2 className="text-sm font-semibold">GEO · AI discovery</h2></div>
       </Card>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <AnalyticsRangePicker range={range} onPreset={onPreset} onCustom={onCustom} />
