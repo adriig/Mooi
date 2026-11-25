@@ -39,6 +39,7 @@ import weakref
 from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, overload
 from uuid import UUID, uuid4
@@ -992,6 +993,7 @@ class TaskRun:
     settling: bool = False
     settle_again: bool = False
     finishing: bool = False
+    quota_pausing: bool = False
 
 
 @dataclass
@@ -1188,6 +1190,67 @@ _behind: set[UUID] = set()
 _issue_sync_at: dict[UUID, float] = {}
 _LAUNCH_QUOTA_TTL = 300
 _launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
+_quota_wakeup: asyncio.TimerHandle | None = None
+_QUOTA_WAIT = "Esperando cuota"
+
+
+def _reset_at(value: Any) -> float | None:
+    try:
+        return float(value) if isinstance(value, (int, float)) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _schedule_quota(reset: float | None) -> None:
+    global _quota_wakeup
+    if reset is None or reset <= time.time():
+        return
+    loop = asyncio.get_running_loop()
+    when = loop.time() + reset - time.time()
+    if _quota_wakeup is None or _quota_wakeup.cancelled() or _quota_wakeup.when() <= loop.time() or when < _quota_wakeup.when():
+        if _quota_wakeup is not None:
+            _quota_wakeup.cancel()
+        _quota_wakeup = loop.call_at(when, wake)
+
+
+def _session_quota_windows(session: Session) -> Json:
+    """Adapters expose the selected model's generic windows; Claude also has family windows."""
+    model = (session.config.model or "").lower()
+    return {key: value for key, value in (session.usage.get("quota") or {}).items()
+            if isinstance(value, dict) and (key in ("five_hour", "seven_day", "primary", "secondary")
+                or key in ("seven_day_opus", "seven_day_sonnet") and key.rsplit("_", 1)[1] in model)}
+
+
+def _quota_exhausted(session: Session) -> bool:
+    return any(((_reset_at(value.get("resetsAt")) or float("inf")) > time.time())
+               and (value.get("status") == "rejected" or
+                    isinstance(value.get("percent"), (int, float)) and value["percent"] >= 100)
+               for value in _session_quota_windows(session).values())
+
+
+async def _pause_quota(run: TaskRun, session: Session) -> None:
+    if run.quota_pausing or run.finishing or run.phase in ("merging", "review") or session.closing:
+        return
+    run.quota_pausing = True
+    try:
+        await _persist_recovery(run, session, report=run.outcome)
+        resets = [reset for value in _session_quota_windows(session).values()
+                  if (reset := _reset_at(value.get("resetsAt"))) is not None and reset > time.time()]
+        reset = min(resets, default=None)
+        until = datetime.fromtimestamp(reset, timezone.utc).isoformat(timespec="seconds") if reset else "desconocida"
+        reason = f"{_QUOTA_WAIT} hasta {until} (cuenta {session.connection_id})"
+        async with _lock_for(_item_locks, run.item_id):
+            if not _current(run):
+                return
+            # Keep the live session attached until normal cleanup finishes, preventing overlapping workspaces.
+            await sessions.close_session(session.id)
+            await _report({"id": str(run.task_id), "attempts": run.attempts}, "queued", report=reason)
+            _runs.pop(session.id, None)
+        _schedule_quota(reset)
+    finally:
+        run.quota_pausing = False
+        wake()
 
 
 def wake() -> None:
@@ -1477,6 +1540,9 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                 run = _adopt(item, task, live, player_id, settings, recovery=recovery)
                 # This workspace is already alive; only its runner metadata was lost.
                 run.recovery_expected = False
+            if _quota_exhausted(live):
+                _background(_pause_quota(run, live))
+                continue
             if live.status == STATUS_FAILED:
                 if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
                     try:
@@ -1572,7 +1638,8 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
              and all(dependency in done for dependency in task["dependsOn"])]
     for task in ready:
         if not await _has_room(caller, player_id, session_limits):
-            await _wait(task, "Waiting for a free session")
+            if not str(task.get("report") or "").startswith(_QUOTA_WAIT):
+                await _wait(task, "Waiting for a free session")
             continue
         await _launch(item, task, caller, player_id, settings, recovery=recoveries.get(task["id"]))
 
@@ -1630,9 +1697,13 @@ async def _wait(task: Json, reason: str) -> None:
 
 async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, settings: Json, *,
                   recovery: Json | None = None) -> None:
-    if recovery is None and not (task.get("qaOf") and task["status"] in ("planned", "queued")):
-        source_attempt = max(0, task["attempts"] - 1) if task["attempts"] else 0
+    quota_wait = str(task.get("report") or "").startswith(_QUOTA_WAIT)
+    if recovery is None and (quota_wait or not (task.get("qaOf") and task["status"] in ("planned", "queued"))):
+        source_attempt = task["attempts"] if quota_wait else max(0, task["attempts"] - 1)
         recovery = await _task_recovery(UUID(task["id"]), source_attempt)
+        if quota_wait and recovery is None:
+            await _report(task, "attention", report="Task recovery needs attention: no saved quota checkpoint")
+            return
     if recovery is not None:
         problem = _recovery_problem(recovery)
         if problem:
@@ -1646,7 +1717,14 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
             return
     assignment = await _assign(caller, task, _quota_limit(settings))
     if assignment is None:
-        await _wait(task, "Waiting for an account with the requested model and quota left")
+        if not quota_wait:
+            resets = [reset for windows in _launch_quota_cache.values() if windows[1]
+                      for value in windows[1].values() if isinstance(value, dict)
+                      if (reset := _reset_at(value.get("resetsAt"))) is not None and reset > time.time()]
+            reset = min(resets, default=None)
+            suffix = f" until {datetime.fromtimestamp(reset, timezone.utc):%H:%M} UTC" if reset else ""
+            await _wait(task, "Waiting for an account with the requested model and quota left" + suffix)
+            _schedule_quota(reset)
         return
     # Assignment can take time; refresh the item before opening any session, including features.
     if item.get("issueNumber") is not None:
@@ -1679,7 +1757,8 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
             effort=assignment.get("effort"), initialMessage=initial_message), caller, recovery=recovery_context)
     except ApiException as failure:
         if failure.status_code == status.HTTP_409_CONFLICT:
-            await _wait(task, failure.message)
+            if not quota_wait:
+                await _wait(task, failure.message)
             return
         await _report(task, "attention", report=f"Its session could not start: {failure.message}")
         return
@@ -1710,6 +1789,24 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
     catalogs, snapshots = await asyncio.gather(
         _account_catalogs(caller, connections), _launch_quota_snapshots(caller, connections))
+    wait = re.match(r"Esperando cuota hasta (\S+) \(cuenta ([^)]+)\)", str(task.get("report") or ""))
+    if wait:
+        reset = _reset_at(wait[1])
+        if reset is None or reset > time.time():
+            # Respect a healthy provider snapshot; the durable wait only fills missing evidence.
+            if not snapshots.get(wait[2]) and not _quota(wait[2]):
+                snapshots[wait[2]] = {"quota_wait": {"percent": 100}}
+            _schedule_quota(reset)
+        else:
+            # Expired evidence must allow a retry even if the last provider snapshot is still exhausted.
+            windows = snapshots.get(wait[2], _quota(wait[2]))
+            snapshots[wait[2]] = {key: value for key, value in windows.items()
+                                  if not isinstance(value, dict)
+                                  or (_reset_at(value.get("resetsAt")) or float("inf")) > time.time()}
+    resets = [reset for windows in snapshots.values() for value in windows.values()
+              if isinstance(value, dict)
+              if (reset := _reset_at(value.get("resetsAt"))) is not None and reset > time.time()]
+    _schedule_quota(min(resets, default=None))
     return _select_assignment(task, connections, quota_limit, catalogs, snapshots)
 
 
@@ -1942,6 +2039,12 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
     run = _runs.get(session.id)
     if run is None:
         return
+    quota_error = type_ in ("error", EVENT_TURN_RESULT, EVENT_SESSION_STATUS) and bool(re.search(
+        r"rate[ _-]?limit|usage[ _-]?limit|quota.{0,30}(?:exceed|exhaust)|too many requests|limit.{0,20}reached",
+        str(data), re.IGNORECASE))
+    if _quota_exhausted(session) or quota_error:
+        _background(_pause_quota(run, session))
+        return
     if type_ == EVENT_TURN_RESULT:
         _background(_after_turn(run))
     elif (type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_READY
@@ -2151,11 +2254,11 @@ async def _after_turn(run: TaskRun) -> None:
 
 async def _settle_turn(run: TaskRun) -> None:
     session = get_registry().get(run.session_id)
-    if not _current(run) or session is None or session.closing or run.finishing:
+    if not _current(run) or session is None or session.closing or run.finishing or run.quota_pausing:
         return
     try:
         await _persist_recovery(run, session, report=run.outcome)
-        if not _current(run) or session.closing or session.queue:
+        if not _current(run) or session.closing or session.queue or run.quota_pausing:
             return
         await _settle(run, session)
     except CredentialRevoked:
@@ -2399,7 +2502,10 @@ def start_runner() -> None:
 
 
 async def close_runner() -> None:
-    global _runner_task
+    global _runner_task, _quota_wakeup
+    if _quota_wakeup is not None:
+        _quota_wakeup.cancel()
+        _quota_wakeup = None
     tasks = [task for task in (_runner_task, *_tasks) if task is not None]
     for task in tasks:
         task.cancel()
