@@ -28,24 +28,31 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
   const [defineError, setDefineError] = useState<string | null>(null);
   const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
-  const definition = useIssueDefinition(project.id, entry.issue?.number ?? 0, reviewing && Boolean(entry.issue));
+  const definitionSession = useSessionsStore((state) => state.sessions.find((session) => session.projectId === project.id
+    && session.kind === 'definition' && session.definitionIssueNumber === entry.issue?.number && session.status !== 'closed'));
+  const definition = useIssueDefinition(project.id, entry.issue?.number ?? 0, entry.column === 'new' && Boolean(entry.issue));
   const start = async () => {
     const item = entry.item ?? (entry.issue ? await run(() => ensureIssueItem(project.id, entry.issue!.number)) : null);
     if (item) await run(() => startWorkItem(project.id, item.id));
   };
-  const define = async () => {
+  const define = async (interactive = false) => {
     if (!entry.issue || defining) return;
     setDefining(true);
     setDefineError(null);
     try {
-      const session = await defineWorkIssue(project.id, entry.issue.number);
+      const session = await defineWorkIssue(project.id, entry.issue.number, interactive);
       useSessionsStore.getState().upsertSession(session);
-      navigate(sessionPath(session.projectId, session.id), { state: backLinkState({ to: '/todos', label: 'Planification' }) });
+      if (interactive) navigate(sessionPath(session.projectId, session.id), { state: backLinkState({ to: '/todos', label: 'Planification' }) });
     } catch (error) {
       setDefineError((error as Error).message || 'Could not create the definition session.');
     } finally {
       setDefining(false);
     }
+  };
+  const reopen = async (proposalId: string | null) => {
+    if (!await definition.reopen(proposalId)) return;
+    setReviewing(false);
+    await define(true);
   };
   return (
     <div>
@@ -68,8 +75,10 @@ export const WorkBoardCard = ({ project, entry, onOpen, onViewBoard }: WorkBoard
     {actionError ? <p role="alert" className="mx-1.5 rounded-control bg-danger-soft px-2 py-1.5 text-xs text-danger">{actionError}</p> : null}
     {reviewing && entry.issue ? <IssueDefinitionProposalDialog issueNumber={entry.issue.number} definition={definition.definition}
       busy={definition.busy || defining} error={definition.error} onAccept={(proposalId) => { void definition.accept(proposalId); }}
-      onReopen={(proposalId) => { void definition.reopen(proposalId); }} onDefine={() => { setReviewing(false); void define(); }}
+      onReopen={(proposalId) => { void reopen(proposalId); }} onDefine={() => { setReviewing(false); void define(true); }}
       onClose={() => { setReviewing(false); definition.clearError(); }} /> : null}
+    {definitionSession ? <p role="status" className="mx-1.5 text-xs text-info">{definitionSession.status === 'failed' ? 'Definition failed; reopen to retry.' : 'Defining issue…'}</p>
+      : definition.definition?.proposal ? <p role="status" className="mx-1.5 text-xs text-success">Proposal ready to review.</p> : null}
     {defineError ? <div role="alert" className="mt-1 flex items-center justify-between gap-2 rounded-control bg-danger-soft px-2 py-1.5 text-xs text-danger">
       <span>{defineError}</span><button type="button" className="font-semibold underline" onClick={() => { void define(); }}>Retry</button>
     </div> : null}

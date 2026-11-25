@@ -558,16 +558,21 @@ async def _definition_assignment(caller: Caller, project_id: UUID) -> Json:
 
 @router.post("/projects/{project_id}/work/issues/{number}/define", status_code=status.HTTP_201_CREATED)
 async def define_issue(project_id: UUID, number: int,
-                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+                       caller: Annotated[Caller, Depends(current_caller)],
+                       options: Annotated[Json, Body()] = {}) -> Json:
     """Create or reopen a scoped issue-definition conversation with an economical valid assignment."""
     for existing in get_registry().list_for(caller.player_id, project_id):
         if (existing.kind == "definition" and existing.definition_issue_number == number
                 and not existing.closing):
+            if options.get("interactive"):
+                existing.definition_auto_close = False
             return existing.to_payload().model_dump(mode="json")
     async with _lock_for(_project_locks, project_id):
         for existing in get_registry().list_for(caller.player_id, project_id):
             if (existing.kind == "definition" and existing.definition_issue_number == number
                     and not existing.closing):
+                if options.get("interactive"):
+                    existing.definition_auto_close = False
                 return existing.to_payload().model_dump(mode="json")
         issue_result = await mooi.fetch_issues(caller, project_id)
         issue = next((row for row in issue_result.get("issues", []) if row.get("number") == number), None)
@@ -577,6 +582,11 @@ async def define_issue(project_id: UUID, number: int,
             raise ApiException.conflict("Only open issues can be defined")
         if issue.get("definitionState") == "DEFINED":
             raise ApiException.conflict("This issue already has an accepted definition")
+        current_definition = await mooi.send_work(
+            caller, "GET", project_id, f"/issues/{number}/definition", github=True
+        ) or {}
+        if current_definition.get("proposal") and not options.get("interactive"):
+            raise ApiException.conflict("This issue already has a proposal; review or reopen it")
         title = str(issue.get("title") or f"Issue #{number}")
         body = str(issue.get("body") or "")
         url = str(issue.get("htmlUrl") or "")
@@ -586,8 +596,9 @@ async def define_issue(project_id: UUID, number: int,
             "Read the repository without changing any files. Analyze whether this report is real and valid; "
             "clarify its scope and verifiable acceptance criteria; decide whether it is a defect or improvement; "
             "use `kind: debt` for an Improvement because that is the compatible API identifier; "
-            "and recommend whether it should be split into issues or promoted to a feature. Discuss and iterate "
-            "with the user. Do not edit GitHub issues or create/update items or features. You may refine an "
+            "and recommend whether it should be split into issues or promoted to a feature. For this initial "
+            "background analysis, inspect the repository and save your best reviewable proposal without waiting "
+            "for discussion. Do not edit GitHub issues or create/update items or features. You may refine an "
             "existing task belonging to this issue while it is NEW through the scoped task PATCH endpoint; "
             "never change another item's tasks. Read docs/issue-definitions.md for the proposal contract. Read "
             "the current definition using the scoped session API, then save a reviewable proposal through its "
@@ -598,6 +609,7 @@ async def define_issue(project_id: UUID, number: int,
         session = await sessions._open_session(CreateSessionRequest(
             projectId=project_id, provider=assignment["provider"], connectionId=assignment["connectionId"],
             model=assignment["model"], effort=assignment["effort"], kind="definition",
+            definitionAutoClose=not bool(options.get("interactive")),
             definitionIssueNumber=number, initialMessage=initial_message,
         ), caller)
         return session.to_payload().model_dump(mode="json")

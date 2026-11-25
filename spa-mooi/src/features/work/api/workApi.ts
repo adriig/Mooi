@@ -128,9 +128,9 @@ export const ensureIssueItem = (projectId: string, number: number) =>
   send<WorkItem>(workPath(projectId, `/issues/${number}/item`), 'PUT', 'Could not prepare this issue to run.');
 
 /** Opens or resumes the issue's scoped definition conversation with a server-selected assignment. */
-export const defineWorkIssue = (projectId: string, number: number) =>
+export const defineWorkIssue = (projectId: string, number: number, interactive = false) =>
   send<Session>(workPath(projectId, `/issues/${number}/define`), 'POST',
-    'Could not open the definition session.');
+    'Could not open the definition session.', { interactive });
 
 export interface IssueDefinitionResult {
   definition: IssueDefinition;

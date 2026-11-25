@@ -243,6 +243,8 @@ class CreateSessionRequest(BaseModel):
     effort: str | None = None
     kind: SessionKind = "session"
     definitionIssueNumber: int | None = Field(default=None, ge=1)
+    # Initial NEW-issue analysis runs unattended; reopened conversations are user-owned.
+    definitionAutoClose: bool = False
     # Delivered as the first user message once the agent is ready, exactly as if the user sent it.
     initialMessage: str | None = Field(default=None, min_length=1, max_length=100_000)
 
@@ -875,6 +877,7 @@ class Session:
     # Observability over the provider's native logs, one entry per conversation (Trace tab).
     trace: traces.SessionTrace = field(default_factory=traces.SessionTrace, repr=False)
     agent_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
+    definition_auto_close: bool = False
     # The agent acts for its session's latest caller on the token-guarded agent endpoints.
     agent_caller: Caller | None = field(default=None, repr=False)
     # The chat's documents passed their real test since its last draft: it may be closed.
@@ -1191,6 +1194,8 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         if session.status in (STATUS_FAILED, "closed"):
             session.interactions.clear()
             session.pending = None
+            if session.status == STATUS_FAILED and session.kind == "definition" and session.definition_auto_close:
+                asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(close_session(session.id)))
     elif type_ in (EVENT_PERMISSION_REQUEST, EVENT_QUESTION_REQUEST):
         kind = PENDING_KIND_PERMISSION if type_ == EVENT_PERMISSION_REQUEST else PENDING_KIND_QUESTION
         session.status = STATUS_WAITING
@@ -1206,6 +1211,8 @@ def record(session: Session, type_: str, data: dict[str, Any]) -> Event:
         session.pending = None
         session.interactions.clear()
         session.turn_id = None
+        if session.kind == "definition" and session.definition_auto_close:
+            asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(close_session(session.id)))
     elif type_ == EVENT_SESSION_CLEARED:
         session.pending = None
         session.interactions.clear()
@@ -1538,6 +1545,7 @@ async def _open_session(body: CreateSessionRequest, caller: Caller, *,
     session.adapter = adapter.id
     session.agent_caller = caller
     session.definition_issue_number = body.definitionIssueNumber
+    session.definition_auto_close = body.definitionAutoClose
     project = await mooi.fetch_project(caller, body.projectId)
     session.project_full_name = project.full_name
     session.base_branch = project.default_branch
@@ -1628,6 +1636,8 @@ async def _provision(session: Session, caller: Caller, project: mooi.Project,
         if recovery and isinstance(failure, ApiException):
             detail = "Task recovery could not be restored safely; the saved branch or snapshot is unavailable."
         _record_status(session, STATUS_FAILED, detail)
+        if session.kind == "definition" and session.definition_auto_close:
+            await close_session(session.id)
     finally:
         LOG.info("Session %s provisioning finished in %.0f ms", session.id, (time.perf_counter() - started_at) * 1000)
 
