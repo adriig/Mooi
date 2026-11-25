@@ -1054,6 +1054,7 @@ async def _tick() -> None:
         if saved <= started and item_id not in _advancing:
             del _saved[item_id]
     entries = await mooi.fetch_running_work()
+    # Each player's session limit, fetched once per tick and shared by every item advanced in it.
     session_limits: dict[UUID, int] = {}
     synchronized: dict[UUID, asyncio.Task[Json | None]] = {}
     for entry in entries:
@@ -1119,10 +1120,10 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     if item.get("status") not in ("running", "paused"):
         return
     item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
-    limits: Json = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
+    settings: Json = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
     for run in _runs.values():
         if run.item_id == item_id:
-            run.limits = limits
+            run.limits = settings
     caller = await _caller(item_id, player_id, entry.get("authSessionId"))
     if caller is None:
         return
@@ -1150,7 +1151,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             adopted = run is None
             if run is None:
                 recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
-                run = _adopt(item, task, live, player_id, limits, recovery=recovery)
+                run = _adopt(item, task, live, player_id, settings, recovery=recovery)
                 # This workspace is already alive; only its runner metadata was lost.
                 run.recovery_expected = False
             if live.status == STATUS_FAILED:
@@ -1217,7 +1218,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
         # `attempts` never rewinds (snapshots are keyed by it); Retry and Start move `attemptsBase` instead.
         attempts = task["attempts"] + 1
-        if attempts - task.get("attemptsBase", 0) > limits["maxAttempts"]:
+        if attempts - task.get("attemptsBase", 0) > settings["maxAttempts"]:
             problem = _recovery_problem(recovery)
             detail = "Its session ended several times before finishing. Start the item again to retry."
             if problem:
@@ -1247,7 +1248,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
         if not await _has_room(caller, player_id, session_limits):
             await _wait(task, "Waiting for a free session")
             continue
-        await _launch(item, task, caller, player_id, limits, recovery=recoveries.get(task["id"]))
+        await _launch(item, task, caller, player_id, settings, recovery=recoveries.get(task["id"]))
 
 
 async def _dependency_done(caller: Caller, item: Json) -> bool:
@@ -1256,22 +1257,22 @@ async def _dependency_done(caller: Caller, item: Json) -> bool:
     return other is None or other["status"] == "done"
 
 
-async def _has_room(caller: Caller, player_id: UUID, limits: dict[UUID, int]) -> bool:
-    if player_id not in limits:
-        limits[player_id] = await mooi.fetch_session_limit(caller)
+async def _has_room(caller: Caller, player_id: UUID, session_limits: dict[UUID, int]) -> bool:
+    if player_id not in session_limits:
+        session_limits[player_id] = await mooi.fetch_session_limit(caller)
     registry = get_registry()
     return (registry.count() < get_settings().max_sessions
-            and registry.owned(player_id) < limits[player_id])
+            and registry.owned(player_id) < session_limits[player_id])
 
 
-def _adopt(item: Json, task: Json, session: Session, player_id: UUID, limits: Json, *,
+def _adopt(item: Json, task: Json, session: Session, player_id: UUID, settings: Json, *,
            recovery: Json | None = None) -> TaskRun:
     run = TaskRun(session_id=session.id, item_id=UUID(item["id"]), task_id=UUID(task["id"]),
                   project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
                   title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
                   attempts=task["attempts"],
                   qa_rounds=task.get("qaRounds", 0),
-                  status=task["status"], phase="review" if task["status"] == "review" else "working", limits=limits,
+                  status=task["status"], phase="review" if task["status"] == "review" else "working", limits=settings,
                   recovered=recovery is not None, recovery_expected=recovery is not None)
     if run.qa and task.get("status") not in ("planned", "queued") and isinstance(task.get("qaReport"), dict):
         try:
@@ -1301,7 +1302,7 @@ async def _wait(task: Json, reason: str) -> None:
         await _report(task, "queued", report=reason)
 
 
-async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limits: Json, *,
+async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, settings: Json, *,
                   recovery: Json | None = None) -> None:
     if recovery is None and not (task.get("qaOf") and task["status"] in ("planned", "queued")):
         source_attempt = max(0, task["attempts"] - 1) if task["attempts"] else 0
@@ -1317,7 +1318,7 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
             await _report(task, "attention", session_id=None,
                           report="Saved QA findings are incomplete; they cannot be safely recreated from the summary.")
             return
-    assignment = await _assign(caller, task, _quota_limit(limits))
+    assignment = await _assign(caller, task, _quota_limit(settings))
     if assignment is None:
         await _wait(task, "Waiting for an account with the requested model and quota left")
         return
@@ -1360,7 +1361,7 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, limit
     run_task = {**task, "status": launch_status}
     if task["status"] in ("planned", "queued"):
         run_task["qaReport"] = None
-    run = _adopt(item, run_task, session, player_id, limits, recovery=recovery)
+    run = _adopt(item, run_task, session, player_id, settings, recovery=recovery)
     updated = await _report(task, launch_status, session_id=session.id, attempts=task["attempts"],
                             assignment=assignment,
                             report=(f"Resuming saved progress: {_handoff_text(recovery.get('summary') or recovery.get('nextStep') or 'restored task state')}"
