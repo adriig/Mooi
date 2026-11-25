@@ -4340,7 +4340,10 @@ class OpenCodeAcpAgentRuntime:
         elif kind == "usage_update":
             used, size = update.get("used"), update.get("size")
             if isinstance(used, int) and isinstance(size, int) and size > 0:
-                await self._emit("session.usage", {"context": {"used": used, "size": size}})
+                # The shared context KPI shape: the session meters and the factory's handoff read it.
+                await self._emit("session.usage", {"context": {
+                    "percent": used / size * 100, "usedTokens": used, "limitTokens": size,
+                    "updatedAt": time.time()}})
         elif kind == "session_info_update":
             metadata = update.get("_meta") if isinstance(update.get("_meta"), Mapping) else {}
             retry = metadata.get("opencode/retry")

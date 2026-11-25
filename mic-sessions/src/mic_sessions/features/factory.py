@@ -1087,7 +1087,10 @@ class TaskRun:
     auto_merge: bool
     issue_number: int | None
     attempts: int
+    # The task's visible report as last saved, kept by progress-only saves.
+    report: str | None = None
     segments: int = 0
+    # Consecutive turns or segments that ended with no result and no change since `last_snapshot_revision`.
     stalled_segments: int = 0
     last_snapshot_revision: str | None = None
     context_handoff: str | None = None
@@ -1472,6 +1475,7 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
         session_id = session_id if session_id is not None else run_or_task.session_id
         attempts = run_or_task.attempts if attempts is None else attempts
         run_or_task.status = status_
+        run_or_task.report = report
     else:
         task_id, player_hint = UUID(run_or_task["id"]), None
         attempts = run_or_task.get("attempts", 0) if attempts is None else attempts
@@ -1751,8 +1755,10 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             continue
         _runs.pop(UUID(session_id), None)
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"], task.get("segments", 0))
-        if task.get("contextHandoff") == "handoff":
-            # Complete a durable handoff after a runner restart between close and queue.
+        if task.get("contextHandoff") in ("requested", "checkpoint", "forced", "handoff"):
+            # Complete a durable handoff after a runner restart between close and queue. A session lost
+            # while its checkpoint was pending was being cut anyway: it continues from the last saved
+            # snapshot as a new segment, consuming no attempt.
             item = await _queue_context_continuation(task, recovery, settings)
             tasks = item.get("tasks", tasks)
             continue
@@ -1816,7 +1822,7 @@ def _adopt(item: Json, task: Json, session: Session, player_id: UUID, settings: 
     run = TaskRun(session_id=session.id, item_id=UUID(item["id"]), task_id=UUID(task["id"]),
                   project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
                   title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
-                  attempts=task["attempts"],
+                  attempts=task["attempts"], report=task.get("report"),
                   segments=task.get("segments", 0), stalled_segments=task.get("stalledSegments", 0),
                   last_snapshot_revision=task.get("lastSnapshotRevision"),
                   context_handoff=task.get("contextHandoff"),
@@ -2334,6 +2340,8 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
         _background(_set_status(run, "attention", "The agent is waiting for your answer in its session"))
     elif ((type_ in (EVENT_QUESTION_RESOLVED, EVENT_PERMISSION_RESOLVED) and session.pending is None)
           or (type_ == "message.user" and run.status == "attention")):
+        if type_ == "message.user":
+            run.stalled_segments = 0  # The user stepped in: count turns without progress afresh.
         _background(_set_status(run, "running", None))
     elif type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_FAILED:
         _background(_set_status(run, "attention", "Its session failed: reconnect it from the session page"))
@@ -2417,9 +2425,33 @@ async def _queue_context_continuation(task: Json, recovery: Json | None,
             "lastSnapshotRevision": revision, "contextHandoff": "resume"}
     limit = (limits or DEFAULT_LIMITS)["stallTurns"]
     status_ = "attention" if stalled >= limit else "queued"
-    reason = (f"Sin progreso tras {stalled} tramos" if status_ == "attention"
+    reason = (_no_progress(stalled, "tramos") if status_ == "attention"
               else f"Continuación por contexto, tramo {task['segments'] + 1}")
     return await _report(task, status_, clear_session=True, report=reason)
+
+
+def _no_progress(count: int, unit: str) -> str:
+    return f"No progress: sin progreso tras {count} {unit} consecutivos"
+
+
+async def _track_turn_progress(run: TaskRun, saved: Json | None) -> bool:
+    """Counts a turn that ended with no result against `stallTurns`, sharing the count with segments:
+    a turn whose snapshot revision did not change is one more without progress, any change restarts it.
+    True once the task waits for the user."""
+    if saved is None:
+        return False  # No fresh capture: the revision says nothing about this turn's progress.
+    revision = saved["snapshotRevision"]
+    unchanged = revision == run.last_snapshot_revision or (
+        run.last_snapshot_revision is None and not saved.get("files"))
+    stalled = run.stalled_segments + 1 if unchanged else 0
+    if stalled == run.stalled_segments and revision == run.last_snapshot_revision:
+        return False
+    run.stalled_segments, run.last_snapshot_revision = stalled, revision
+    if stalled >= run.limits["stallTurns"]:
+        await _save(run, "attention", report=_no_progress(stalled, "turnos"))
+        return True
+    await _save(run, run.status, report=run.report)
+    return False
 
 
 async def _handoff_context(run: TaskRun) -> None:
@@ -2481,12 +2513,13 @@ def _qa_delivery_payload(report: TaskReport) -> Json:
 
 
 async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskReport | None = None,
-                            final_summary: str | None = None, final_outcome: str | None = None) -> None:
+                            final_summary: str | None = None, final_outcome: str | None = None) -> Json | None:
     """Capture one end-of-turn/handoff snapshot and persist its revisioned metadata for recovery_runner.
 
     The object bundle stays in workspaces' private store. Only opaque revision and compact, scrubbed
     metadata cross to mic-mooi. A failed capture is persisted as invalid evidence so no consumer can
-    mistake missing/corrupt data for a recoverable workspace.
+    mistake missing/corrupt data for a recoverable workspace. Returns the saved metadata when this
+    capture succeeded, None when it failed (whether or not an older valid snapshot was kept).
     """
     async with run.recovery_lock:
         existing = await _task_recovery(run.task_id, run.attempts)
@@ -2517,6 +2550,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             revision = snapshot.snapshot_revision
             saved_files = snapshot.files
             valid, reason = True, None
+            captured = True
         except ApiException as failure:
             # The agent report remains durable, but an unavailable/unsafe snapshot is explicitly unusable.
             inspection = await workspaces.inspect(session.workspace)
@@ -2527,6 +2561,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             saved_files = []
             valid = False
             reason = _handoff_text(failure.message)[:2000] or "Recovery snapshot could not be validated"
+            captured = False
         if report is None and existing:
             outcome = outcome or existing.get("reportedOutcome")
             title = title or existing.get("reportedTitle")
@@ -2555,7 +2590,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             preparation = _handoff_text(existing.get("reportedPreparation") or "")
             valid = True
             reason = existing.get("validityReason")
-        await mooi.save_task_recovery(run.task_id, {
+        saved: Json = {
             "attempt": run.attempts,
             "segment": run.segments,
             "branch": branch,
@@ -2574,7 +2609,9 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             "reportedPreparation": preparation or None,
             "snapshotValid": valid,
             "validityReason": reason,
-        })
+        }
+        await mooi.save_task_recovery(run.task_id, saved)
+        return saved if captured else None
 
 
 async def _before_workspace_cleanup(session: Session) -> None:
@@ -2646,7 +2683,7 @@ async def _settle_turn(run: TaskRun) -> None:
             or run.handing_off or run.quota_pausing):
         return
     try:
-        await _persist_recovery(run, session, report=run.outcome)
+        saved = await _persist_recovery(run, session, report=run.outcome)
         if not _current(run) or session.closing or run.handing_off or run.quota_pausing:
             return
         if run.phase == "working" and run.status == "running":
@@ -2660,6 +2697,9 @@ async def _settle_turn(run: TaskRun) -> None:
             if run.outcome is None:
                 await _check_context(run)
                 if run.context_handoff or session.closing or run.quota_pausing:
+                    return
+                # Turns cut for a checkpoint are not counted: their segment is, once it hands off.
+                if await _track_turn_progress(run, saved):
                     return
         if session.queue:
             return
