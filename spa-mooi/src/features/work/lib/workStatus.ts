@@ -21,6 +21,7 @@ export const TASK_STATUS: Record<WorkTaskStatus | 'blocked', { label: string; to
   review: { label: 'Awaiting merge', tone: 'warning' },
   attention: { label: 'Needs you', tone: 'danger' },
   done: { label: 'Done', tone: 'success' },
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
 };
 
 export const CHANGE_STATUS: Record<WorkChangeStatus, { label: string; tone: Tone }> = {

@@ -1780,6 +1780,13 @@ async def _tick() -> None:
         if changed_item:
             _touch(UUID(changed_item["id"]))
         _publish_item(UUID(changed["playerId"]), changed_item)
+        # The API terminally reconciles done items and returns their former session ids so this
+        # process can close any still-live agent sessions, including sessions left by an old runner.
+        for session_id in changed.get("sessionsToClose") or []:
+            parsed_id = UUID(str(session_id))
+            _runs.pop(parsed_id, None)
+            with suppress(Exception):
+                await sessions.close_session(parsed_id)
     started = _generation
     for item_id, saved in list(_saved.items()):
         if saved <= started and item_id not in _advancing:
@@ -1869,6 +1876,11 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     # A missing session is resumable only from a validated durable snapshot. Never turn a lost
     # workspace into a clean launch: the user gets an explicit attention state instead.
     for task in tasks:
+        if task["status"] == "running" and not task.get("sessionId"):
+            item = await _report(task, "attention", clear_session=True,
+                                 report="Task was marked running without a live session; attention is required")
+            tasks = item.get("tasks", tasks)
+            continue
         if _clean_restart_pending(task):
             continue
         session_id = task.get("sessionId")

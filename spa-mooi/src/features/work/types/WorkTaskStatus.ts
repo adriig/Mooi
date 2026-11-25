@@ -1,6 +1,7 @@
 /**
  * `planned`: waiting for its dependencies or the item's start; `queued`: unblocked, waiting for a free
  * session or an account with quota; `merging`: its work is being merged; `review`: waiting for the
- * player's merge; `attention`: waiting for the player; `done`: merged, or for QA, its criteria are met.
+ * player's merge; `attention`: waiting for the player; `done`: merged, or for QA, its criteria are met;
+ * `cancelled`: the parent item finished before this task did.
  */
-export type WorkTaskStatus = 'planned' | 'queued' | 'running' | 'merging' | 'review' | 'attention' | 'done';
+export type WorkTaskStatus = 'planned' | 'queued' | 'running' | 'merging' | 'review' | 'attention' | 'done' | 'cancelled';

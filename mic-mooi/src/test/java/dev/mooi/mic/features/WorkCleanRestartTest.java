@@ -79,6 +79,24 @@ class WorkCleanRestartTest {
     }
 
     @Test
+    void reconcilesDoneItemsByCancellingUnfinishedTasksAndReturningTheirSessionsForClosure() {
+        UUID liveSession = UUID.randomUUID();
+        item.setStatus(ItemStatus.done);
+        task.setStatus(TaskStatus.running);
+        task.setSessionId(liveSession);
+        when(items.findByStatusIn(List.of(ItemStatus.done))).thenReturn(List.of(item));
+        when(changes.findItemIdsByStatus(ChangeStatus.analyzing)).thenReturn(List.of());
+
+        var result = work.reconcileChanges(java.util.Set.of(liveSession), java.util.Set.of());
+
+        assertEquals(TaskStatus.cancelled, task.getStatus());
+        assertNull(task.getSessionId());
+        assertEquals(List.of(liveSession), result.items().getFirst().sessionsToClose());
+        assertEquals(TaskStatus.cancelled, result.items().getFirst().item().tasks().getFirst().status());
+        verify(tasks).saveAll(List.of(task));
+    }
+
+    @Test
     void repeatedDecisionIsAStableConflictAndCannotReenableEvidence() {
         work.restartCleanTask(owner, project, itemId, task.getId());
         var first = assertThrows(ResponseStatusException.class,
@@ -130,7 +148,9 @@ class WorkCleanRestartTest {
         item.setStatus(ItemStatus.running);
         work.progress(task.getId(), launchProgress(TaskStatus.attention, null));
         assertEquals("clean_restart", task.getRecoveryDisposition());
-        work.progress(task.getId(), launchProgress(TaskStatus.running, null));
+        assertEquals(409, assertThrows(ResponseStatusException.class,
+                () -> work.progress(task.getId(), launchProgress(TaskStatus.running, null)))
+                .getStatusCode().value());
         assertEquals("clean_restart", task.getRecoveryDisposition());
         work.progress(task.getId(), launchProgress(TaskStatus.running, session));
         assertEquals(session, task.getSessionId());

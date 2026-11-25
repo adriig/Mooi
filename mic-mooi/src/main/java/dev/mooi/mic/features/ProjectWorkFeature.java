@@ -423,7 +423,7 @@ public class ProjectWorkFeature {
         private static final String ISSUE_CLOSED_REPORT =
                 "Cancelled because the GitHub issue was closed before this task started.";
         private static final Set<TaskStatus> STARTED = Set.of(TaskStatus.running, TaskStatus.merging,
-                TaskStatus.review, TaskStatus.done);
+                TaskStatus.review, TaskStatus.done, TaskStatus.cancelled);
 
         private final WorkProjectRepository projects;
         private final WorkItemRepository items;
@@ -492,6 +492,31 @@ public class ProjectWorkFeature {
         @Transactional
         public RunningPayload reconcileChanges(Set<UUID> liveSessions, Set<UUID> advancingItems) {
             List<RunnerItem> changed = new ArrayList<>();
+            // A done item is terminal. Older issue-close and runner paths could leave unfinished
+            // tasks (and their sessions) attached to it, so reconcile those rows on every runner tick.
+            for (WorkItem candidate : items.findByStatusIn(List.of(ItemStatus.done))) {
+                if (advancingItems.contains(candidate.getId())) continue;
+                WorkItem item = items.findLockedById(candidate.getId()).orElse(null);
+                if (item == null || item.getStatus() != ItemStatus.done) continue;
+                List<WorkTask> all = tasks.findByItemId(item.getId());
+                List<UUID> sessionsToClose = all.stream().map(WorkTask::getSessionId)
+                        .filter(java.util.Objects::nonNull).distinct().toList();
+                boolean dirty = all.stream().anyMatch(task -> (task.getStatus() != TaskStatus.done
+                        && task.getStatus() != TaskStatus.cancelled)
+                        || task.getSessionId() != null);
+                if (!dirty) continue;
+                OffsetDateTime now = OffsetDateTime.now(clock);
+                for (WorkTask task : all) {
+                    if (task.getStatus() != TaskStatus.done && task.getStatus() != TaskStatus.cancelled) {
+                        task.setStatus(TaskStatus.cancelled);
+                        task.setReport("Work item is done; unfinished task was cancelled");
+                        task.setFinishedAt(now);
+                    }
+                    task.setSessionId(null);
+                }
+                tasks.saveAll(all);
+                changed.add(runnerItem(item, all, sessionsToClose));
+            }
             // Include paused items and revoked callers: reconciliation needs no user's live grant.
             List<UUID> itemIds = changes.findItemIdsByStatus(ChangeStatus.analyzing);
             for (UUID itemId : itemIds) {
@@ -960,7 +985,8 @@ public class ProjectWorkFeature {
             // Only an explicit Start revives tasks cancelled by closing and reopening an issue.
             all.stream().filter(task -> task.getSessionId() == null
                             && (task.getStatus() == TaskStatus.attention
-                                || (task.getStatus() == TaskStatus.done && ISSUE_CLOSED_REPORT.equals(task.getReport()))))
+                                || ((task.getStatus() == TaskStatus.done || task.getStatus() == TaskStatus.cancelled)
+                                    && ISSUE_CLOSED_REPORT.equals(task.getReport()))))
                     .forEach(task -> {
                         task.setStatus(TaskStatus.planned);
                         task.setAttemptsBase(task.getAttempts());
@@ -1009,7 +1035,7 @@ public class ProjectWorkFeature {
                     .filter(item -> definitionState(item) == DefinitionState.DEFINED && executable(item))
                     .map(item -> new RunnerItem(owners.get(item.getProjectId()), item.getRunnerAuthSessionId(),
                             limits.getOrDefault(item.getProjectId(), WorkSettingsPayload.DEFAULTS),
-                            toPayload(item, byItem.getOrDefault(item.getId(), List.of()))))
+                            toPayload(item, byItem.getOrDefault(item.getId(), List.of())), List.of()))
                     .toList());
         }
 
@@ -1060,6 +1086,9 @@ public class ProjectWorkFeature {
                 return runnerItem(item, all);
             }
             task = find(all, taskId);
+            if (progress.status() == TaskStatus.running && progress.sessionId() == null) {
+                throw conflict("A running task must have a live session");
+            }
             if (task.getDiscardedAttempt() != null && progress.attempts() <= task.getDiscardedAttempt()) {
                 throw conflict("Task progress belongs to an explicitly discarded attempt");
             }
@@ -1130,6 +1159,8 @@ public class ProjectWorkFeature {
                             ChangeStatus.analyzing, ChangeStatus.awaiting_confirmation))) {
                 item.setStatus(ItemStatus.done);
                 item.setFinishedAt(now);
+                finishTasks(all, now, "Work item is done; unfinished task was cancelled");
+                tasks.saveAll(all);
             }
             items.save(touch(item));
             return runnerItem(item, all);
@@ -1438,6 +1469,9 @@ public class ProjectWorkFeature {
                     ? pauseReason.strip() : null);
             if (status == ItemStatus.done) {
                 item.setFinishedAt(OffsetDateTime.now(clock));
+                List<WorkTask> all = tasks.findByItemId(itemId);
+                finishTasks(all, item.getFinishedAt(), "Work item is done; unfinished task was cancelled");
+                tasks.saveAll(all);
             }
             recomputeDeployment(item, tasks.findByItemId(itemId));
             items.save(item);
@@ -1466,15 +1500,7 @@ public class ProjectWorkFeature {
                 if (item.getFinishedAt() == null) {
                     item.setFinishedAt(issue.closedAt() == null ? now : issue.closedAt());
                 }
-                for (WorkTask task : all) {
-                    // Attached sessions finish normally; their late reports cannot revive this item.
-                    if (task.getSessionId() == null && (task.getStatus() == TaskStatus.planned
-                            || task.getStatus() == TaskStatus.queued || task.getStatus() == TaskStatus.attention)) {
-                        task.setStatus(TaskStatus.done);
-                        task.setReport(ISSUE_CLOSED_REPORT);
-                        task.setFinishedAt(now);
-                    }
-                }
+                finishTasks(all, now, ISSUE_CLOSED_REPORT);
                 tasks.saveAll(all);
             } else if (item.isIssueClosed() || (explicitlyReopened && item.getStatus() == ItemStatus.done)) {
                 item.setIssueClosed(false);
@@ -1729,10 +1755,25 @@ public class ProjectWorkFeature {
         }
 
         private RunnerItem runnerItem(WorkItem item, List<WorkTask> all) {
+            return runnerItem(item, all, List.of());
+        }
+
+        private RunnerItem runnerItem(WorkItem item, List<WorkTask> all, List<UUID> sessionsToClose) {
             UUID playerId = projects.findById(item.getProjectId()).map(WorkProject::getPlayerId).orElse(null);
             WorkSettingsPayload limits = settings.findById(item.getProjectId()).map(WorkService::toPayload)
                     .orElse(WorkSettingsPayload.DEFAULTS);
-            return new RunnerItem(playerId, item.getRunnerAuthSessionId(), limits, toPayload(item, all));
+            return new RunnerItem(playerId, item.getRunnerAuthSessionId(), limits, toPayload(item, all), sessionsToClose);
+        }
+
+        private static void finishTasks(List<WorkTask> all, OffsetDateTime now, String report) {
+            for (WorkTask task : all) {
+                if (task.getStatus() != TaskStatus.done) {
+                    task.setStatus(TaskStatus.cancelled);
+                    task.setReport(report);
+                    task.setFinishedAt(now);
+                }
+            }
+            // The caller persists the same collection in its normal transaction.
         }
 
         private RecoveryDisposition recoveryDisposition(WorkTask task, Map<UUID, TaskRecovery> currentRecovery) {
@@ -3196,7 +3237,7 @@ public class ProjectWorkFeature {
      * merged; {@code review}: waiting for the player's merge or Resume; {@code attention}: the player must
      * answer or decide; {@code done}: merged, or for QA, its acceptance criteria are met.
      */
-    public enum TaskStatus { planned, queued, running, merging, review, attention, done }
+    public enum TaskStatus { planned, queued, running, merging, review, attention, done, cancelled }
 
     public enum IssueState { open, closed }
 
@@ -3431,7 +3472,8 @@ public class ProjectWorkFeature {
         static final WorkSettingsPayload DEFAULTS = new WorkSettingsPayload(85, 3, 3, 2, 60, 3);
     }
 
-    public record RunnerItem(UUID playerId, UUID authSessionId, WorkSettingsPayload settings, ItemPayload item) {
+    public record RunnerItem(UUID playerId, UUID authSessionId, WorkSettingsPayload settings, ItemPayload item,
+                             List<UUID> sessionsToClose) {
     }
 
     public record RunningPayload(List<RunnerItem> items) {

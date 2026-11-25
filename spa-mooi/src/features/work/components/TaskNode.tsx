@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { AlertCircle, CheckCircle2, Clock, GitMerge, Loader2, Lock, RotateCcw } from 'lucide-react';
+import { AlertCircle, Ban, CheckCircle2, Clock, GitMerge, Loader2, Lock, RotateCcw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
 import { NODE_HEIGHT, NODE_WIDTH } from '@/features/work/lib/layoutTaskGraph';
@@ -27,7 +27,7 @@ export type TaskFlowNode = Node<TaskNodeData, 'task'>;
 
 const STATE_ICON = {
   planned: Clock, blocked: Lock, queued: Clock, running: Loader2, merging: GitMerge, review: GitMerge,
-  attention: AlertCircle, done: CheckCircle2,
+  attention: AlertCircle, done: CheckCircle2, cancelled: Ban,
 };
 
 /**
