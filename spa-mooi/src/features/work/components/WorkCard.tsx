@@ -63,6 +63,13 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
         </span>
       </button>
 
+      {tasks.filter((task) => task.contextHandoff || task.status === 'attention').map((task) => (
+        task.report ? <span key={task.id} className="line-clamp-2 px-1.5 text-[12px] text-warning"
+          title={`${task.title}: ${task.report}`}>
+          {task.title} · Segment {(task.segments ?? 0) + 1}: {task.report}
+        </span> : null
+      ))}
+
       {entry.item?.status === 'paused' ? (
         <div className="flex flex-col gap-1 px-1.5">
           <span><Badge tone="warning">Paused</Badge></span>

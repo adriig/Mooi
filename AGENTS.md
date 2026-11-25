@@ -238,8 +238,12 @@ in Planification, the Board and the task editor.
   checkpoint (state, next step, files), saves the recovery snapshot and continues the task in a new session
   restored from it. A handoff starts a new **segment** of the same attempt and consumes no attempt. Past the
   threshold plus 15 points with no checkpoint, the runner cuts the session and hands off from the last snapshot.
+  The checkpoint uses `outcome: continue`; the request, segment count and snapshot segment are durable.
+  Handoffs never interrupt merging, conflict resolution or review. The next brief includes the previous handoff.
 - **No-progress detection**: when `stallTurns` consecutive segments or turns end with an unchanged snapshot
   revision and no result, the task moves to attention with reason "No progress".
+  Unchanged recoverable content reuses its snapshot revision; context continuations retain the consecutive
+  stalled segment count across runner restarts and show "Sin progreso tras N tramos" when the limit is reached.
 - **Cross-verification**: a development `done` with no real changes against its base is rejected: the agent is
   warned once, then the task moves to attention. Reported files that did not change are noted in the handoff.
 - **Quota pause and resume**: when a running session hits the provider limit, the runner saves a snapshot, closes

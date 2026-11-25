@@ -63,7 +63,7 @@ from mic_sessions.features.sessions import (
     get_registry,
 )
 from mic_sessions.shared import mooi, workspaces
-from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED, STATUS_READY
+from mic_sessions.shared.agents import PROVIDERS, STATUS_FAILED, STATUS_READY, STATUS_WAITING, STATUS_WORKING
 from mic_sessions.shared.auth import Caller, current_caller
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared.web import ApiException
@@ -451,7 +451,7 @@ class TaskFinding(BaseModel):
 class TaskReport(BaseModel):
     """What a factory task's agent reports once its turn's work is over."""
 
-    outcome: Literal["done", "blocked", "passed", "defect"]
+    outcome: Literal["done", "blocked", "passed", "defect", "continue"]
     summary: str = Field(default="", max_length=20_000)
     # A defect only: short legacy name; `summary` then holds steps, expected and actual behaviour.
     title: str | None = Field(default=None, max_length=200)
@@ -732,7 +732,9 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
     run = _runs.get(session_id)
     if run is None:
         raise ApiException.conflict("This session does not run a factory task")
-    if run.qa != (report.outcome in ("passed", "defect")) and report.outcome != "blocked":
+    if (run.phase != "working" or run.status != "running") and report.outcome == "continue":
+        raise ApiException.conflict("Context checkpoints are unavailable during merge or review")
+    if run.qa != (report.outcome in ("passed", "defect")) and report.outcome not in ("blocked", "continue"):
         raise ApiException.bad_request("A QA task reports passed or defect; a development task reports done")
     if report.outcome == "defect" and not report.findings and not (report.title or "").strip():
         raise ApiException.bad_request("Provide findings or name the defect in `title`")
@@ -740,9 +742,9 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
         raise ApiException.bad_request("Finding ids must be unique within a delivery")
     if report.outcome == "blocked" and not (report.blockerCause or report.summary).strip():
         raise ApiException.bad_request("Explain the blocker in `blockerCause` or `summary`")
-    if report.outcome in ("done", "passed") and not report.summary.strip():
+    if report.outcome in ("done", "passed", "continue") and not report.summary.strip():
         raise ApiException.bad_request("Provide a summary of the completed work")
-    if run.qa:
+    if run.qa and report.outcome != "continue":
         persisted = await mooi.report_task(run.task_id, {
             "status": "running",
             "sessionId": str(session_id),
@@ -842,6 +844,7 @@ This session runs one task of the project's software factory, on its own; there 
 - Spec access: `GET {root}/work/agent/context` returns only this item's spec index and revision; add `?section=<number>&revision=<revision>` for one complete section or `?full=true` for the entire unabridged spec. Use this instead of downloading the project's work list. If a revision changed, reload the index.
 {branch_guidance}
 - When reporting development work, include `nextStep`, `files`, `verifications`, `preparation` requirements for independent QA, and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
+- When the runner requests a context checkpoint, commit eligible work locally (never push), then report `{{"outcome":"continue","summary":"<state>","nextStep":"<next action>","files":[],"verifications":[],"obstacles":[]}}` and end the turn. QA remains read-only and reports its progress without committing.
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
 - Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
@@ -958,6 +961,11 @@ DEFAULT_LIMITS: Json = {"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "m
 NUDGE = ("Your turn ended without reporting this factory task's outcome. Finish the task if anything is left, "
          "then report it as your Software factory task instructions say.")
 
+CHECKPOINT = ("Context checkpoint requested by the software factory. Stop implementation, commit eligible work "
+              "locally without pushing (QA stays read-only), and POST a task report with outcome `continue`, "
+              "summary, nextStep, files, verifications and obstacles. End this turn after reporting; "
+              "the runner will restore your work in a fresh session.")
+
 
 @dataclass
 class TaskRun:
@@ -973,6 +981,15 @@ class TaskRun:
     auto_merge: bool
     issue_number: int | None
     attempts: int
+    segments: int = 0
+    stalled_segments: int = 0
+    last_snapshot_revision: str | None = None
+    context_handoff: str | None = None
+    context_peak: float = 0
+    checking_context: bool = False
+    handing_off: bool = False
+    checkpoint_started: bool = False
+    checkpoint_finished: bool = False
     qa_rounds: int = 0
     outcome: TaskReport | None = None
     nudged: bool = False
@@ -1230,7 +1247,8 @@ def _quota_exhausted(session: Session) -> bool:
 
 
 async def _pause_quota(run: TaskRun, session: Session) -> None:
-    if run.quota_pausing or run.finishing or run.phase in ("merging", "review") or session.closing:
+    if (run.quota_pausing or run.handing_off or not _current(run) or run.finishing
+            or run.phase in ("merging", "review") or session.closing):
         return
     run.quota_pausing = True
     try:
@@ -1245,7 +1263,9 @@ async def _pause_quota(run: TaskRun, session: Session) -> None:
                 return
             # Keep the live session attached until normal cleanup finishes, preventing overlapping workspaces.
             await sessions.close_session(session.id)
-            await _report({"id": str(run.task_id), "attempts": run.attempts}, "queued", report=reason)
+            # A quota pause resumes this segment, even if it interrupted a context checkpoint.
+            run.context_handoff = None
+            await _report(run, "queued", clear_session=True, report=reason)
             _runs.pop(session.id, None)
         _schedule_quota(reset)
     finally:
@@ -1338,7 +1358,8 @@ async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -
 
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
                   attempts: int | None = None, report: str | None = None, assignment: Json | None = None,
-                  merge_sha: str | None = None, qa_handoff: Json | None = None) -> Json:
+                  merge_sha: str | None = None, qa_handoff: Json | None = None,
+                  clear_session: bool = False) -> Json:
     """Saves a task's progress in mic-mooi and announces its item."""
     if isinstance(run_or_task, TaskRun):
         task_id, player_hint = run_or_task.task_id, run_or_task.player_id
@@ -1351,6 +1372,15 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
     body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
             "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha,
             "qaHandoff": qa_handoff}
+    if clear_session:
+        body["sessionId"] = None
+    if isinstance(run_or_task, TaskRun):
+        body.update(segments=run_or_task.segments, stalledSegments=run_or_task.stalled_segments,
+                    lastSnapshotRevision=run_or_task.last_snapshot_revision, contextHandoff=run_or_task.context_handoff)
+    else:
+        for key in ("segments", "stalledSegments", "lastSnapshotRevision", "contextHandoff"):
+            if key in run_or_task:
+                body[key] = run_or_task[key]
     answer = await mooi.report_task(task_id, body)
     item_id = run_or_task.item_id if isinstance(run_or_task, TaskRun) else (answer.get("item") or {}).get("id")
     if item_id:
@@ -1361,16 +1391,17 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
     return answer.get("item") or {}
 
 
-async def _task_recovery(task_id: UUID, attempt: int) -> Json | None:
+async def _task_recovery(task_id: UUID, attempt: int, segment: int | None = None) -> Json | None:
     try:
         recovery = await mooi.fetch_task_recovery(task_id, attempt)
     except ApiException as failure:
         if failure.status_code == 404:
             return None
         raise
-    if str(recovery.get("taskId")) != str(task_id) or recovery.get("attempt") != attempt:
+    if (str(recovery.get("taskId")) != str(task_id) or recovery.get("attempt") != attempt
+            or (segment is not None and recovery.get("segment", 0) != segment)):
         return {**recovery, "snapshotValid": False,
-                "validityReason": "Saved recovery metadata does not match this task attempt"}
+                "validityReason": "Saved recovery metadata does not match this task attempt and segment"}
     return recovery
 
 
@@ -1528,6 +1559,8 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
         if task["status"] not in ("running", "merging", "review", "attention") or not session_id:
             continue
         live = registry.get(UUID(session_id))
+        if (known := _runs.get(UUID(session_id))) is not None and (known.handing_off or known.quota_pausing):
+            continue
         if live is not None and live.closing:
             # close_session keeps the session registered until its recovery handoff and workspace
             # removal finish, so wait rather than racing a launch against the old checkout.
@@ -1540,9 +1573,16 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                 run = _adopt(item, task, live, player_id, settings, recovery=recovery)
                 # This workspace is already alive; only its runner metadata was lost.
                 run.recovery_expected = False
-            if _quota_exhausted(live):
+            if run.handing_off or run.quota_pausing:
+                continue
+            if run.context_handoff == "handoff":
+                _background(_handoff_context(run))
+                continue
+            if run.phase not in ("merging", "review") and _quota_exhausted(live):
                 _background(_pause_quota(run, live))
                 continue
+            if run.phase == "working" and run.status == "running":
+                _background(_check_context(run))
             if live.status == STATUS_FAILED:
                 if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
                     try:
@@ -1604,7 +1644,12 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             tasks = item.get("tasks", tasks)
             continue
         _runs.pop(UUID(session_id), None)
-        recovery = await _task_recovery(UUID(task["id"]), task["attempts"])
+        recovery = await _task_recovery(UUID(task["id"]), task["attempts"], task.get("segments", 0))
+        if task.get("contextHandoff") == "handoff":
+            # Complete a durable handoff after a runner restart between close and queue.
+            item = await _queue_context_continuation(task, recovery, settings)
+            tasks = item.get("tasks", tasks)
+            continue
         # `attempts` never rewinds (snapshots are keyed by it); Retry and Start move `attemptsBase` instead.
         attempts = task["attempts"] + 1
         if attempts - task.get("attemptsBase", 0) > settings["maxAttempts"]:
@@ -1664,6 +1709,10 @@ def _adopt(item: Json, task: Json, session: Session, player_id: UUID, settings: 
                   project_id=UUID(item["projectId"]), player_id=player_id, qa=task["qaOf"] is not None,
                   title=task["title"], auto_merge=bool(task["autoMerge"]), issue_number=item.get("issueNumber"),
                   attempts=task["attempts"],
+                  segments=task.get("segments", 0), stalled_segments=task.get("stalledSegments", 0),
+                  last_snapshot_revision=task.get("lastSnapshotRevision"),
+                  context_handoff=task.get("contextHandoff"),
+                  checkpoint_started=task.get("contextHandoff") == "checkpoint",
                   qa_rounds=task.get("qaRounds", 0),
                   status=task["status"], phase="review" if task["status"] == "review" else "working", limits=settings,
                   recovered=recovery is not None, recovery_expected=recovery is not None)
@@ -1698,9 +1747,15 @@ async def _wait(task: Json, reason: str) -> None:
 async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, settings: Json, *,
                   recovery: Json | None = None) -> None:
     quota_wait = str(task.get("report") or "").startswith(_QUOTA_WAIT)
-    if recovery is None and (quota_wait or not (task.get("qaOf") and task["status"] in ("planned", "queued"))):
+    if recovery is None and task.get("contextHandoff") in ("resume", "handoff"):
+        source_segment = task.get("segments", 0) - (1 if task.get("contextHandoff") == "resume" else 0)
+        recovery = await _task_recovery(UUID(task["id"]), task["attempts"], source_segment)
+        if recovery is None:
+            await _report(task, "attention", report=_recovery_problem(None))
+            return
+    elif recovery is None and (quota_wait or not (task.get("qaOf") and task["status"] in ("planned", "queued"))):
         source_attempt = task["attempts"] if quota_wait else max(0, task["attempts"] - 1)
-        recovery = await _task_recovery(UUID(task["id"]), source_attempt)
+        recovery = await _task_recovery(UUID(task["id"]), source_attempt, task.get("segments", 0))
         if quota_wait and recovery is None:
             await _report(task, "attention", report="Task recovery needs attention: no saved quota checkpoint")
             return
@@ -1764,11 +1819,11 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
         return
     # Registered before provisioning builds the agent's instructions, which read it.
     launch_status = task["status"] if task["status"] in ("review", "merging") else "running"
-    run_task = {**task, "status": launch_status}
+    run_task = {**task, "status": launch_status, "contextHandoff": None}
     if task["status"] in ("planned", "queued"):
         run_task["qaReport"] = None
     run = _adopt(item, run_task, session, player_id, settings, recovery=recovery)
-    updated = await _report(task, launch_status, session_id=session.id, attempts=task["attempts"],
+    updated = await _report(run, launch_status, session_id=session.id, attempts=task["attempts"],
                             assignment=assignment,
                             report=(f"Resuming saved progress: {_handoff_text(recovery.get('summary') or recovery.get('nextStep') or 'restored task state')}"
                                     if recovery else None))
@@ -2012,6 +2067,10 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
         lines += ["", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
                         "else than this task.")]
     if recovery:
+        if task.get("contextHandoff") == "resume":
+            block("Context handoff", f"Continuación por contexto, tramo {task.get('segments', 0) + 1}. "
+                  f"Restored attempt {recovery['attempt']}, segment {recovery.get('segment', 0) + 1}; "
+                  "continue from the previous checkpoint without repeating completed work.")
         lines += ["", "## Saved task handoff", "",
                   ("Continue from this restored workspace and the last saved progress below. Do not discard or "
                    "recreate existing changes. Treat the saved summary as progress context, not proof that acceptance "
@@ -2042,11 +2101,25 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
     quota_error = type_ in ("error", EVENT_TURN_RESULT, EVENT_SESSION_STATUS) and bool(re.search(
         r"rate[ _-]?limit|usage[ _-]?limit|quota.{0,30}(?:exceed|exhaust)|too many requests|limit.{0,20}reached",
         str(data), re.IGNORECASE))
-    if _quota_exhausted(session) or quota_error:
+    if (run.phase not in ("merging", "review") and not run.finishing and not run.handing_off
+            and (_quota_exhausted(session) or quota_error)):
         _background(_pause_quota(run, session))
         return
     if type_ == EVENT_TURN_RESULT:
+        # Capture at event time: queue delivery can start the checkpoint before settlement runs.
+        if run.checkpoint_started:
+            run.checkpoint_finished = True
         _background(_after_turn(run))
+    elif type_ == "session.usage":
+        if run.phase == "working" and run.status == "running":
+            # Remember the event synchronously: automatic compaction can lower usage before the
+            # background handler runs, or while it is already queuing the checkpoint.
+            run.context_peak = max(run.context_peak, _context_percent(session))
+        _background(_check_context(run))
+    elif type_ == "message.user" and data.get("text") == CHECKPOINT:
+        run.checkpoint_started = True
+        run.context_handoff = "checkpoint"
+        _background(_checkpoint_started(run))
     elif (type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_READY
           and run.recovered and run.outcome is not None):
         # Durable results are settled by the deterministic runner after the restored workspace is ready;
@@ -2065,6 +2138,117 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
 
 
 sessions.session_listeners.append(_on_session_event)
+
+
+def _context_percent(session: Session) -> float:
+    context = session.usage.get("context") or {}
+    percent = context.get("percent")
+    return float(percent) if isinstance(percent, (int, float)) else 0
+
+
+async def _checkpoint_started(run: TaskRun) -> None:
+    await _save(run, run.status, report="Checkpoint por contexto en curso")
+
+
+async def _check_context(run: TaskRun) -> None:
+    """One checkpoint request per segment, including usage events while a turn is active."""
+    session = get_registry().get(run.session_id)
+    if (run.checking_context or run.handing_off or run.quota_pausing
+            or not _current(run) or session is None or session.closing
+            or run.phase != "working" or run.status != "running" or run.finishing
+            or (run.outcome is not None and run.outcome.outcome != "continue")):
+        return
+    threshold = run.limits["contextHandoffPercent"]
+    percent = max(_context_percent(session), run.context_peak)
+    if percent < threshold and run.context_handoff is None:
+        return
+    run.checking_context = True
+    try:
+        if percent >= threshold + 15 or run.context_handoff in ("forced", "handoff"):
+            run.context_handoff = "forced"
+            await _handoff_context(run)
+            return
+        if run.context_handoff == "checkpoint":
+            if session.status == STATUS_READY and not session.queue:
+                run.checkpoint_finished = True
+                await _handoff_context(run)
+            return
+        if run.context_handoff == "requested" and any(message.text == CHECKPOINT for message in session.queue):
+            return
+        caller = await _run_caller(run)
+        run.context_handoff = "requested"
+        await _save(run, run.status, report="Checkpoint solicitado por contexto")
+        if run.quota_pausing or not _current(run) or session.closing:
+            return
+        active = session.status in (STATUS_WORKING, STATUS_WAITING)
+        # Queue before interrupting: a fast terminal result must not lose the checkpoint request.
+        await sessions.queue_message(run.session_id, SendMessageRequest(text=CHECKPOINT), caller)
+        if active and not run.checkpoint_started and session.status in (STATUS_WORKING, STATUS_WAITING):
+            with suppress(ApiException):
+                await sessions.interrupt_session(run.session_id, caller)
+        if max(_context_percent(session), run.context_peak) >= threshold + 15:
+            run.context_handoff = "forced"
+            await _handoff_context(run)
+    except CredentialRevoked:
+        run.resettle = True
+    except Exception:
+        LOG.warning("Task %s could not request its context checkpoint", run.task_id, exc_info=True)
+        # A saved request with no queued message is retried on the next tick.
+    finally:
+        run.checking_context = False
+
+
+async def _queue_context_continuation(task: Json, recovery: Json | None,
+                                      limits: Json | None = None) -> Json:
+    """Finish the durable close -> queue transition, also used after runner restart."""
+    if problem := _recovery_problem(recovery):
+        return await _report(task, "attention", clear_session=True, report=problem)
+    assert recovery is not None
+    revision = recovery["snapshotRevision"]
+    unchanged = revision == task.get("lastSnapshotRevision") or (
+        task.get("lastSnapshotRevision") is None and not recovery.get("files"))
+    stalled = task.get("stalledSegments", 0) + 1 if unchanged else 0
+    task = {**task, "segments": task.get("segments", 0) + 1, "stalledSegments": stalled,
+            "lastSnapshotRevision": revision, "contextHandoff": "resume"}
+    limit = (limits or DEFAULT_LIMITS)["stallTurns"]
+    status_ = "attention" if stalled >= limit else "queued"
+    reason = (f"Sin progreso tras {stalled} tramos" if status_ == "attention"
+              else f"Continuación por contexto, tramo {task['segments'] + 1}")
+    return await _report(task, status_, clear_session=True, report=reason)
+
+
+async def _handoff_context(run: TaskRun) -> None:
+    """Stop the runtime before its final snapshot; handoff never consumes an attempt."""
+    if (run.handing_off or run.quota_pausing or not _current(run)
+            or run.phase != "working" or run.status != "running" or run.finishing
+            or (run.outcome is not None and run.outcome.outcome != "continue")):
+        return
+    run.handing_off = True
+    try:
+        await _run_caller(run)
+        run.context_handoff = "handoff"
+        await _save(run, run.status, report="Guardando continuación por contexto")
+        # Keep the run registered so the normal cleanup hook captures after runtime.close().
+        await sessions.close_session(run.session_id)
+        recovery = await _task_recovery(run.task_id, run.attempts, run.segments)
+        async with _lock_for(_item_locks, run.item_id):
+            if not _current(run):
+                return
+            await _queue_context_continuation({
+                "id": str(run.task_id), "attempts": run.attempts, "segments": run.segments,
+                "stalledSegments": run.stalled_segments, "lastSnapshotRevision": run.last_snapshot_revision,
+            }, recovery, run.limits)
+            _runs.pop(run.session_id, None)
+    except CredentialRevoked:
+        run.resettle = True
+    except Exception:
+        LOG.warning("Task %s could not complete its context handoff; the runner will reconcile it",
+                    run.task_id, exc_info=True)
+        if get_registry().get(run.session_id) is None:
+            _runs.pop(run.session_id, None)
+    finally:
+        run.handing_off = False
+        wake()
 
 
 def _handoff_text(value: str) -> str:
@@ -2100,6 +2284,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
     mistake missing/corrupt data for a recoverable workspace.
     """
     async with run.recovery_lock:
+        existing = await _task_recovery(run.task_id, run.attempts)
         summary = (report.summary or report.blockerCause or "") if report else (final_summary or "")
         next_step = report.next_step if report else ""
         files = _handoff_files(report.files if report else [])
@@ -2121,6 +2306,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             snapshot = await workspaces.capture_recovery(
                 session.workspace, owner_id=run.player_id, project_id=run.project_id, item_id=run.item_id,
                 task_id=run.task_id, attempt=run.attempts, branch=session.branch, base_commit=session.base_commit,
+                previous_revision=existing.get("snapshotRevision") if existing and existing.get("snapshotValid") else None,
             )
             head_commit = snapshot.head_commit
             revision = snapshot.snapshot_revision
@@ -2136,20 +2322,16 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             saved_files = []
             valid = False
             reason = _handoff_text(failure.message)[:2000] or "Recovery snapshot could not be validated"
-        existing: Json | None
-        try:
-            existing = await mooi.fetch_task_recovery(run.task_id, run.attempts)
-        except ApiException as failure:
-            if failure.status_code != 404:
-                raise
-            existing = None
         if report is None and existing:
             outcome = outcome or existing.get("reportedOutcome")
             title = title or existing.get("reportedTitle")
             reported_summary = reported_summary or existing.get("reportedSummary")
             preparation = preparation or _handoff_text(existing.get("reportedPreparation") or "")
             if not safe_summary:
-                safe_summary = "Workspace snapshot captured at turn end; no new handoff report was submitted."
+                safe_summary = existing.get("summary") or "Workspace captured without a new handoff report."
+            safe_next_step = existing.get("nextStep") or ""
+            verifications = existing.get("verifications") or []
+            obstacles = existing.get("obstacles") or []
         if not valid and existing and existing.get("snapshotValid"):
             # Keep the last known-good snapshot and its matching result intact; a report from an
             # uncaptured workspace must never be attached to older code.
@@ -2170,6 +2352,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
             reason = existing.get("validityReason")
         await mooi.save_task_recovery(run.task_id, {
             "attempt": run.attempts,
+            "segment": run.segments,
             "branch": branch,
             "baseCommit": base_commit,
             "headCommit": head_commit,
@@ -2254,11 +2437,26 @@ async def _after_turn(run: TaskRun) -> None:
 
 async def _settle_turn(run: TaskRun) -> None:
     session = get_registry().get(run.session_id)
-    if not _current(run) or session is None or session.closing or run.finishing or run.quota_pausing:
+    if (not _current(run) or session is None or session.closing or run.finishing
+            or run.handing_off or run.quota_pausing):
         return
     try:
         await _persist_recovery(run, session, report=run.outcome)
-        if not _current(run) or session.closing or session.queue or run.quota_pausing:
+        if not _current(run) or session.closing or run.handing_off or run.quota_pausing:
+            return
+        if run.phase == "working" and run.status == "running":
+            # A checkpoint's terminal result hands off even when it omitted its report.
+            if ((run.checkpoint_finished or run.context_handoff in ("forced", "handoff")
+                 or (run.context_handoff is None and run.outcome is not None
+                     and run.outcome.outcome == "continue" and session.status == STATUS_READY))
+                    and (run.outcome is None or run.outcome.outcome == "continue")):
+                await _handoff_context(run)
+                return
+            if run.outcome is None:
+                await _check_context(run)
+                if run.context_handoff or session.closing or run.quota_pausing:
+                    return
+        if session.queue:
             return
         await _settle(run, session)
     except CredentialRevoked:

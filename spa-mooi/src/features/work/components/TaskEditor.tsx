@@ -92,6 +92,7 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={state.tone}>{state.label}</Badge>
         {attempts > 0 ? <span className="text-xs text-ink-subtle">Attempt {attempts + 1}</span> : null}
+        {(task.segments ?? 0) > 0 ? <span className="text-xs text-ink-subtle">Segment {(task.segments ?? 0) + 1}</span> : null}
         {task.sessionId ? (
           <Link to={sessionPath(projectId, task.sessionId)}
             className="inline-flex items-center gap-1 text-xs font-semibold text-brand underline-offset-4 hover:underline">
@@ -99,7 +100,7 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
           </Link>
         ) : null}
       </div>
-      {task.report && !qa ? (
+      {task.report && (!qa || task.contextHandoff) ? (
         <p className={cn('rounded-control border px-3 py-2 text-[13px] leading-relaxed whitespace-pre-line',
           task.status === 'attention' ? 'border-danger/30 bg-danger-soft text-ink' : 'border-line bg-surface-2 text-ink-muted')}>
           {task.report}

@@ -70,6 +70,12 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
           {done ? <CheckCircle2 className="mr-1 inline size-3.5 -translate-y-px text-success" /> : null}
           {task.title}
         </span>
+        {(task.segments ?? 0) > 0 ? (
+          <span className="text-[10.5px] text-ink-subtle">Segment {(task.segments ?? 0) + 1}</span>
+        ) : null}
+        {task.report && (task.contextHandoff || state === 'attention') ? (
+          <span title={task.report} className="line-clamp-1 text-[10.5px] text-warning">{task.report}</span>
+        ) : null}
         {blocker ? (
           <span title={blocker.cause} className="line-clamp-1 text-[10.5px] leading-snug text-warning">
             Blocked · {blocker.category ? `${QA_BLOCKER_LABEL[blocker.category]} · ` : ''}{blocker.cause}

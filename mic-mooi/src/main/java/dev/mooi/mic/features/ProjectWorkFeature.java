@@ -826,6 +826,7 @@ public class ProjectWorkFeature {
             task.setStatus(TaskStatus.planned);
             task.setSessionId(null);
             task.setAttemptsBase(task.getAttempts());
+            task.setStalledSegments(0);
             task.setReport(null);
             task.setStartedAt(null);
             task.setFinishedAt(null);
@@ -879,6 +880,7 @@ public class ProjectWorkFeature {
                     .forEach(task -> {
                         task.setStatus(TaskStatus.planned);
                         task.setAttemptsBase(task.getAttempts());
+                        task.setStalledSegments(0);
                         task.setReport(null);
                         task.setStartedAt(null);
                         task.setFinishedAt(null);
@@ -993,6 +995,15 @@ public class ProjectWorkFeature {
             task.setSessionId(progress.sessionId());
             // A stale runner snapshot must not rewind the attempt its recovery evidence is keyed by.
             task.setAttempts(Math.max(task.getAttempts(), progress.attempts()));
+            if (progress.segments() != null) {
+                if (progress.segments() < task.getSegments()) {
+                    throw conflict("A stale segment cannot update task progress");
+                }
+                task.setSegments(progress.segments());
+                task.setStalledSegments(progress.stalledSegments() == null ? 0 : progress.stalledSegments());
+                task.setLastSnapshotRevision(progress.lastSnapshotRevision());
+                task.setContextHandoff(progress.contextHandoff());
+            }
             task.setReport(progress.report());
             if (progress.status() == TaskStatus.running && task.getQaOfId() != null
                     && !java.util.Objects.equals(previousSessionId, progress.sessionId())) {
@@ -1050,6 +1061,9 @@ public class ProjectWorkFeature {
             if (update.attempt() != task.getAttempts()) {
                 throw conflict("Recovery attempt does not match the task's current attempt");
             }
+            if (update.segment() != task.getSegments()) {
+                throw conflict("Recovery segment does not match the task's current segment");
+            }
             if (update.files() != null && update.files().stream().anyMatch(path ->
                     path == null || path.isBlank() || path.startsWith("/") || path.startsWith("-")
                             || path.contains("\\") || path.contains("\0")
@@ -1064,16 +1078,10 @@ public class ProjectWorkFeature {
                 if (sameRecovery(existing, update)) {
                     return existing;
                 }
-                if (java.util.Objects.equals(currentRevision, update.previousRevision())
-                        && sameSnapshot(existing, update)) {
-                    row.setReportedOutcome(update.reportedOutcome());
-                    row.setReportedTitle(update.reportedTitle());
-                    row.setReportedSummary(update.reportedSummary());
-                    row.setReportedPreparation(update.reportedPreparation());
-                    row.setUpdatedAt(OffsetDateTime.now(clock));
-                    return toRecoveryPayload(recoveries.save(row));
+                if (!java.util.Objects.equals(currentRevision, update.previousRevision())
+                        || !sameSnapshot(existing, update)) {
+                    throw conflict("Recovery revision already exists with different metadata");
                 }
-                throw conflict("Recovery revision already exists with different metadata");
             }
             if (!java.util.Objects.equals(currentRevision, update.previousRevision())) {
                 throw conflict("Recovery evidence changed; reload its current revision before saving");
@@ -1085,6 +1093,7 @@ public class ProjectWorkFeature {
                 row.setAttempt(update.attempt());
             }
             row.setPlayerId(project.getPlayerId());
+            row.setSegment(update.segment());
             row.setProjectId(project.getId());
             row.setItemId(item.getId());
             row.setBranch(update.branch());
@@ -1118,7 +1127,7 @@ public class ProjectWorkFeature {
         }
 
         private static boolean sameRecovery(TaskRecoveryPayload existing, TaskRecoveryUpdate update) {
-            return existing.attempt() == update.attempt()
+            return existing.attempt() == update.attempt() && existing.segment() == update.segment()
                     && existing.branch().equals(update.branch())
                     && existing.baseCommit().equals(update.baseCommit())
                     && existing.headCommit().equals(update.headCommit())
@@ -1141,17 +1150,13 @@ public class ProjectWorkFeature {
                     && existing.baseCommit().equals(update.baseCommit())
                     && existing.headCommit().equals(update.headCommit())
                     && existing.snapshotRevision().equals(update.snapshotRevision())
-                    && existing.summary().equals(update.summary())
-                    && existing.nextStep().equals(update.nextStep())
                     && existing.files().equals(update.files() == null ? List.of() : update.files())
-                    && existing.verifications().equals(update.verifications() == null ? List.of() : update.verifications())
-                    && existing.obstacles().equals(update.obstacles() == null ? List.of() : update.obstacles())
                     && existing.snapshotValid() == update.snapshotValid()
                     && java.util.Objects.equals(existing.validityReason(), update.validityReason());
         }
 
         private static TaskRecoveryPayload toRecoveryPayload(TaskRecovery row) {
-            return new TaskRecoveryPayload(row.getTaskId(), row.getAttempt(), row.getBranch(), row.getBaseCommit(),
+            return new TaskRecoveryPayload(row.getTaskId(), row.getAttempt(), row.getSegment(), row.getBranch(), row.getBaseCommit(),
                     row.getHeadCommit(), row.getSnapshotRevision(), row.getSummary(), row.getNextStep(),
                     readStringList(row.getFiles()), readStringList(row.getVerifications()),
                     readStringList(row.getObstacles()), row.getReportedOutcome(), row.getReportedTitle(),
@@ -1647,6 +1652,7 @@ public class ProjectWorkFeature {
                                      readAlternatives(task.getAlternatives()), task.isAutoMerge(), task.isTests(),
                                      task.getQaOfId(), task.getFixOfId(), task.getStatus(), task.getSessionId(),
                                      task.getAttempts(), task.getAttemptsBase(), task.getReport(),
+                                     task.getSegments(), task.getStalledSegments(), task.getLastSnapshotRevision(), task.getContextHandoff(),
                                      readQaReport(task.getQaReport()),
                                      task.getFindingId(),
                                      task.getQaRounds(), task.getMergeSha(), task.getDeployedVersion(), task.getDeployedAt(),
@@ -2353,6 +2359,18 @@ public class ProjectWorkFeature {
         @Column(name = "attempts_base", nullable = false)
         private int attemptsBase;
 
+        @Column(name = "segments", nullable = false)
+        private int segments;
+
+        @Column(name = "stalled_segments", nullable = false)
+        private int stalledSegments;
+
+        @Column(name = "last_snapshot_revision", length = 64)
+        private String lastSnapshotRevision;
+
+        @Column(name = "context_handoff", length = 20)
+        private String contextHandoff;
+
         @Column(name = "report", columnDefinition = "text")
         private String report;
 
@@ -2425,6 +2443,9 @@ public class ProjectWorkFeature {
 
         @Column(name = "attempt", nullable = false, updatable = false)
         private int attempt;
+
+        @Column(name = "segment", nullable = false)
+        private int segment;
 
         @Column(name = "branch", nullable = false, length = 120)
         private String branch;
@@ -2777,6 +2798,9 @@ public class ProjectWorkFeature {
     }
 
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
+                               @Min(0) Integer segments, @Min(0) Integer stalledSegments,
+                               @Pattern(regexp = "[0-9a-f]{64}") String lastSnapshotRevision,
+                               @Pattern(regexp = "requested|checkpoint|forced|handoff|resume") String contextHandoff,
                                @Size(max = 50_000) String report, Map<String, Object> qaReport,
                                @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha,
@@ -2788,7 +2812,7 @@ public class ProjectWorkFeature {
      * a compare-and-set guard (null only for the first revision). Invalid snapshots remain reportable
      * but are never offered as restore candidates.
      */
-    public record TaskRecoveryUpdate(@Min(0) int attempt,
+    public record TaskRecoveryUpdate(@Min(0) int attempt, @Min(0) int segment,
                                      @NotBlank @Size(max = 120) @Pattern(regexp = "[A-Za-z0-9._/-]+") String branch,
                                      @NotBlank @Size(max = 64) @Pattern(regexp = "[0-9a-f]{40,64}") String baseCommit,
                                      @NotBlank @Size(max = 64) @Pattern(regexp = "[0-9a-f]{40,64}") String headCommit,
@@ -2799,7 +2823,7 @@ public class ProjectWorkFeature {
                                      @Size(max = 500) List<@Size(max = 1024) String> files,
                                      @Size(max = 200) List<@Size(max = 2_000) String> verifications,
                                      @Size(max = 200) List<@Size(max = 2_000) String> obstacles,
-                                      @Pattern(regexp = "done|blocked|passed|defect") String reportedOutcome,
+                                      @Pattern(regexp = "done|blocked|passed|defect|continue") String reportedOutcome,
                                       @Size(max = 200) String reportedTitle,
                                       @Size(max = 20_000) String reportedSummary,
                                       @Size(max = 20_000) String reportedPreparation,
@@ -2807,7 +2831,7 @@ public class ProjectWorkFeature {
                                       @Size(max = 2_000) String validityReason) {
     }
 
-    public record TaskRecoveryPayload(UUID taskId, int attempt, String branch, String baseCommit, String headCommit,
+    public record TaskRecoveryPayload(UUID taskId, int attempt, int segment, String branch, String baseCommit, String headCommit,
                                        String snapshotRevision, String summary, String nextStep, List<String> files,
                                        List<String> verifications, List<String> obstacles, String reportedOutcome,
                                        String reportedTitle, String reportedSummary, String reportedPreparation,
@@ -2856,6 +2880,7 @@ public class ProjectWorkFeature {
                                String acceptance, Assignment assignment, List<Assignment> alternatives,
                                boolean autoMerge, boolean tests, UUID qaOf, UUID fixOf, TaskStatus status,
                                UUID sessionId, int attempts, int attemptsBase, String report,
+                               int segments, int stalledSegments, String lastSnapshotRevision, String contextHandoff,
                                Map<String, Object> qaReport,
                                String findingId, int qaRounds, String mergeSha,
                                String deployedVersion, OffsetDateTime deployedAt, Map<String, Object> qaHandoff,

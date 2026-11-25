@@ -18,6 +18,12 @@ const FeatureTaskNode = ({ data }: { data: { task: WorkTask } }) => {
         <Icon className="size-3" /> {style.label}
       </span>
       <span className="line-clamp-2 text-[13px] font-semibold text-ink">{data.task.title}</span>
+      {(data.task.segments ?? 0) > 0 ? (
+        <span className="text-[10.5px] text-ink-subtle">Segment {(data.task.segments ?? 0) + 1}</span>
+      ) : null}
+      {data.task.report && (data.task.contextHandoff || data.task.status === 'attention') ? (
+        <span title={data.task.report} className="line-clamp-1 text-[10.5px] text-warning">{data.task.report}</span>
+      ) : null}
     </div>
   );
 };

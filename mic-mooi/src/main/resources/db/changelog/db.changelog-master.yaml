@@ -125,3 +125,5 @@ databaseChangeLog:
       file: db/changelog/changes/060-factory-runner-credential.yaml
   - include:
       file: db/changelog/changes/058-work-change-requests.yaml
+  - include:
+      file: db/changelog/changes/061-work-context-handoff.yaml

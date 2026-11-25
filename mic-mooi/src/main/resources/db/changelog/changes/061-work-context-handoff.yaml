@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - changeSet:
+      id: 061-work-context-handoff
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              ALTER TABLE work_tasks
+                ADD COLUMN segments integer NOT NULL DEFAULT 0 CHECK (segments >= 0),
+                ADD COLUMN stalled_segments integer NOT NULL DEFAULT 0 CHECK (stalled_segments >= 0),
+                ADD COLUMN last_snapshot_revision varchar(64),
+                ADD COLUMN context_handoff varchar(20);
+              ALTER TABLE work_task_recovery
+                ADD COLUMN segment integer NOT NULL DEFAULT 0 CHECK (segment >= 0);
+              ALTER TABLE work_task_recovery DROP CONSTRAINT ck_work_task_recovery_outcome;
+              ALTER TABLE work_task_recovery ADD CONSTRAINT ck_work_task_recovery_outcome
+                CHECK (reported_outcome IS NULL OR reported_outcome IN ('done', 'blocked', 'passed', 'defect', 'continue'));

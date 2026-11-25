@@ -680,6 +680,36 @@ class Workspaces:
                                      "--pathspec-from-file=-", "--pathspec-file-nul", extra_env=env,
                                      stdin="\0".join(sorted(candidates)) + "\0")
                 tree = (await self._git("-C", str(workspace), "write-tree", extra_env=env)).strip()
+                # Reuse the content revision when only the report (or local commit history) changed.
+                # Random synthetic commits and capture timestamps otherwise hide stalled segments.
+                if previous_revision:
+                    lease = await self.acquire_recovery(owner_id, project_id, item_id, task_id, attempt,
+                                                        previous_revision)
+                    try:
+                        manifest_path = lease.directory / "manifest.json"
+                        bundle = lease.directory / "objects.bundle"
+                        if manifest_path.is_symlink() or bundle.is_symlink():
+                            raise ApiException.conflict("Recovery snapshot is unsafe")
+                        manifest_bytes = manifest_path.read_bytes()
+                        previous = json.loads(manifest_bytes)
+                        digest = await asyncio.to_thread(_sha256_file, bundle)
+                        if (hashlib.sha256(manifest_bytes + digest.encode()).hexdigest() != previous_revision
+                                or previous.get("bundleSha256") != digest):
+                            raise ApiException.conflict("Recovery snapshot is incomplete")
+                        if (previous.get("ownerId") == str(owner_id) and previous.get("projectId") == str(project_id)
+                                and previous.get("itemId") == str(item_id) and previous.get("taskId") == str(task_id)
+                                and previous.get("attempt") == attempt and previous.get("branch") == branch
+                                and previous.get("baseCommit") == base and previous.get("files") == sorted(candidates)):
+                            old_commit = str(previous.get("syntheticCommit") or "")
+                            if re.fullmatch(r"[0-9a-f]{40,64}", old_commit) and await self._git_ok(
+                                    "-C", str(workspace), "cat-file", "-e", f"{old_commit}^{{tree}}"):
+                                old_tree = (await self._git("-C", str(workspace), "rev-parse",
+                                                            f"{old_commit}^{{tree}}")).strip()
+                                if old_tree == tree:
+                                    return RecoverySnapshot(task_id, attempt, branch, base, previous["headCommit"],
+                                                            previous_revision, sorted(candidates))
+                    finally:
+                        await self.release_recovery(lease)
                 base_is_commit = await self._git_ok("-C", str(workspace), "cat-file", "-e", f"{base}^{{commit}}")
                 parent = ("-p", base) if base_is_commit else ()
                 synthetic = (await self._git("-C", str(workspace), "commit-tree", tree, *parent,
@@ -804,7 +834,9 @@ class Workspaces:
             await self._git("-C", str(workspace), "fetch", "--no-tags", str(bundle), synthetic)
             if not await self._git_ok("-C", str(workspace), "cat-file", "-e", f"{synthetic}^{{commit}}"):
                 raise ApiException.conflict("Recovery snapshot is incomplete and cannot be restored")
-            await self._git("-C", str(workspace), "cherry-pick", "--no-gpg-sign", synthetic)
+            # A QA/context checkpoint can legitimately contain no repository changes. Keep the
+            # empty synthetic commit so the new segment can resume and stall detection can count it.
+            await self._git("-C", str(workspace), "cherry-pick", "--allow-empty", "--no-gpg-sign", synthetic)
             return (await self._git("-C", str(workspace), "rev-parse", "HEAD")).strip()
         except ApiException as error:
             if error.status_code == 502:

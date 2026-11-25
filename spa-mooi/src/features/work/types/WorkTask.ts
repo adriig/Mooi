@@ -59,6 +59,11 @@ export interface WorkTask {
   attempts: number;
   /** `attempts` at the latest Retry or Start; the session limit counts attempts beyond it. */
   attemptsBase: number;
+  /** Context continuations completed without consuming a session attempt. */
+  segments?: number;
+  stalledSegments?: number;
+  lastSnapshotRevision?: string | null;
+  contextHandoff?: 'requested' | 'checkpoint' | 'forced' | 'handoff' | 'resume' | null;
   report: string | null;
   /** Structured QA delivery (camelCase API contract). */
   qaReport?: QaTaskReport | null;
