@@ -12,6 +12,7 @@ import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
 import { CommitLink } from '@/features/work/components/CommitLink';
 import { WorkChangeRequests } from '@/features/work/components/WorkChangeRequests';
+import { useIssueDefinition } from '@/features/work/hooks/useIssueDefinition';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
 import { taskStyle } from '@/features/work/lib/taskCategories';
@@ -48,6 +49,7 @@ interface WorkItemDialogProps {
  */
 export const WorkItemDialog = ({ projectId, repository, entry, features, connections, work, onClose }: WorkItemDialogProps) => {
   const { run, busy, actionError } = work;
+  const issueDefinition = useIssueDefinition(projectId, entry.issue?.number ?? 0, !!entry.issue);
   const item = entry.item;
   const [openTask, setOpenTask] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -143,6 +145,37 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
         </div>
 
         {actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{actionError}</p> : null}
+        {entry.issue && (entry.column === 'new' || issueDefinition.definition?.state === 'DEFINED') ? (
+          <section className="flex flex-col gap-3 rounded-card border border-line p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-ink">Issue definition</h3>
+              {issueDefinition.definition?.state === 'DEFINED' ? <Badge tone="success">Defined</Badge> : null}
+            </div>
+            {issueDefinition.loadError ? <p role="alert" className="text-sm text-danger">{issueDefinition.loadError}</p> : null}
+            {issueDefinition.actionError ? <p role="alert" className="rounded-control bg-danger-soft px-3 py-2 text-sm text-danger">{issueDefinition.actionError}</p> : null}
+            {issueDefinition.definition?.proposal ? (
+              <>
+                <div className="flex flex-col gap-1 text-sm">
+                  <p className="font-semibold text-ink">{issueDefinition.definition.proposal.title}</p>
+                  <p className="whitespace-pre-wrap text-ink-muted">{issueDefinition.definition.proposal.description}</p>
+                  <p className="text-xs text-ink-subtle">{issueDefinition.definition.proposal.kind} · {issueDefinition.definition.proposal.category}</p>
+                  {issueDefinition.definition.proposal.valid ? <p><strong>Acceptance:</strong> {issueDefinition.definition.proposal.acceptance}</p>
+                    : <p className="text-warning">Marked invalid: accepting closes the issue without creating work.</p>}
+                  {issueDefinition.definition.proposal.breakdown?.length ? <ul className="list-disc pl-5 text-ink-muted">
+                    {issueDefinition.definition.proposal.breakdown.map((part, index) => <li key={`${part.title}-${index}`}>{part.title} — {part.acceptance}</li>)}
+                  </ul> : null}
+                  {issueDefinition.definition.proposal.feature ? <p>Promotes to feature: {issueDefinition.definition.proposal.feature.title}</p> : null}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {issueDefinition.definition.state !== 'DEFINED' ? <Button size="sm" variant="brand" disabled={issueDefinition.busy || !issueDefinition.definition.proposal}
+                    onClick={() => { void issueDefinition.accept(issueDefinition.definition!.proposal!.proposalId); }}>Accept proposal</Button> : null}
+                  {issueDefinition.definition.state === 'DEFINED' ? <Button size="sm" variant="secondary" disabled={issueDefinition.busy}
+                    onClick={() => { void issueDefinition.reopen(issueDefinition.definition!.proposal!.proposalId); }}>Reopen definition</Button> : null}
+                </div>
+              </>
+            ) : <p className="text-sm text-ink-muted">No proposal yet. Use Define to work with the agent; its proposal will appear here live.</p>}
+          </section>
+        ) : null}
         {reassignMessage ? <p role="status" className="rounded-control bg-success-soft px-3 py-2 text-sm text-success">{reassignMessage}</p> : null}
 
         {text ? (

@@ -99,6 +99,11 @@ export const useLiveStore = create<LiveState>((set) => ({
     if (frame.type === 'work.definition.project') {
       return { work: { ...state.work, [projectId]: { ...(state.work[projectId] ?? EMPTY_WORK), definition: data.definition as ProjectDefinition } } };
     }
+    if (frame.type === 'work.definition') {
+      const current = state.work[projectId] ?? EMPTY_WORK;
+      return { work: { ...state.work, [projectId]: { ...current,
+        issueDefinitions: { ...(current.issueDefinitions ?? {}), [Number(data.number)]: data.definition as import('@/features/work/api/workApi').IssueDefinition } } } };
+    }
     if (frame.type === 'work.removed') {
       const current = state.work[projectId];
       if (!current?.items) return state;

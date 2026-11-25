@@ -95,6 +95,44 @@ export const defineWorkIssue = (projectId: string, number: number) =>
   send<Session>(workPath(projectId, `/issues/${number}/define`), 'POST',
     'Could not open the definition session.');
 
+export interface IssueDefinitionProposal {
+  proposalId: string;
+  previousProposalId: string | null;
+  title: string;
+  description: string;
+  valid: boolean;
+  acceptance: string;
+  kind: 'defect' | 'debt';
+  category: 'ux' | 'dev' | 'infra' | 'docs';
+  breakdown: { title: string; description: string; acceptance: string; kind: 'defect' | 'debt'; category: 'ux' | 'dev' | 'infra' | 'docs' }[] | null;
+  feature: { title: string; spec: string } | null;
+}
+
+export interface IssueDefinition {
+  state: 'NEW' | 'DEFINED';
+  proposal: IssueDefinitionProposal | null;
+  accepted: IssueDefinitionProposal | null;
+  issueNumbers: number[];
+  featureId: string | null;
+}
+
+export interface IssueDefinitionResult {
+  definition: IssueDefinition;
+  issues: WorkIssue[];
+  items: WorkItem[];
+}
+
+export const fetchIssueDefinition = (projectId: string, number: number) =>
+  send<IssueDefinition>(workPath(projectId, `/issues/${number}/definition`), 'GET', 'Could not load the issue definition.');
+
+export const acceptIssueDefinition = (projectId: string, number: number, proposalId: string) =>
+  send<IssueDefinitionResult>(workPath(projectId, `/issues/${number}/definition/accept`), 'POST',
+    'Could not accept this issue definition.', { proposalId });
+
+export const reopenIssueDefinition = (projectId: string, number: number, proposalId: string | null) =>
+  send<IssueDefinitionResult>(workPath(projectId, `/issues/${number}/definition/reopen`), 'POST',
+    'Could not reopen this issue definition.', { proposalId });
+
 export const fetchWorkSettings = (projectId: string) =>
   send<WorkSettings>(workPath(projectId, '/settings'), 'GET', 'Could not load the factory settings.');
 
