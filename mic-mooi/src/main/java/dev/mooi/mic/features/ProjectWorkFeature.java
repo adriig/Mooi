@@ -3334,7 +3334,7 @@ public class ProjectWorkFeature {
     public record TaskProgress(@NotNull TaskStatus status, UUID sessionId, @Min(0) int attempts,
                                @Min(0) Integer segments, @Min(0) Integer stalledSegments,
                                @Pattern(regexp = "[0-9a-f]{64}") String lastSnapshotRevision,
-                               @Pattern(regexp = "requested|checkpoint|forced|handoff|resume") String contextHandoff,
+                               @Pattern(regexp = "requested|checkpoint|forced|handoff|resume|continuation") String contextHandoff,
                                @Size(max = 50_000) String report, Map<String, Object> qaReport,
                                @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha,

@@ -71,7 +71,8 @@ export interface WorkTask {
   lastSnapshotRevision?: string | null;
   /** Structured platform recovery state. Never infer restart eligibility from report text. */
   recoveryDisposition?: RecoveryDisposition | null;
-  contextHandoff?: 'requested' | 'checkpoint' | 'forced' | 'handoff' | 'resume' | null;
+  /** `continuation`: a turn ended without a task report and the runner continues it on its own. */
+  contextHandoff?: 'requested' | 'checkpoint' | 'forced' | 'handoff' | 'resume' | 'continuation' | null;
   report: string | null;
   /** Structured QA delivery (camelCase API contract). */
   qaReport?: QaTaskReport | null;

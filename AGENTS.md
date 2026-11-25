@@ -275,6 +275,15 @@ in Planification, the Board and the task editor.
   revision and no result, the task moves to attention with reason "No progress".
   Unchanged recoverable content reuses its snapshot revision; context continuations retain the consecutive
   stalled segment count across runner restarts and show "Sin progreso tras N tramos" when the limit is reached.
+- **Automatic continuation**: a turn that ends without a task report (`done`/`passed`/`defect`, `continue` or
+  `blocked`) never sends the task to attention by itself. After saving the end-of-turn snapshot, the runner
+  counts the turn against `stallTurns` (an unchanged revision is one more turn without progress, any change
+  restarts the count) and queues a continuation in the same session that tells the agent to keep implementing
+  and to report one admitted outcome. Count and pending continuation are durable (`contextHandoff:
+  continuation`) and each turn end is counted and continued once; a restart before delivery resumes it as a new
+  segment of the same attempt, a paused item continues on Resume, and the task shows as continuing, never as
+  needing the user. A snapshot that cannot be saved, or reaching `stallTurns`, moves it to attention
+  ("No progress: sin resultado de tarea tras N turnos...").
 - **Cross-verification**: a development `done` with no real changes against its base is rejected: the agent is
   warned once, then the task moves to attention. Reported files that did not change are noted in the handoff.
 - **Quota pause and resume**: when a running session hits the provider limit, the runner saves a snapshot, closes

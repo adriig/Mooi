@@ -1128,7 +1128,7 @@ This session runs one task of the project's software factory, on its own; there 
 - When reporting development work, include `nextStep`, `files`, `verifications`, `preparation` requirements for independent QA, and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
 - When the runner requests a context checkpoint, commit eligible work locally (never push), then report `{{"outcome":"continue","summary":"<state>","nextStep":"<next action>","files":[],"verifications":[],"obstacles":[]}}` and end the turn. QA remains read-only and reports its progress without committing.
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
-- Before your turn ends, report the outcome with `POST {report}`: {outcomes}. When you cannot finish, report `{{"outcome": "blocked", "summary": "<why>"}}` instead. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
+- Before every turn ends, report the outcome with `POST {report}`: {outcomes}. When the task needs more work than this turn, keep implementing, or report `continue` with its checkpoint as above to go on in a fresh session; never end a turn by only describing what is left. Report `{{"outcome": "blocked", "blockerCause": "<concrete cause>"}}` only when something outside this session must be resolved first. A turn without a report is continued automatically and counts as a turn without progress. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
 
 sessions.instruction_sections.append(_work_section)
@@ -1240,8 +1240,26 @@ _ISSUE_SYNC_INTERVAL_SECONDS = 120
 DEFAULT_LIMITS: Json = {"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2,
                         "contextHandoffPercent": 60, "stallTurns": 3}
 
-NUDGE = ("Your turn ended without reporting this factory task's outcome. Finish the task if anything is left, "
-         "then report it as your Software factory task instructions say.")
+CONTINUE = ("Software factory: your last turn ended without a task report, so this task is still open and the "
+            "runner continues it automatically. Snapshot {revision} of the workspace was saved; turns in a row "
+            "without a report or progress: {stalled} of {limit}.\n"
+            "1. Continue implementing the task now. Do the remaining work; do not just explain what is left.\n"
+            "2. Before this turn ends you MUST POST exactly one task report, as your Software factory task "
+            "instructions say:\n"
+            "   - `done` (QA: `passed` or `defect`) only when every acceptance criterion is met, with real changes "
+            "on this branch when the task requires them;\n"
+            "   - `continue` when the task needs another segment: commit eligible work locally (never push), "
+            "then report the checkpoint with `summary` (current state), `nextStep`, `files`, `verifications` and "
+            "`obstacles`; the runner restores it in a fresh session;\n"
+            "   - `blocked` only for a concrete cause that truly needs someone outside this session, stated in "
+            "`blockerCause`.\n"
+            "A turn that ends without a report counts as a turn without progress; after {limit} the task waits "
+            "for the user.")
+_CONTINUE_MARK = CONTINUE.split("{", 1)[0]
+# `contextHandoff` while a turn that ended without a report is being continued in the same session: a
+# runner restart before the continuation reaches the agent resumes it as a new segment, not a new attempt.
+CONTINUATION = "continuation"
+_HANDOFF_STATES = ("requested", "checkpoint", "forced", "handoff")
 
 CHECKPOINT = ("Context checkpoint requested by the software factory. Stop implementation, commit eligible work "
               "locally without pushing (QA stays read-only), and POST a task report with outcome `continue`, "
@@ -1277,7 +1295,11 @@ class TaskRun:
     checkpoint_finished: bool = False
     qa_rounds: int = 0
     outcome: TaskReport | None = None
-    nudged: bool = False
+    # The session log sequence of its latest turn end, and the turn ends already counted against
+    # `stallTurns` and already continued: replaying one turn end never counts or continues it twice.
+    turn_end: int | None = None
+    counted_turn: int | None = None
+    continued_turn: int | None = None
     verification_nudged: bool = False
     # Its last turn could not settle because the factory credential was revoked: settle it on Resume.
     resettle: bool = False
@@ -1901,6 +1923,9 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                 run = _adopt(item, task, live, player_id, settings, recovery=recovery)
                 # This workspace is already alive; only its runner metadata was lost.
                 run.recovery_expected = False
+                if run.context_handoff == CONTINUATION:
+                    # Its last turn end was counted before the continuation was saved; continue it once.
+                    run.turn_end = run.counted_turn = live.log.last_seq
             if run.handing_off or run.quota_pausing:
                 continue
             if run.context_handoff == "handoff":
@@ -1946,7 +1971,9 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                     and run.phase != "merging" and not run.settling and not run.finishing):
                 # Snapshots and settlements do git work and take the item's lock to save, so they run
                 # outside this one; a settlement snapshots the workspace first.
-                if run.status != "attention" and (run.outcome is not None or run.phase == "resolving") and (
+                if run.status != "attention" and (
+                        run.outcome is not None or run.phase == "resolving"
+                        or (run.context_handoff == CONTINUATION and run.continued_turn is None)) and (
                         adopted or item.get("status") == "running"):
                     _background(_after_turn(run))
                 elif adopted:
@@ -1973,10 +2000,11 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             continue
         _runs.pop(UUID(session_id), None)
         recovery = await _task_recovery(UUID(task["id"]), task["attempts"], task.get("segments", 0))
-        if task.get("contextHandoff") in ("requested", "checkpoint", "forced", "handoff"):
+        if task.get("contextHandoff") in (*_HANDOFF_STATES, CONTINUATION):
             # Complete a durable handoff after a runner restart between close and queue. A session lost
-            # while its checkpoint was pending was being cut anyway: it continues from the last saved
-            # snapshot as a new segment, consuming no attempt.
+            # while its checkpoint was pending was being cut anyway, and one lost before its automatic
+            # continuation reached the agent was continuing the same work: both continue from the last
+            # saved snapshot as a new segment, consuming no attempt.
             item = await _queue_context_continuation(task, recovery, settings)
             tasks = item.get("tasks", tasks)
             continue
@@ -2584,6 +2612,7 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
         # Capture at event time: queue delivery can start the checkpoint before settlement runs.
         if run.checkpoint_started:
             run.checkpoint_finished = True
+        run.turn_end = session.log.last_seq
         _background(_after_turn(run))
     elif type_ == "session.usage":
         if run.phase == "working" and run.status == "running":
@@ -2595,6 +2624,8 @@ def _on_session_event(session: Session, type_: str, data: Json) -> None:
         run.checkpoint_started = True
         run.context_handoff = "checkpoint"
         _background(_checkpoint_started(run))
+    elif type_ == "message.user" and str(data.get("text") or "").startswith(_CONTINUE_MARK):
+        _background(_continuation_delivered(run))
     elif (type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_READY
           and run.recovered and run.outcome is not None):
         # Durable results are settled by the deterministic runner after the restored workspace is ready;
@@ -2637,7 +2668,7 @@ async def _check_context(run: TaskRun) -> None:
         return
     threshold = run.limits["contextHandoffPercent"]
     percent = max(_context_percent(session), run.context_peak)
-    if percent < threshold and run.context_handoff is None:
+    if percent < threshold and run.context_handoff not in _HANDOFF_STATES:
         return
     run.checking_context = True
     try:
@@ -2684,12 +2715,15 @@ async def _queue_context_continuation(task: Json, recovery: Json | None,
     revision = recovery["snapshotRevision"]
     unchanged = revision == task.get("lastSnapshotRevision") or (
         task.get("lastSnapshotRevision") is None and not recovery.get("files"))
-    stalled = task.get("stalledSegments", 0) + 1 if unchanged else 0
+    # A pending automatic continuation already counted the turn that ended without a report.
+    continuation = task.get("contextHandoff") == CONTINUATION
+    stalled = task.get("stalledSegments", 0) + (0 if continuation else 1) if unchanged else 0
     task = {**task, "segments": task.get("segments", 0) + 1, "stalledSegments": stalled,
             "lastSnapshotRevision": revision, "contextHandoff": "resume"}
     limit = (limits or DEFAULT_LIMITS)["stallTurns"]
     status_ = "attention" if stalled >= limit else "queued"
     reason = (_no_progress(stalled, "tramos") if status_ == "attention"
+              else f"Continuación automática sin resultado, tramo {task['segments'] + 1}" if continuation
               else f"Continuación por contexto, tramo {task['segments'] + 1}")
     return await _report(task, status_, clear_session=True, report=reason)
 
@@ -2698,24 +2732,74 @@ def _no_progress(count: int, unit: str) -> str:
     return f"No progress: sin progreso tras {count} {unit} consecutivos"
 
 
-async def _track_turn_progress(run: TaskRun, saved: Json | None) -> bool:
-    """Counts a turn that ended with no result against `stallTurns`, sharing the count with segments:
-    a turn whose snapshot revision did not change is one more without progress, any change restarts it.
-    True once the task waits for the user."""
+async def _continue_without_result(run: TaskRun, session: Session, saved: Json | None) -> None:
+    """A working turn ended with no task report: the runner continues the task in the same session.
+
+    Deterministic, never an LLM supervisor. The turn's end-of-turn snapshot must have been saved first;
+    without it the task waits for the user (the recovery flow) instead of going on from unsaved work.
+    Each turn counts against `stallTurns`, sharing the count with segments: an unchanged snapshot revision
+    is one more turn without progress, any change restarts it. The count and the pending continuation are
+    saved before the continuation is queued, and each turn end is counted and continued once, so replays
+    and restarts never duplicate them. A paused item continues on Resume."""
+    turn = run.turn_end
+    if turn is not None and turn == run.continued_turn:
+        return
     if saved is None:
-        return False  # No fresh capture: the revision says nothing about this turn's progress.
-    revision = saved["snapshotRevision"]
-    unchanged = revision == run.last_snapshot_revision or (
-        run.last_snapshot_revision is None and not saved.get("files"))
-    stalled = run.stalled_segments + 1 if unchanged else 0
-    if stalled == run.stalled_segments and revision == run.last_snapshot_revision:
-        return False
-    run.stalled_segments, run.last_snapshot_revision = stalled, revision
-    if stalled >= run.limits["stallTurns"]:
-        await _save(run, "attention", report=_no_progress(stalled, "turnos"))
-        return True
-    await _save(run, run.status, report=run.report)
-    return False
+        LOG.warning("Task %s ended a turn without a report and its snapshot could not be saved", run.task_id)
+        run.context_handoff = None
+        await _save(run, "attention", report=(
+            "Task recovery needs attention: the turn ended without a task report and its workspace snapshot "
+            "could not be saved, so the task was not continued automatically."))
+        return
+    if turn is None or turn != run.counted_turn:
+        revision = saved["snapshotRevision"]
+        unchanged = revision == run.last_snapshot_revision or (
+            run.last_snapshot_revision is None and not saved.get("files"))
+        run.stalled_segments = run.stalled_segments + 1 if unchanged else 0
+        run.last_snapshot_revision = revision
+        run.counted_turn = turn
+    limit = run.limits["stallTurns"]
+    if run.stalled_segments >= limit:
+        LOG.info("Task %s waits for the user after %s turns without a report or progress",
+                 run.task_id, run.stalled_segments)
+        run.context_handoff = None
+        await _save(run, "attention", report=(
+            f"No progress: sin resultado de tarea tras {run.stalled_segments} turnos consecutivos sin progreso"))
+        return
+    if _quota_exhausted(session):
+        await _pause_quota(run, session)
+        return
+    caller = await _run_caller(run)
+    run.context_handoff = CONTINUATION
+    async with _lock_for(_item_locks, run.item_id):
+        # Read under the item's lock, like merge claims: Pause lands either before (no new turn until
+        # Resume) or after the continuation was queued.
+        if not _current(run) or session.closing or run.status != "running" or run.outcome is not None:
+            return
+        work = await mooi.fetch_work(caller, run.project_id)
+        item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), {})
+        if item.get("status") != "running":
+            run.resettle = True
+            await _report(run, "running", report="Turno sin resultado: continuará automáticamente al reanudar")
+            return
+        await _report(run, "running", report=(
+            f"Continuación automática: el turno terminó sin resultado ({run.stalled_segments} de {limit} "
+            "sin progreso)"))
+        if not any(message.text.startswith(_CONTINUE_MARK) for message in session.queue):
+            await sessions.queue_message(run.session_id, SendMessageRequest(text=CONTINUE.format(
+                revision=str(saved["snapshotRevision"])[:12], stalled=run.stalled_segments, limit=limit)),
+                caller)
+        run.continued_turn = turn
+    LOG.info("Task %s continues automatically after a turn without a report (%s of %s without progress)",
+             run.task_id, run.stalled_segments, limit)
+
+
+async def _continuation_delivered(run: TaskRun) -> None:
+    """The continuation reached the agent: from here a lost session is an ordinary lost turn again."""
+    if run.context_handoff == CONTINUATION:
+        run.context_handoff = None
+        with suppress(Exception):
+            await _save(run, run.status, report=run.report)
 
 
 async def _handoff_context(run: TaskRun) -> None:
@@ -2953,18 +3037,20 @@ async def _settle_turn(run: TaskRun) -> None:
         if run.phase == "working" and run.status == "running":
             # A checkpoint's terminal result hands off even when it omitted its report.
             if ((run.checkpoint_finished or run.context_handoff in ("forced", "handoff")
-                 or (run.context_handoff is None and run.outcome is not None
+                 or (run.context_handoff not in _HANDOFF_STATES and run.outcome is not None
                      and run.outcome.outcome == "continue" and session.status == STATUS_READY))
                     and (run.outcome is None or run.outcome.outcome == "continue")):
                 await _handoff_context(run)
                 return
             if run.outcome is None:
                 await _check_context(run)
-                if run.context_handoff or session.closing or run.quota_pausing:
+                if run.context_handoff in _HANDOFF_STATES or session.closing or run.quota_pausing:
                     return
                 # Turns cut for a checkpoint are not counted: their segment is, once it hands off.
-                if await _track_turn_progress(run, saved):
-                    return
+                # A message the user queued meanwhile is their own continuation: it goes out first.
+                if not session.queue and session.status == STATUS_READY and session.pending is None:
+                    await _continue_without_result(run, session, saved)
+                return
         if session.queue:
             return
         await _settle(run, session)
@@ -2991,18 +3077,11 @@ async def _settle(run: TaskRun, session: Session) -> None:
         return
     report = run.outcome
     if report is None:
-        if run.verification_nudged:
-            # The agent has already received the specific correction request. Wait for its
-            # corrected report rather than treating the still-open turn as a missing result.
-            return
-        if not run.nudged:
-            caller = await _run_caller(run)
-            run.nudged = True
-            await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), caller)
-            return
-        await _save(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
+        # A working turn without a report is continued by `_continue_without_result`; a task waiting
+        # for the user stays so until they step in.
         return
-    run.nudged = False
+    if run.context_handoff == CONTINUATION:
+        run.context_handoff = None  # Reported: the automatic continuation is over.
     if not run.qa and report.outcome == "done":
         changes = await workspaces.changes(session.workspace, session.base_commit)
         changed_files = {file.path for file in changes.files}
