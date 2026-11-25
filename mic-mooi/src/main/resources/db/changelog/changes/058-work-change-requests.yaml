@@ -1,0 +1,28 @@
+databaseChangeLog:
+  - changeSet:
+      id: 058-work-change-requests
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE work_change_requests (
+                id uuid PRIMARY KEY,
+                item_id uuid NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+                request text NOT NULL,
+                status varchar(32) NOT NULL DEFAULT 'queued',
+                analysis text,
+                proposal text NOT NULL DEFAULT '{}',
+                session_id uuid,
+                confirmed_at timestamptz,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                finished_at timestamptz,
+                CONSTRAINT ck_work_change_requests_status CHECK
+                  (status IN ('queued', 'analyzing', 'awaiting_confirmation', 'applied', 'rejected'))
+              );
+              CREATE INDEX ix_work_change_requests_item ON work_change_requests (item_id, created_at, id);
+              CREATE UNIQUE INDEX uq_work_change_requests_analyst ON work_change_requests (item_id)
+                WHERE status = 'analyzing';
+      rollback:
+        - dropTable:
+            tableName: work_change_requests

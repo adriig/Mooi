@@ -214,6 +214,19 @@ Each project plans and builds its work as a software factory: agents design it, 
   new session (`contextHandoffPercent`, 20-90, default 60) and the consecutive turns or segments without
   progress before a task waits for the user (`stallTurns`, 1-10, default 3).
 - Managed from UI or chat (session agents use the same platform API); changes stream live to every view.
+- **Change requests on ongoing features**: the user or their chat queues a durable textual request without
+  pausing the feature. At a safe point (no task merging or resolving conflicts), the deterministic runner
+  opens one analyst session using the first unfinished task's assignment and ordered alternatives. It counts
+  against normal session limits; existing tasks continue, while new task launches wait during analysis.
+  The analyst works from the default branch, reads code but never writes it, and stages spec edits,
+  edits/deletions of planned or queued tasks, and new delta tasks through the existing work API. The API
+  rejects changes to completed or active tasks with 409, including indirect changes through QA/dependencies.
+  Proposed edits are durable and applied atomically on the analyst's final report. Scope changes or rework
+  of completed tasks require an explicit user decision on a textual proposal; acceptance starts a fresh
+  analyst with permission for that proposal, rejection closes the request. Completed work is preserved and
+  any rework becomes delta tasks. Requests, analysis, proposals and decisions live in mic-mooi and travel
+  in `work.item` events; user and agent routes share the same operations. Analyzing requests whose sessions
+  disappeared return to queued, including after restart and while the feature is paused.
 
 ### Unattended continuity
 

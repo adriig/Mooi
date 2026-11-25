@@ -265,6 +265,53 @@ public class ProjectWorkFeature {
 
     // --- the runner, acting on its own ---
 
+    @GetMapping("/me/projects/{projectId}/work/items/{itemId}/change-requests")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public List<ChangeRequestPayload> changeRequests(@PathVariable UUID projectId, @PathVariable UUID itemId,
+                                                     Auth.Principal principal) {
+        return work.changeRequests(principal.player().id(), projectId, itemId);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/items/{itemId}/change-requests")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    @ResponseStatus(HttpStatus.CREATED)
+    public ItemPayload requestChange(@PathVariable UUID projectId, @PathVariable UUID itemId,
+                                      @Valid @RequestBody ChangeRequestDraft draft, Auth.Principal principal) {
+        return work.requestChange(principal.player().id(), projectId, itemId, draft);
+    }
+
+    @PostMapping("/me/projects/{projectId}/work/items/{itemId}/change-requests/{changeId}/decision")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public ItemPayload decideChange(@PathVariable UUID projectId, @PathVariable UUID itemId,
+                                     @PathVariable UUID changeId, @Valid @RequestBody ChangeDecision decision,
+                                     Auth.Principal principal) {
+        return work.decideChange(principal.player().id(), projectId, itemId, changeId, decision);
+    }
+
+    @PutMapping("/internal/work/items/{itemId}/change-requests/{changeId}")
+    @Auth.ServiceOnly
+    public RunnerItem changeProgress(@PathVariable UUID itemId, @PathVariable UUID changeId,
+                                      @Valid @RequestBody ChangeProgress progress) {
+        return work.changeProgress(itemId, changeId, progress);
+    }
+
+    @PostMapping("/internal/work/items/{itemId}/change-requests/{changeId}/operations")
+    @Auth.ServiceOnly
+    public RunnerItem stageChange(@PathVariable UUID itemId, @PathVariable UUID changeId,
+                                   @Valid @RequestBody ChangeOperationDraft draft) {
+        return work.stageChange(itemId, changeId, draft);
+    }
+
+    @PostMapping("/internal/work/change-requests/reconcile")
+    @Auth.ServiceOnly
+    public RunningPayload reconcileChanges(@RequestBody Set<UUID> liveSessions,
+            @org.springframework.web.bind.annotation.RequestParam(required = false) Set<UUID> advancingItems) {
+        return work.reconcileChanges(liveSessions, advancingItems == null ? Set.of() : advancingItems);
+    }
+
     @GetMapping("/internal/work/running")
     @Auth.ServiceOnly
     public RunningPayload running() {
@@ -334,11 +381,233 @@ public class ProjectWorkFeature {
         private final WorkTaskRepository tasks;
         private final TaskRecoveryRepository recoveries;
         private final WorkQaDeliveryRepository qaDeliveries;
+        private final WorkChangeRequestRepository changes;
         private final WorkSettingsRepository settings;
         private final IssueDefinitionRepository definitions;
         private final Auth.FactoryCredentials credentials;
         private final Clock clock;
         private final ObjectMapper json = JsonMapper.shared();
+
+        @Transactional
+        public List<ChangeRequestPayload> changeRequests(UUID playerId, UUID projectId, UUID itemId) {
+            project(playerId, projectId);
+            feature(lockedItem(projectId, itemId));
+            return changes.findByItemIdOrderByCreatedAtAscIdAsc(itemId).stream().map(this::changePayload).toList();
+        }
+
+        @Transactional
+        public ItemPayload requestChange(UUID playerId, UUID projectId, UUID itemId, ChangeRequestDraft draft) {
+            project(playerId, projectId);
+            WorkItem item = lockedItem(projectId, itemId);
+            feature(item);
+            requireOpen(item);
+            WorkChangeRequest row = new WorkChangeRequest();
+            row.setId(UUID.randomUUID());
+            row.setItemId(itemId);
+            row.setRequest(draft.request().strip());
+            row.setStatus(ChangeStatus.queued);
+            row.setProposal("{}");
+            changes.save(row);
+            return toPayload(touch(item), tasks.findByItemId(itemId));
+        }
+
+        @Transactional
+        public ItemPayload decideChange(UUID playerId, UUID projectId, UUID itemId, UUID changeId,
+                                         ChangeDecision decision) {
+            project(playerId, projectId);
+            WorkItem item = lockedItem(projectId, itemId);
+            feature(item);
+            WorkChangeRequest row = change(itemId, changeId);
+            if (row.getStatus() != ChangeStatus.awaiting_confirmation) {
+                throw conflict("This change is not waiting for a decision");
+            }
+            row.setStatus(decision.decision() == Decision.accept ? ChangeStatus.queued : ChangeStatus.rejected);
+            row.setConfirmedAt(decision.decision() == Decision.accept ? OffsetDateTime.now(clock) : null);
+            row.setFinishedAt(decision.decision() == Decision.reject ? OffsetDateTime.now(clock) : null);
+            row.setSessionId(null);
+            changes.save(row);
+            List<WorkTask> all = tasks.findByItemId(itemId);
+            completeIfReady(item, all);
+            return toPayload(touch(item), all);
+        }
+
+        private void completeIfReady(WorkItem item, List<WorkTask> all) {
+            if (!all.isEmpty() && all.stream().allMatch(task -> task.getStatus() == TaskStatus.done)
+                    && !changes.existsByItemIdAndStatusIn(item.getId(), List.of(ChangeStatus.queued,
+                            ChangeStatus.analyzing, ChangeStatus.awaiting_confirmation))) {
+                item.setStatus(ItemStatus.done);
+                item.setFinishedAt(OffsetDateTime.now(clock));
+            }
+        }
+
+        @Transactional
+        public RunningPayload reconcileChanges(Set<UUID> liveSessions, Set<UUID> advancingItems) {
+            List<RunnerItem> changed = new ArrayList<>();
+            // Include paused items and revoked callers: reconciliation needs no user's live grant.
+            List<UUID> itemIds = changes.findItemIdsByStatus(ChangeStatus.analyzing);
+            for (UUID itemId : itemIds) {
+                // The concurrent runner may be between saving a lease and registering its session.
+                // Its live-session snapshot cannot prove an in-flight item's analyst disappeared.
+                if (advancingItems.contains(itemId)) continue;
+                WorkItem item = items.findLockedById(itemId).orElse(null);
+                if (item == null) continue;
+                for (WorkChangeRequest row : changes.findByItemIdOrderByCreatedAtAscIdAsc(itemId)) {
+                    if (row.getStatus() != ChangeStatus.analyzing || liveSessions.contains(row.getSessionId())) continue;
+                    row.setStatus(ChangeStatus.queued);
+                    row.setSessionId(null);
+                    row.setAnalysis("Analyst session ended; queued for a fresh analysis");
+                    changes.save(row);
+                    changed.add(runnerItem(touch(item), tasks.findByItemId(itemId)));
+                }
+            }
+            return new RunningPayload(changed);
+        }
+
+        private void feature(WorkItem item) {
+            if (item.getKind() != ItemKind.feature) throw conflict("Only features accept change requests");
+        }
+
+        private WorkChangeRequest change(UUID itemId, UUID changeId) {
+            return changes.findById(changeId).filter(row -> row.getItemId().equals(itemId))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Change request not found"));
+        }
+
+        private Map<String, Object> proposal(WorkChangeRequest row) {
+            return new LinkedHashMap<>(json.readValue(row.getProposal(), new TypeReference<Map<String, Object>>() {}));
+        }
+
+        private List<ChangeOperation> operations(WorkChangeRequest row) {
+            Object value = proposal(row).getOrDefault("operations", List.of());
+            return json.convertValue(value, new TypeReference<List<ChangeOperation>>() {});
+        }
+
+        private void editable(List<WorkTask> all, UUID taskId) {
+            WorkTask task = find(all, taskId);
+            if (task.getStatus() != TaskStatus.planned && task.getStatus() != TaskStatus.queued) {
+                throw conflict("An analyst may only change planned or queued tasks; add a delta task instead");
+            }
+        }
+
+        private void validateOperation(List<WorkTask> all, ChangeOperation op) {
+            switch (op.kind()) {
+                case spec -> {
+                    if (op.item() == null || op.item().spec() == null || op.item().title() != null
+                            || op.item().dependsOn() != null) throw badRequest("Provide only the spec");
+                }
+                case add_task -> {
+                    if (op.draft() == null) throw badRequest("A task draft is required");
+                }
+                case update_task, delete_task -> {
+                    if (op.taskId() == null) throw badRequest("A task id is required");
+                    editable(all, op.taskId());
+                    if (op.kind() == ChangeOperationKind.update_task && op.task() == null) {
+                        throw badRequest("A task update is required");
+                    }
+                    WorkTask owner = find(all, op.taskId());
+                    if (op.kind() == ChangeOperationKind.delete_task && owner.getQaOfId() != null) {
+                        editable(all, owner.getQaOfId());
+                    }
+                    if (op.kind() == ChangeOperationKind.delete_task
+                            || (op.task() != null && Boolean.FALSE.equals(op.task().tests()) && owner.isTests())) {
+                        Set<UUID> removed = new HashSet<>(Set.of(op.taskId()));
+                        all.stream().filter(task -> op.taskId().equals(task.getQaOfId()))
+                                .forEach(task -> { editable(all, task.getId()); removed.add(task.getId()); });
+                        for (WorkTask task : all) {
+                            if (!removed.contains(task.getId())
+                                    && task.getDependsOn().stream().anyMatch(removed::contains)) editable(all, task.getId());
+                        }
+                    }
+                }
+            }
+        }
+
+        @Transactional
+        public RunnerItem stageChange(UUID itemId, UUID changeId, ChangeOperationDraft draft) {
+            WorkItem item = items.findLockedById(itemId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
+            WorkChangeRequest row = change(itemId, changeId);
+            if (row.getStatus() != ChangeStatus.analyzing || !draft.sessionId().equals(row.getSessionId())) {
+                throw conflict("This session is not the active analyst");
+            }
+            List<WorkTask> all = tasks.findByItemId(itemId);
+            validateOperation(all, draft.operation());
+            List<ChangeOperation> ops = new ArrayList<>(operations(row));
+            if (ops.size() >= 160) throw badRequest("Too many proposed operations");
+            ops.add(draft.operation());
+            Map<String, Object> proposal = proposal(row);
+            proposal.put("operations", ops);
+            row.setProposal(json.writeValueAsString(proposal));
+            changes.save(row);
+            return runnerItem(touch(item), all);
+        }
+
+        @Transactional
+        public RunnerItem changeProgress(UUID itemId, UUID changeId, ChangeProgress progress) {
+            WorkItem item = items.findLockedById(itemId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
+            feature(item);
+            WorkChangeRequest row = change(itemId, changeId);
+            List<WorkTask> all = tasks.findByItemId(itemId);
+            if ((progress.status() == ChangeStatus.applied || progress.status() == ChangeStatus.awaiting_confirmation)
+                    && row.getStatus() == progress.status() && progress.sessionId().equals(row.getSessionId())) {
+                return runnerItem(item, all); // A lost HTTP response must not apply the proposal twice.
+            }
+            if (progress.status() == ChangeStatus.analyzing) {
+                requireOpen(item);
+                if (item.getStatus() != ItemStatus.running || row.getStatus() != ChangeStatus.queued
+                        || changes.existsByItemIdAndStatus(itemId, ChangeStatus.analyzing)
+                        || all.stream().anyMatch(task -> task.getStatus() == TaskStatus.merging)) {
+                    throw conflict("The feature is not at a safe analysis point");
+                }
+                row.setSessionId(progress.sessionId());
+                Map<String, Object> proposal = proposal(row);
+                proposal.put("operations", List.of());
+                row.setProposal(json.writeValueAsString(proposal));
+            } else {
+                if (row.getStatus() != ChangeStatus.analyzing
+                        || !progress.sessionId().equals(row.getSessionId())) {
+                    throw conflict("This session is no longer the active analyst");
+                }
+                if (progress.status() == ChangeStatus.applied) {
+                    UUID playerId = projects.findById(item.getProjectId()).orElseThrow().getPlayerId();
+                    // All operations share this transaction and item lock, including validation against
+                    // current task state. A failure rolls the entire proposal back.
+                    for (ChangeOperation op : operations(row)) {
+                        validateOperation(tasks.findByItemId(itemId), op);
+                        switch (op.kind()) {
+                            case spec -> updateItem(playerId, item.getProjectId(), itemId, op.item());
+                            case add_task -> addTask(playerId, item.getProjectId(), itemId, op.draft());
+                            case update_task -> updateTask(playerId, item.getProjectId(), itemId, op.taskId(), op.task());
+                            case delete_task -> deleteTask(playerId, item.getProjectId(), itemId, op.taskId());
+                        }
+                    }
+                    row.setFinishedAt(OffsetDateTime.now(clock));
+                } else if (progress.status() != ChangeStatus.queued
+                        && progress.status() != ChangeStatus.awaiting_confirmation) {
+                    throw badRequest("Invalid analyst transition");
+                }
+                if (progress.analysis() != null) row.setAnalysis(progress.analysis().strip());
+                if (progress.proposalText() != null) {
+                    Map<String, Object> proposal = proposal(row);
+                    proposal.put("text", progress.proposalText());
+                    row.setProposal(json.writeValueAsString(proposal));
+                }
+                // A new scope proposal always requires a fresh explicit decision.
+                if (progress.status() == ChangeStatus.awaiting_confirmation) row.setConfirmedAt(null);
+                if (progress.status() == ChangeStatus.queued) row.setSessionId(null);
+            }
+            row.setStatus(progress.status());
+            changes.save(row);
+            all = tasks.findByItemId(itemId);
+            completeIfReady(item, all);
+            return runnerItem(touch(item), all);
+        }
+
+        private ChangeRequestPayload changePayload(WorkChangeRequest row) {
+            return new ChangeRequestPayload(row.getId(), row.getItemId(), row.getRequest(), row.getStatus(),
+                    row.getAnalysis(), proposal(row), row.getSessionId(), row.getConfirmedAt(), row.getCreatedAt(),
+                    row.getUpdatedAt(), row.getFinishedAt());
+        }
 
         @Transactional
         public WorkPayload recordDeployment(UUID projectId, DeploymentOutcome outcome) {
@@ -572,8 +841,8 @@ public class ProjectWorkFeature {
             WorkTask task = find(all, taskId);
             Set<UUID> removed = new HashSet<>(Set.of(taskId));
             all.stream().filter(other -> taskId.equals(other.getQaOfId())).forEach(qa -> removed.add(qa.getId()));
-            if (all.stream().anyMatch(other -> removed.contains(other.getId()) && isActive(other.getStatus()))) {
-                throw conflict("This task is running: let it finish before removing it");
+            if (all.stream().anyMatch(other -> removed.contains(other.getId()) && STARTED.contains(other.getStatus()))) {
+                throw conflict("A task that already started cannot be removed");
             }
             if (task.getQaOfId() != null) {
                 all.stream().filter(owner -> owner.getId().equals(task.getQaOfId()))
@@ -707,7 +976,8 @@ public class ProjectWorkFeature {
             task = find(all, taskId);
             // A stale runner snapshot must not launch a paused item or revive a cancelled task.
             if (task.getStatus() == TaskStatus.done
-                    || (task.getSessionId() == null && item.getStatus() != ItemStatus.running)) {
+                    || (task.getSessionId() == null && (item.getStatus() != ItemStatus.running
+                        || changes.existsByItemIdAndStatus(item.getId(), ChangeStatus.analyzing)))) {
                 return runnerItem(item, all);
             }
             OffsetDateTime now = OffsetDateTime.now(clock);
@@ -751,7 +1021,9 @@ public class ProjectWorkFeature {
                 assign(task, progress.assignment());
             }
             tasks.save(task);
-            if (all.stream().allMatch(other -> other.getStatus() == TaskStatus.done)) {
+            if (all.stream().allMatch(other -> other.getStatus() == TaskStatus.done)
+                    && !changes.existsByItemIdAndStatusIn(item.getId(), List.of(ChangeStatus.queued,
+                            ChangeStatus.analyzing, ChangeStatus.awaiting_confirmation))) {
                 item.setStatus(ItemStatus.done);
                 item.setFinishedAt(now);
             }
@@ -950,7 +1222,9 @@ public class ProjectWorkFeature {
                 qa.setStatus(TaskStatus.done);
                 qa.setSessionId(null);
                 qa.setFinishedAt(now);
-                if (all.stream().allMatch(task -> task.getStatus() == TaskStatus.done || task == qa)) {
+                if (all.stream().allMatch(task -> task.getStatus() == TaskStatus.done || task == qa)
+                        && !changes.existsByItemIdAndStatusIn(item.getId(), List.of(ChangeStatus.queued,
+                                ChangeStatus.analyzing, ChangeStatus.awaiting_confirmation))) {
                     item.setStatus(ItemStatus.done);
                     item.setFinishedAt(now);
                 }
@@ -1379,7 +1653,8 @@ public class ProjectWorkFeature {
                                      readQaHandoff(task.getQaHandoff()),
                                      List.copyOf(task.getDependsOn()),
                                      task.getStartedAt(), task.getFinishedAt()))
-                            .toList());
+                            .toList(), changes.findByItemIdOrderByCreatedAtAscIdAsc(item.getId()).stream()
+                                    .map(this::changePayload).toList());
         }
 
         private DefinitionState definitionState(WorkItem item) {
@@ -1906,6 +2181,41 @@ public class ProjectWorkFeature {
     @Getter
     @Setter
     @NoArgsConstructor
+    @Entity(name = "WorkChangeRequest")
+    @Table(name = "work_change_requests")
+    public static class WorkChangeRequest extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "item_id", nullable = false, updatable = false)
+        private UUID itemId;
+        @Column(name = "request", nullable = false, columnDefinition = "text")
+        private String request;
+        @Enumerated(EnumType.STRING)
+        @Column(nullable = false)
+        private ChangeStatus status;
+        @Column(columnDefinition = "text")
+        private String analysis;
+        @Column(nullable = false, columnDefinition = "text")
+        private String proposal;
+        @Column(name = "session_id")
+        private UUID sessionId;
+        @Column(name = "confirmed_at")
+        private OffsetDateTime confirmedAt;
+        @Column(name = "finished_at")
+        private OffsetDateTime finishedAt;
+    }
+
+    public interface WorkChangeRequestRepository extends JpaRepository<WorkChangeRequest, UUID> {
+        List<WorkChangeRequest> findByItemIdOrderByCreatedAtAscIdAsc(UUID itemId);
+        @Query("select distinct request.itemId from WorkChangeRequest request where request.status = :status order by request.itemId")
+        List<UUID> findItemIdsByStatus(@Param("status") ChangeStatus status);
+        boolean existsByItemIdAndStatus(UUID itemId, ChangeStatus status);
+        boolean existsByItemIdAndStatusIn(UUID itemId, List<ChangeStatus> statuses);
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
     @Entity(name = "WorkItem")
     @Table(name = "work_items")
     public static class WorkItem extends Db.Auditable {
@@ -2380,6 +2690,29 @@ public class ProjectWorkFeature {
 
     public enum IssueState { open, closed }
 
+    public enum ChangeStatus { queued, analyzing, awaiting_confirmation, applied, rejected }
+
+    public enum Decision { accept, reject }
+
+    public enum ChangeOperationKind { spec, add_task, update_task, delete_task }
+
+    public record ChangeRequestDraft(@NotBlank @Size(max = 20_000) String request) { }
+
+    public record ChangeDecision(@NotNull Decision decision) { }
+
+    public record ChangeProgress(@NotNull ChangeStatus status, @NotNull UUID sessionId,
+                                  @Size(max = 20_000) String analysis,
+                                  @Size(max = 20_000) String proposalText) { }
+
+    public record ChangeOperation(@NotNull ChangeOperationKind kind, UUID taskId,
+                                   @Valid ItemUpdate item, @Valid TaskDraft draft, @Valid TaskUpdate task) { }
+
+    public record ChangeOperationDraft(@NotNull UUID sessionId, @NotNull @Valid ChangeOperation operation) { }
+
+    public record ChangeRequestPayload(UUID id, UUID itemId, String request, ChangeStatus status, String analysis,
+                                        Map<String, Object> proposal, UUID sessionId, OffsetDateTime confirmedAt,
+                                        OffsetDateTime createdAt, OffsetDateTime updatedAt, OffsetDateTime finishedAt) { }
+
     /** Who runs a task. Any field may be empty: the platform fills it with the player's defaults at launch. */
     public record Assignment(@Size(max = 32) String provider, @Size(max = 64) String connectionId,
                              @Size(max = 128) String model, @Size(max = 32) String effort) {
@@ -2536,7 +2869,7 @@ public class ProjectWorkFeature {
                               OffsetDateTime finishedAt,
                               OffsetDateTime createdAt, OffsetDateTime updatedAt, DeploymentPayload deployment,
                               DefinitionState definitionState,
-                              List<TaskPayload> tasks) {
+                              List<TaskPayload> tasks, List<ChangeRequestPayload> changeRequests) {
     }
 
     public record DeploymentPayload(String state, String version, OffsetDateTime deployedAt, Boolean inCurrentRelease) { }

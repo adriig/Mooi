@@ -123,3 +123,5 @@ databaseChangeLog:
       file: db/changelog/changes/059-work-context-stall-settings.yaml
   - include:
       file: db/changelog/changes/060-factory-runner-credential.yaml
+  - include:
+      file: db/changelog/changes/058-work-change-requests.yaml

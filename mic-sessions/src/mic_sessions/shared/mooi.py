@@ -360,9 +360,37 @@ async def send_work(caller: Caller, method: str, project_id: UUID, path: str, pa
     return await _send(method, f"/me/projects/{project_id}/work{path}", caller, "Not found", payload)
 
 
+async def fetch_work_changes(caller: Caller, project_id: UUID, item_id: UUID) -> list[dict]:
+    response: Any = await _send("GET", f"/me/projects/{project_id}/work/items/{item_id}/change-requests", caller,
+                                "Change request not found")
+    return response or []
+
+
+async def reconcile_work_changes(live_sessions: list[str], advancing_items: list[str]) -> list[dict]:
+    # This service endpoint takes a collection rather than the usual object body.
+    try:
+        response = await get_http_client().post(
+            f"{get_settings().mooi_api_base_url}/internal/work/change-requests/reconcile",
+            headers=_service_headers(None), json=live_sessions, params={"advancingItems": advancing_items})
+    except httpx.HTTPError:
+        raise ApiException.bad_gateway() from None
+    _raise_for_status(response, "Change requests not found")
+    return list(response.json().get("items") or [])
+
+
 async def fetch_running_work() -> list[dict]:
     """Service-only: every started item of every player, for the runner."""
     return list(((await _send("GET", "/internal/work/running", None, "Not found")) or {}).get("items") or [])
+
+
+async def progress_work_change(item_id: UUID, change_id: UUID, progress: dict) -> dict:
+    return await _send("PUT", f"/internal/work/items/{item_id}/change-requests/{change_id}", None,
+                       "Change request not found", progress) or {}
+
+
+async def stage_work_change(item_id: UUID, change_id: UUID, session_id: UUID, operation: dict) -> dict:
+    return await _send("POST", f"/internal/work/items/{item_id}/change-requests/{change_id}/operations", None,
+                       "Change request not found", {"sessionId": str(session_id), "operation": operation}) or {}
 
 
 async def record_work_deployment(project_id: UUID, release_tag: str, release_sha: str,

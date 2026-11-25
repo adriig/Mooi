@@ -1484,7 +1484,7 @@ async def create_session(
 
 
 async def _open_session(body: CreateSessionRequest, caller: Caller, *,
-                        recovery: dict[str, Any] | None = None) -> Session:
+                        recovery: dict[str, Any] | None = None, session_id: UUID | None = None) -> Session:
     """Opens any chat, from the UI or handed over by another chat's agent: the same path either way."""
     descriptor = describe(body.provider)
     registry = get_registry()
@@ -1502,7 +1502,7 @@ async def _open_session(body: CreateSessionRequest, caller: Caller, *,
                 await close_session(existing.id)
 
     session = new_session(
-        session_id=uuid4(),
+        session_id=session_id or uuid4(),
         player_id=caller.player_id,
         project_id=body.projectId,
         project_full_name="",

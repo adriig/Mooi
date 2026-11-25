@@ -40,7 +40,7 @@ from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, Depends, Query, Request, status
@@ -80,6 +80,14 @@ EVENT_WORK_DEFINITION = "work.definition"
 Json = dict[str, Any]
 
 
+@overload
+def _publish_item(player_id: UUID, item: Json) -> Json: ...
+
+
+@overload
+def _publish_item(player_id: UUID, item: None) -> None: ...
+
+
 def _publish_item(player_id: UUID, item: Json | None) -> Json | None:
     if item:
         sessions._channels.publish(player_id, EVENT_WORK_ITEM, {"projectId": item["projectId"], "item": item})
@@ -95,26 +103,49 @@ def _publish_issue(player_id: UUID, project_id: UUID, issue: Json | None) -> Non
 
 
 async def _create_feature(caller: Caller, project_id: UUID, draft: Json) -> Json:
-    return _publish_item(caller.player_id, await mooi.send_work(caller, "POST", project_id, "/features", draft))
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "POST", project_id, "/features", draft) or {})
 
 
 async def _update_item(caller: Caller, project_id: UUID, item_id: UUID, update: Json) -> Json:
-    return _publish_item(caller.player_id, await mooi.send_work(caller, "PATCH", project_id, f"/items/{item_id}", update))
+    return _publish_item(caller.player_id, await mooi.send_work(caller, "PATCH", project_id, f"/items/{item_id}", update) or {})
+
+
+async def _change_requests(caller: Caller, project_id: UUID, item_id: UUID) -> list[Json]:
+    return await mooi.fetch_work_changes(caller, project_id, item_id)
+
+
+async def _request_change(caller: Caller, project_id: UUID, item_id: UUID, draft: Json) -> Json:
+    async with _lock_for(_item_locks, item_id):
+        item = await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/change-requests", draft)
+        _touch(item_id)
+        _publish_item(caller.player_id, item)
+    wake()
+    return item or {}
+
+
+async def _decide_change(caller: Caller, project_id: UUID, item_id: UUID, change_id: UUID, decision: Json) -> Json:
+    async with _lock_for(_item_locks, item_id):
+        item = await mooi.send_work(caller, "POST", project_id,
+                                    f"/items/{item_id}/change-requests/{change_id}/decision", decision)
+        _touch(item_id)
+        _publish_item(caller.player_id, item)
+    wake()
+    return item or {}
 
 
 async def _add_task(caller: Caller, project_id: UUID, item_id: UUID, draft: Json) -> Json:
     return _publish_item(caller.player_id,
-                         await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/tasks", draft))
+                         await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/tasks", draft) or {})
 
 
 async def _update_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID, update: Json) -> Json:
     return _publish_item(caller.player_id, await mooi.send_work(caller, "PATCH", project_id,
-                                                               f"/items/{item_id}/tasks/{task_id}", update))
+                                                               f"/items/{item_id}/tasks/{task_id}", update) or {})
 
 
 async def _delete_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
     return _publish_item(caller.player_id, await mooi.send_work(caller, "DELETE", project_id,
-                                                               f"/items/{item_id}/tasks/{task_id}"))
+                                                               f"/items/{item_id}/tasks/{task_id}") or {})
 
 
 async def _retry_task(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID) -> Json:
@@ -268,6 +299,24 @@ async def create_feature(project_id: UUID, draft: Annotated[Json, Body()],
     return await _create_feature(caller, project_id, draft)
 
 
+@router.get("/projects/{project_id}/work/items/{item_id}/change-requests")
+async def change_requests(project_id: UUID, item_id: UUID,
+                          caller: Annotated[Caller, Depends(current_caller)]) -> list[Json]:
+    return await _change_requests(caller, project_id, item_id)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/change-requests", status_code=status.HTTP_201_CREATED)
+async def request_change(project_id: UUID, item_id: UUID, draft: Annotated[Json, Body()],
+                         caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _request_change(caller, project_id, item_id, draft)
+
+
+@router.post("/projects/{project_id}/work/items/{item_id}/change-requests/{change_id}/decision")
+async def decide_change(project_id: UUID, item_id: UUID, change_id: UUID, decision: Annotated[Json, Body()],
+                        caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _decide_change(caller, project_id, item_id, change_id, decision)
+
+
 @router.patch("/projects/{project_id}/work/items/{item_id}")
 async def update_item(project_id: UUID, item_id: UUID, update: Annotated[Json, Body()],
                       caller: Annotated[Caller, Depends(current_caller)]) -> Json:
@@ -417,6 +466,76 @@ class TaskReport(BaseModel):
     obstacles: list[str] = Field(default_factory=list, max_length=200)
 
 
+class ChangeReport(BaseModel):
+    outcome: Literal["applied", "needs_confirmation"]
+    summary: str = Field(min_length=1, max_length=20_000)
+    proposal: str = Field(default="", max_length=20_000)
+
+
+def _analyst_guard(session_id: UUID, item_id: UUID | None = None) -> AnalystRun | None:
+    run = _analysts.get(session_id)
+    if run is not None and run.item_id != item_id:
+        raise ApiException.conflict("An analyst may only edit the spec and unstarted tasks of its feature")
+    return run
+
+
+async def _stage_analyst(session_id: UUID, item_id: UUID, operation: Json) -> Json | None:
+    run = _analyst_guard(session_id, item_id)
+    if run is None:
+        return None
+    answer = await mooi.stage_work_change(item_id, run.change_id, session_id, operation)
+    item = answer.get("item") or {}
+    _publish_item(run.player_id, item)
+    return {**item, "staged": True}
+
+
+@router.get("/sessions/{session_id}/work/agent/items/{item_id}/change-requests")
+async def agent_change_requests(session_id: UUID, item_id: UUID, request: Request) -> list[Json]:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id, item_id)
+    return await _change_requests(caller, session.project_id, item_id)
+
+
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/change-requests", status_code=status.HTTP_201_CREATED)
+async def agent_request_change(session_id: UUID, item_id: UUID, request: Request,
+                               draft: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
+    return await _request_change(caller, session.project_id, item_id, draft)
+
+
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/change-requests/{change_id}/decision")
+async def agent_decide_change(session_id: UUID, item_id: UUID, change_id: UUID, request: Request,
+                              decision: Annotated[Json, Body()]) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
+    if decision.get("userConfirmed") is not True:
+        raise ApiException.conflict("A change decision requires explicit user confirmation (userConfirmed: true)")
+    return await _decide_change(caller, session.project_id, item_id, change_id, decision)
+
+
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/change-requests/{change_id}/report")
+async def agent_report_change(session_id: UUID, item_id: UUID, change_id: UUID, request: Request,
+                              report: ChangeReport) -> Json:
+    await sessions._agent_access(session_id, request, "session")
+    run = _analyst_guard(session_id, item_id)
+    if run is None or run.change_id != change_id:
+        raise ApiException.conflict("This session is not the change request's analyst")
+    if not report.summary.strip() or (report.outcome == "needs_confirmation" and not report.proposal.strip()):
+        raise ApiException.bad_request("Provide a summary and, when asking for confirmation, a textual proposal")
+    async with _lock_for(_item_locks, item_id):
+        answer = await mooi.progress_work_change(item_id, change_id, {
+            "sessionId": str(session_id),
+            "status": "applied" if report.outcome == "applied" else "awaiting_confirmation",
+            "analysis": report.summary, "proposalText": report.proposal,
+        })
+        _touch(item_id)
+        run.reported = True
+        _publish_item(run.player_id, answer.get("item"))
+    wake()
+    return answer.get("item") or {}
+
+
 @router.get("/sessions/{session_id}/work/agent")
 async def agent_work(session_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
@@ -459,7 +578,7 @@ async def agent_task_context(session_id: UUID, request: Request,
                              revision: str | None = None, full: bool = False) -> Json:
     """Only this run's spec, never the project's task list. No GitHub sync or writes."""
     session, caller = await sessions._agent_access(session_id, request, "session")
-    run = _runs.get(session_id)
+    run = _runs.get(session_id) or _analysts.get(session_id)
     if run is None:
         raise ApiException.conflict("This session does not run a factory task")
     work = await mooi.fetch_work(caller, session.project_id)
@@ -516,18 +635,25 @@ async def agent_qa_handoff(session_id: UUID, request: Request) -> Json:
 @router.post("/sessions/{session_id}/work/agent/features", status_code=status.HTTP_201_CREATED)
 async def agent_create_feature(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _create_feature(caller, session.project_id, draft)
 
 
 @router.patch("/sessions/{session_id}/work/agent/items/{item_id}")
 async def agent_update_item(session_id: UUID, item_id: UUID, request: Request, update: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    staged = await _stage_analyst(session_id, item_id, {"kind": "spec", "item": update})
+    if staged is not None:
+        return staged
     return await _update_item(caller, session.project_id, item_id, update)
 
 
 @router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks")
 async def agent_add_task(session_id: UUID, item_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    staged = await _stage_analyst(session_id, item_id, {"kind": "add_task", "draft": draft})
+    if staged is not None:
+        return staged
     return await _add_task(caller, session.project_id, item_id, draft)
 
 
@@ -535,30 +661,39 @@ async def agent_add_task(session_id: UUID, item_id: UUID, request: Request, draf
 async def agent_update_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request,
                             update: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    staged = await _stage_analyst(session_id, item_id, {"kind": "update_task", "taskId": str(task_id), "task": update})
+    if staged is not None:
+        return staged
     return await _update_task(caller, session.project_id, item_id, task_id, update)
 
 
 @router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}/retry")
 async def agent_retry_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _retry_task(caller, session.project_id, item_id, task_id)
 
 
 @router.post("/sessions/{session_id}/work/agent/items/{item_id}/reassign")
 async def agent_reassign_tasks(session_id: UUID, item_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _reassign_tasks(caller, session.project_id, item_id)
 
 
 @router.delete("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}")
 async def agent_delete_task(session_id: UUID, item_id: UUID, task_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    staged = await _stage_analyst(session_id, item_id, {"kind": "delete_task", "taskId": str(task_id)})
+    if staged is not None:
+        return staged
     return await _delete_task(caller, session.project_id, item_id, task_id)
 
 
 @router.post("/sessions/{session_id}/work/agent/issues", status_code=status.HTTP_201_CREATED)
 async def agent_create_issue(session_id: UUID, request: Request, draft: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _create_issue(caller, session.project_id, draft)
 
 
@@ -572,6 +707,7 @@ async def agent_issue_definition(session_id: UUID, number: int, request: Request
 async def agent_propose_issue_definition(session_id: UUID, number: int, request: Request,
                                          proposal: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _change_definition(caller, session.project_id, number, "proposal", proposal)
 
 
@@ -584,6 +720,7 @@ async def agent_work_settings(session_id: UUID, request: Request) -> Json:
 @router.put("/sessions/{session_id}/work/agent/settings")
 async def agent_save_work_settings(session_id: UUID, request: Request, settings: Annotated[Json, Body()]) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
     return await _save_settings(caller, session.project_id, settings)
 
 
@@ -634,6 +771,9 @@ ASSIGNMENT_BRIEF = """You are the assignment expert of the software factory: for
 
 def _work_section(session: Session, root: str) -> str:
     """Factory task sessions get their task's rules instead of the planning guidance."""
+    analyst = _analysts.get(session.id)
+    if analyst is not None:
+        return _analyst_section(analyst, root)
     run = _runs.get(session.id)
     if run is not None:
         return _task_section(run, root)
@@ -661,6 +801,8 @@ Platform API:
 - `GET {work}`: the project's `items` (features, and the defects and debt Mooi already runs, each with its `tasks`) and its `issues` (defects and debt on GitHub; `issuesError` explains an empty list). Each item includes `deployment` (`state`: `none`, `pending`, `deployed` or legacy `unknown`; `version`, `deployedAt`, `inCurrentRelease`). Tasks include `mergeSha`, `deployedVersion` and `deployedAt`; the first deployed version is retained on rollback.
 - `POST {work}/features` with JSON `{{"title", "spec", "dependsOn": null, "tasks": [{{"key", "title", "category", "description", "acceptance", "assignment": {{"provider", "connectionId", "model", "effort"}}, "alternatives": [], "autoMerge": true, "tests": false, "qa": {{"acceptance", "assignment"}}, "dependsOn": ["<key>"]}}]}}`.
 - `PATCH {work}/items/<itemId>` (`title`, `spec`, `dependsOn`: an item id, or "" to clear); `POST {work}/items/<itemId>/tasks` (one task as above); `PATCH {work}/items/<itemId>/tasks/<taskId>` (any task field; `dependsOn` replaces the list); `DELETE {work}/items/<itemId>/tasks/<taskId>`.
+- To change an ongoing feature without pausing it, `GET {work}/items/<itemId>/change-requests` lists its requests; `POST` there with JSON `{{"request": "<requested change>"}}` queues one. A dedicated analyst handles it at a safe point. Items and `work.item` events include `changeRequests`, with status, analysis and proposal.
+- `POST {work}/items/<itemId>/change-requests/<changeId>/decision` with JSON `{{"decision": "accept" | "reject", "userConfirmed": true}}` decides a proposal awaiting confirmation. **Both decisions require the user's explicit confirmation of that specific proposal. Never infer it from the initial change request or decide autonomously.** Acceptance relaunches the analyst with permission; completed and active tasks remain immutable, so rework becomes delta tasks.
 - Only when explicitly requested, `POST {work}/items/<itemId>/reassign` rechecks current quota for tasks not yet running and applies the first available saved assignment/fallback; `POST {work}/items/<itemId>/tasks/<taskId>/retry` restarts a queued task or one waiting to retry. Neither starts work on a planned item.
 - `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2, "contextHandoffPercent": 60, "stallTurns": 3}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5; context percent at which a task session checkpoints and hands off to a fresh session, 20-90; consecutive segments or turns without progress before a task waits for the user, 1-10). Change them only when the user asks.
 - `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with. `task.assignment` and `task.alternatives` come from the assignment expert, just like feature task settings."""
@@ -850,6 +992,176 @@ class TaskRun:
     settling: bool = False
     settle_again: bool = False
     finishing: bool = False
+
+
+@dataclass
+class AnalystRun:
+    session_id: UUID
+    item_id: UUID
+    change_id: UUID
+    player_id: UUID
+    reported: bool = False
+    nudged: bool = False
+
+
+_analysts: dict[UUID, AnalystRun] = {}
+
+
+def _analyst_section(run: AnalystRun, root: str) -> str:
+    work = f"{root}/work/agent"
+    item = f"{work}/items/{run.item_id}"
+    return f"""## Software factory change analyst
+You analyze one change request for feature {run.item_id}. Read repository files when needed; do not write code,
+edit repository files, commit, merge, deploy, or start work. Use the platform API for the plan only.
+- You may change only the feature spec, edit/delete tasks currently `planned` or `queued`, and add delta tasks.
+  Never change tasks `done`, `running`, `merging`, `review` or `attention`; the API rejects this with 409.
+  Rework of completed work must be a new delta task depending on the original task.
+- Use `GET {work}/context` for the spec index; `?section=<number>&revision=<revision>` reads a section,
+  and `?full=true` reads the full spec. `GET {item}/change-requests` reads the current proposal.
+- Stage changes with `PATCH {item}` (`spec` only), `POST {item}/tasks` (a task draft with assignment and
+  ordered alternatives), `PATCH {item}/tasks/<taskId>` or `DELETE {item}/tasks/<taskId>`.
+  A task draft is {{"key", "title", "category": "ux" | "dev" | "infra" | "docs", "description",
+  "acceptance", "assignment": {{"provider", "connectionId", "model", "effort"}}, "alternatives": [],
+  "autoMerge": true, "tests": false, "dependsOn": ["<task key or id>"]}}. Tests add a separate QA task;
+  optional `qa` holds its description, acceptance and assignment. Reuse a suitable existing assignment
+  and alternatives or consult `GET {work}/assignment` for available accounts/models; never invent them.
+  These existing APIs return `staged: true`: edits are durable proposed operations, applied together only
+  when you report `applied`. Read `changeRequests[].proposal.operations` to inspect them. Each new analyst
+  session starts an empty operation list: issue the complete desired edits again, including on acceptance.
+  New task dependencies can name earlier delta task keys. Never edit the same task after staging its deletion.
+- Preserve the current feature scope. If the change expands or changes scope, or requires redoing finished
+  work, report `needs_confirmation` with a clear textual proposal BEFORE applying anything, unless the brief
+  contains explicit permission for that exact proposal. A different proposal needs a new confirmation.
+- Finish by `POST {item}/change-requests/{run.change_id}/report` with JSON
+  {{"outcome": "applied", "summary": "<what changed>"}} or
+  {{"outcome": "needs_confirmation", "summary": "<analysis>", "proposal": "<scope and delta work to approve>"}}.
+  If blocked or unable to finish, report `needs_confirmation` explaining what needs the user's attention.
+  The runner closes your session after your turn. Never decide a request yourself; decisions require the
+  user's explicit confirmation in their own session or UI.
+"""
+
+
+def _analyst_brief(item: Json, change: Json) -> str:
+    spec = item.get("spec") or ""
+    sections = _spec_sections(spec)
+    index = "\n".join(f"- {index}: {title} ({len(content)} characters)"
+                      for index, (title, content) in enumerate(sections))
+    tasks = "\n".join(f"- {task['id']} [{task['key']}] {task['status']}: {task['title']} "
+                      f"(depends on {', '.join(task.get('dependsOn') or []) or 'none'})"
+                      for task in item.get("tasks", []))
+    proposal = change.get("proposal") or {}
+    permission = (f"The user explicitly ACCEPTED this proposal at {change['confirmedAt']}:\n"
+                  f"{proposal.get('text') or change.get('analysis') or ''}\n"
+                  "You have permission for that proposal only. Preserve all completed/active tasks."
+                  if change.get("confirmedAt") else "No scope change has been approved by the user.")
+    return (f"# Change request for {item['title']}\n\n{change['request']}\n\n"
+            f"## Spec (revision {_spec_revision(spec)})\n{spec if len(spec) <= 10_000 else index}\n\n"
+            f"## Tasks and current states\n{tasks}\n\n## Permission\n{permission}\n\n"
+            "Follow your Software factory change analyst instructions. Inspect task details through the work API "
+            "when needed. Stage the complete proposal and report applied or needs_confirmation. Do not write code.")
+
+
+async def _change_state(run: AnalystRun, status_: str, **details: Any) -> Json:
+    answer = await mooi.progress_work_change(run.item_id, run.change_id, {
+        "status": status_, "sessionId": str(run.session_id), **details,
+    })
+    _touch(run.item_id)
+    _publish_item(run.player_id, answer.get("item"))
+    return answer.get("item") or {}
+
+
+async def _advance_changes(item: Json, caller: Caller, player_id: UUID, settings: Json,
+                            session_limits: dict[UUID, int]) -> bool:
+    """Reconcile the durable analyst lease before any new task launches. Running tasks keep going."""
+    requests = item.get("changeRequests") or []
+    analyzing = next((row for row in requests if row["status"] == "analyzing"), None)
+    registry = get_registry()
+    if analyzing is not None:
+        session_id = UUID(analyzing["sessionId"]) if analyzing.get("sessionId") else None
+        live = registry.get(session_id) if session_id else None
+        if live is not None and live.closing:
+            return True
+        if live is None or live.status == STATUS_FAILED:
+            # Compare-and-set by session id: a stale runner cannot reset a newer analyst.
+            run = AnalystRun(session_id or uuid4(), UUID(item["id"]), UUID(analyzing["id"]), player_id)
+            await _change_state(run, "queued", analysis="Analyst session ended; queued for a fresh analysis")
+            if live is not None:
+                _analysts[live.id] = run
+                _background(_close_analyst(run))
+            elif session_id:
+                _analysts.pop(session_id, None)
+            wake()
+        elif session_id is not None and session_id not in _analysts:
+            _analysts[session_id] = AnalystRun(session_id, UUID(item["id"]), UUID(analyzing["id"]), player_id)
+        if (session_id is not None and live is not None and live.status == STATUS_READY
+                and live.pending is None and not live.queue
+                and session_id in _analysts):
+            _background(_after_analyst_turn(_analysts[session_id]))
+        return True
+    queued = next((row for row in requests if row["status"] == "queued"), None)
+    if queued is None:
+        return False
+    if any(run.item_id == UUID(item["id"]) and get_registry().get(run.session_id) is not None
+           for run in _analysts.values()):
+        return True  # The previous analyst is still finishing its final turn/cleanup.
+    if (any(task["status"] == "merging" for task in item.get("tasks", []))
+            or any(run.item_id == UUID(item["id"]) and run.phase in ("resolving", "merging")
+                   for run in _runs.values())):
+        return False
+    task = next((task for task in item.get("tasks", []) if task["status"] != "done"), None)
+    # A request may outlive the last running task: its saved assignment remains a usable fallback.
+    task = task or next(iter(item.get("tasks", [])), None)
+    if task is None or not await _has_room(caller, player_id, session_limits):
+        return False
+    assignment = await _assign(caller, task, _quota_limit(settings))
+    if assignment is None:
+        return False
+    project = await mooi.fetch_project(caller, UUID(item["projectId"]))
+    run = AnalystRun(uuid4(), UUID(item["id"]), UUID(queued["id"]), player_id)
+    # Persist the lease before provisioning; a process crash here is reconciled on the next tick.
+    await _change_state(run, "analyzing")
+    _analysts[run.session_id] = run
+    try:
+        await sessions._open_session(CreateSessionRequest(
+            projectId=project.id, provider=assignment["provider"], connectionId=UUID(assignment["connectionId"]),
+            branch=project.default_branch, model=assignment.get("model"), effort=assignment.get("effort"),
+            initialMessage=_analyst_brief(item, queued)), caller, session_id=run.session_id)
+    except Exception:
+        _analysts.pop(run.session_id, None)
+        await _change_state(run, "queued", analysis="Analyst session could not start; waiting to retry")
+        raise
+    return True
+
+
+async def _after_analyst_turn(run: AnalystRun) -> None:
+    async with _lock_for(_item_locks, run.item_id):
+        session = get_registry().get(run.session_id)
+        if _analysts.get(run.session_id) is not run or session is None or session.closing:
+            return
+        if session.queue or session.pending is not None or session.status != STATUS_READY:
+            return
+        if not run.reported and not run.nudged:
+            caller = await _caller(run.item_id, run.player_id, None)
+            if caller is None:
+                return  # A revoked credential pauses the item; settle the analyst after Resume.
+            run.nudged = True
+            await sessions.queue_message(run.session_id, SendMessageRequest(
+                text="Finish the change analysis and report applied or needs_confirmation through your report API."),
+                caller)
+            return
+        if not run.reported:
+            await _change_state(run, "awaiting_confirmation", analysis="The analyst stopped without a final report",
+                                proposalText="The change analysis did not finish. Accept to retry or reject to close it.")
+        _background(_close_analyst(run))
+    wake()
+
+
+async def _close_analyst(run: AnalystRun) -> None:
+    try:
+        await sessions.close_session(run.session_id)
+    finally:
+        _analysts.pop(run.session_id, None)
+        wake()
 
 
 _runs: dict[UUID, TaskRun] = {}
@@ -1049,6 +1361,17 @@ async def _runner_loop() -> None:
 
 async def _tick() -> None:
     """Hands every running or paused item to its own advance, so no item waits for another's."""
+    for session_id, run in list(_analysts.items()):
+        if get_registry().get(session_id) is None and run.item_id not in _advancing:
+            _analysts.pop(session_id, None)
+    # A lease is saved before session provisioning. Exclude advancing items from reconciliation:
+    # another tick can run while an open awaits the platform, before its session is registered.
+    live_sessions = [str(session.id) for session in get_registry().all()]
+    for changed in await mooi.reconcile_work_changes(live_sessions, [str(item_id) for item_id in _advancing]):
+        changed_item = changed.get("item")
+        if changed_item:
+            _touch(UUID(changed_item["id"]))
+        _publish_item(UUID(changed["playerId"]), changed_item)
     started = _generation
     for item_id, saved in list(_saved.items()):
         if saved <= started and item_id not in _advancing:
@@ -1229,6 +1552,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             item = await _report(task, "attention", attempts=attempts,
                                  report=f"Task recovery needs attention: {problem}")
         else:
+            assert recovery is not None  # _recovery_problem(None) is always a failure.
             item = await _report(task, task["status"] if task["status"] in ("review", "merging") else "planned",
                                  attempts=attempts)
             if recovery is not None:
@@ -1241,6 +1565,8 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     if item.get("dependsOn") and not await _dependency_done(caller, item):
         return
     done = {task["id"] for task in tasks if task["status"] == "done"}
+    if await _advance_changes(item, caller, player_id, settings, session_limits):
+        return
     ready = [task for task in tasks if task["status"] in ("planned", "queued", "review", "merging")
              and not task.get("sessionId")
              and all(dependency in done for dependency in task["dependsOn"])]
@@ -1332,6 +1658,7 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
         item = next((row for row in work.get("items", []) if row["id"] == item["id"]), {})
     task = next((row for row in item.get("tasks", []) if row["id"] == task["id"]), {})
     if (item.get("status") != "running"
+            or any(change["status"] == "analyzing" for change in item.get("changeRequests", []))
             or task.get("status") not in ("planned", "queued", "review", "merging")
             or task.get("sessionId")):
         return
@@ -1605,6 +1932,13 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
 
 
 def _on_session_event(session: Session, type_: str, data: Json) -> None:
+    analyst = _analysts.get(session.id)
+    if analyst is not None:
+        if type_ == EVENT_TURN_RESULT:
+            _background(_after_analyst_turn(analyst))
+        elif type_ == EVENT_SESSION_STATUS and data.get("status") == STATUS_FAILED:
+            wake()
+        return
     run = _runs.get(session.id)
     if run is None:
         return
@@ -1967,6 +2301,11 @@ async def _claim_merge(run: TaskRun, caller: Caller, *, phase: str | None = None
             return False
         work = await mooi.fetch_work(caller, run.project_id)
         item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), {})
+        if any(change["status"] == "analyzing" for change in item.get("changeRequests", [])):
+            run.phase = "review"
+            if run.status != "review":
+                await _report(run, "review", report="Ready to merge when the change analysis finishes.")
+            return False
         if item.get("status") != "running":
             if item.get("status") == "paused":
                 run.phase = "review"
