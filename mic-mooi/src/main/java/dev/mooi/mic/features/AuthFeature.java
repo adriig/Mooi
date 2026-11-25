@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -35,8 +36,11 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Convert;
 import jakarta.persistence.Converter;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -199,8 +203,10 @@ public class AuthFeature {
 
     @Service
     @RequiredArgsConstructor
-    public static class AuthService implements Auth.SessionGuard {
+    public static class AuthService implements Auth.SessionGuard, Auth.FactoryCredentials {
 
+        /** How the factory's own sign-in shows up among the player's devices. */
+        static final String FACTORY_DEVICE_LABEL = "Mooi Software Factory";
         private static final String INVALID_REFRESH_TOKEN = "Invalid refresh token";
         private static final String SESSION_NOT_ACTIVE = "Session is no longer active";
         private static final String ACCOUNT_SUSPENDED = "This account is suspended";
@@ -264,6 +270,7 @@ public class AuthFeature {
             session.setPlayerId(player.getId());
             session.setCreatedAt(now);
             session.setLastUsedAt(now);
+            session.setKind(AuthSessionKind.browser);
             session.setUserAgent(userAgent);
             session.setIpAddress(ipAddress);
             AuthSession openedSession = authSessionRepository.save(session);
@@ -351,9 +358,20 @@ public class AuthFeature {
         }
 
         private boolean expired(AuthSession session, OffsetDateTime now) {
-            return session.getLastUsedAt().plus(settings.getRefreshTokenTtl()).isBefore(now)
-                    || settings.getSessionMaxLifetime()
-                            .map(ceiling -> session.getCreatedAt().plus(ceiling).isBefore(now)).orElse(false);
+            return (session.getLastUsedAt().plus(settings.getRefreshTokenTtl()).isBefore(now)
+                            && !holdsFactoryWork(session))
+                    || pastCeiling(session, now);
+        }
+
+        private boolean pastCeiling(AuthSession session, OffsetDateTime now) {
+            return settings.getSessionMaxLifetime()
+                    .map(ceiling -> session.getCreatedAt().plus(ceiling).isBefore(now)).orElse(false);
+        }
+
+        /** A factory sign-in never idles out while its player still has running or paused work. */
+        private boolean holdsFactoryWork(AuthSession session) {
+            return session.getKind() == AuthSessionKind.factory
+                    && authSessionRepository.hasActiveFactoryWork(session.getPlayerId());
         }
 
         /** A grace-window renewal: a fresh access token, and no refresh token to hand out. */
@@ -366,9 +384,10 @@ public class AuthFeature {
          * Mints an access token under a live session without touching its refresh tokens. Revocation,
          * the subject binding, the idle deadline and the optional ceiling apply exactly as they do to a
          * refresh, so a player who signs out stops every agent acting for them at its next renewal. It is
-         * not player activity, so it never extends the sign-in.
+         * not player activity, so it never extends a browser sign-in; the factory's own sign-in has no
+         * other use, so each renewal counts as one.
          */
-        @Transactional(readOnly = true)
+        @Transactional
         public AccessTokenPayload renewAccessToken(UUID sessionId, UUID playerId) {
             OffsetDateTime now = OffsetDateTime.now(clock);
             AuthSession session = authSessionRepository.findByIdAndRevokedAtIsNull(sessionId)
@@ -377,8 +396,44 @@ public class AuthFeature {
                     .orElseThrow(() -> new Auth.AuthenticationException(SESSION_NOT_ACTIVE));
             Player player = playerRepository.findById(session.getPlayerId()).filter(AuthService::allowed)
                     .orElseThrow(() -> new Auth.AuthenticationException(SESSION_NOT_ACTIVE));
+            if (session.getKind() == AuthSessionKind.factory) {
+                authSessionRepository.touch(session.getId(), now);
+            }
             return new AccessTokenPayload(tokens.signAccessToken(player.getId(), player.getRole(), sessionId),
                     tokens.accessTokenExpiresInSeconds());
+        }
+
+        /**
+         * The player's factory sign-in: the live one when there is one, a new one otherwise (also once
+         * the old one reached the optional ceiling). It has no refresh token, so nothing outside the
+         * server can renew it; only {@link #renewAccessToken} mints its access tokens. The player row
+         * lock keeps concurrent starts to a single credential.
+         */
+        @Override
+        @Transactional
+        public UUID factoryCredential(UUID playerId) {
+            OffsetDateTime now = OffsetDateTime.now(clock);
+            Player player = playerRepository.findLockedById(playerId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Player not found"));
+            if (!allowed(player)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, ACCOUNT_SUSPENDED);
+            }
+            Optional<AuthSession> live = authSessionRepository
+                    .findFirstByPlayerIdAndKindAndRevokedAtIsNull(playerId, AuthSessionKind.factory);
+            if (live.isPresent() && !pastCeiling(live.get(), now)) {
+                authSessionRepository.touch(live.get().getId(), now);
+                return live.get().getId();
+            }
+            live.ifPresent(old -> authSessionRepository.revoke(old.getId(), now));
+            AuthSession session = new AuthSession();
+            session.setPlayerId(playerId);
+            session.setCreatedAt(now);
+            session.setLastUsedAt(now);
+            session.setKind(AuthSessionKind.factory);
+            session.setUserAgent(FACTORY_DEVICE_LABEL);
+            UUID id = authSessionRepository.save(session).getId();
+            Auth.LOG.info("Factory credential {} opened for player {}", id, playerId);
+            return id;
         }
 
         /**
@@ -631,7 +686,14 @@ public class AuthFeature {
 
         @Column(name = "ip_address", length = 64)
         private String ipAddress;
+
+        @Enumerated(EnumType.STRING)
+        @Column(name = "kind", nullable = false, updatable = false, length = 16)
+        private AuthSessionKind kind = AuthSessionKind.browser;
     }
+
+    /** {@code browser}: a device's sign-in, renewed by its refresh token; {@code factory}: the runner's own. */
+    public enum AuthSessionKind { browser, factory }
 
     /** Single-use renewal ticket. The secret itself exists only on the client. */
     @Getter
@@ -670,11 +732,22 @@ public class AuthFeature {
     public interface PlayerRepository extends JpaRepository<Player, UUID> {
 
         Optional<Player> findByGoogleId(String googleId);
+
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select p from Player p where p.id = :id")
+        Optional<Player> findLockedById(@Param("id") UUID id);
     }
 
     public interface AuthSessionRepository extends JpaRepository<AuthSession, UUID> {
 
         Optional<AuthSession> findByIdAndRevokedAtIsNull(UUID id);
+
+        Optional<AuthSession> findFirstByPlayerIdAndKindAndRevokedAtIsNull(UUID playerId, AuthSessionKind kind);
+
+        /** Running or paused factory work the player started: what keeps their factory sign-in alive. */
+        @Query(value = "select exists (select 1 from work_items w where w.runner_player_id = :playerId "
+                + "and w.status in ('running', 'paused'))", nativeQuery = true)
+        boolean hasActiveFactoryWork(@Param("playerId") UUID playerId);
 
         /** Guarded so a repeated logout keeps the original timestamp. */
         @Modifying(clearAutomatically = true, flushAutomatically = true)
@@ -689,9 +762,15 @@ public class AuthFeature {
         @Query("update AuthSession s set s.lastUsedAt = :now where s.id = :id")
         int touch(@Param("id") UUID id, @Param("now") OffsetDateTime now);
 
-        /** Closes the live sign-ins not used since {@code cutoff}. */
+        /**
+         * Closes the live sign-ins not used since {@code cutoff}, except a factory sign-in whose player
+         * still has running or paused work: a long pause must not cost the work its credential.
+         */
         @Modifying(clearAutomatically = true, flushAutomatically = true)
-        @Query("update AuthSession s set s.revokedAt = :now where s.revokedAt is null and s.lastUsedAt < :cutoff")
+        @Query(value = "update auth_sessions s set revoked_at = :now where s.revoked_at is null "
+                + "and s.last_used_at < :cutoff and not (s.kind = 'factory' and exists ("
+                + "select 1 from work_items w where w.runner_player_id = s.player_id "
+                + "and w.status in ('running', 'paused')))", nativeQuery = true)
         int revokeIdle(@Param("cutoff") OffsetDateTime cutoff, @Param("now") OffsetDateTime now);
     }
 

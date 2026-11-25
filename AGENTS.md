@@ -191,7 +191,13 @@ Each project plans and builds its work as a software factory: agents design it, 
     supported. A QA block caused by access, credentials, capacity or infrastructure is reported separately,
     creates no fix and consumes no correction round; it waits for attention. Legacy generic blocked reports
     remain supported;
-  - a defect or debt item closes its GitHub issue when its work merges.
+  - a defect or debt item closes its GitHub issue when its work merges;
+  - the runner acts with the user's own **factory credential**, never the browser sign-in that pressed
+    Start: one per user, labelled "Mooi Software Factory" among their sign-ins, reused by every item,
+    renewed only server-side and kept alive while the user has running or paused items. Start and Resume
+    issue it (a new one once revoked); signing out of a device leaves it alone, while signing out
+    everywhere, an administrator's sign-out and a ban revoke it, and the runner then pauses the affected
+    items with a visible reason until the user resumes them.
 - **Factory settings** (per project, from the Board or the chat): the quota percent from which an
   account is spared (default 85%), the sessions a task may lose before it waits for the user (3), the
   fix-and-check-again rounds after a failed QA (3; 0 hands every failure to the user) and the agentic merge

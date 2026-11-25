@@ -88,6 +88,9 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={kind.tone} icon={kind.icon}>{kind.label}</Badge>
           <Badge tone={status.tone}>{status.label}</Badge>
+          {item?.status === 'paused' && item.pauseReason ? (
+            <span className="text-xs font-medium text-warning">{item.pauseReason}</span>
+          ) : null}
           {deployment ? (
             <Badge tone={deployment.state === 'deployed' ? 'success' : 'neutral'}>
               {deployment.state === 'deployed' && deployment.version ? `Deployed ${deployment.version}`

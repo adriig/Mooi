@@ -297,11 +297,13 @@ async def delete_task(project_id: UUID, item_id: UUID, task_id: UUID,
 
 @router.post("/projects/{project_id}/work/items/{item_id}/start")
 async def start_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    """Hands the item to the runner, which acts for this sign-in from now on, with or without devices."""
+    """Starts or resumes the item. The runner acts with the player's factory credential, issued by
+    mic-mooi on every start, never with this sign-in: signing out of this device does not stop it."""
     async with _lock_for(_item_locks, item_id):
         item = _publish_item(caller.player_id,
                              await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/start"))
-        _callers[item_id] = caller
+        _callers.pop(item_id, None)
+        _credentials.pop(item_id, None)
     wake()
     return item or {}
 
@@ -779,6 +781,8 @@ class TaskRun:
     outcome: TaskReport | None = None
     nudged: bool = False
     verification_nudged: bool = False
+    # Its last turn could not settle because the factory credential was revoked: settle it on Resume.
+    resettle: bool = False
     resolutions: int = 0
     # `working`, `resolving` (agentic merge running), `merging` or `review` (waiting for merge or Resume).
     phase: str = "working"
@@ -798,6 +802,9 @@ class TaskRun:
 _runs: dict[UUID, TaskRun] = {}
 # The caller each started item acts as, renewed as it ages; rebuilt from mic-mooi after a restart.
 _callers: dict[UUID, Caller] = {}
+# The factory credential (auth session id) each started item runs with, as of the latest tick.
+_credentials: dict[UUID, str] = {}
+CREDENTIAL_REVOKED = "Factory credential revoked: press Resume"
 _tasks: set[asyncio.Task[None]] = set()
 _runner_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
@@ -847,20 +854,58 @@ def _background(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_tasks.discard)
 
 
-async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -> Caller | None:
+class CredentialRevoked(ApiException):
+    """The item's factory credential was revoked (sign-out everywhere, an administrator, a ban): the item
+    is paused until the player resumes it, which issues a new credential."""
+
+    def __init__(self) -> None:
+        super().__init__(status.HTTP_409_CONFLICT, CREDENTIAL_REVOKED)
+
+
+async def _renew(item_id: UUID, player_id: UUID, auth_session_id: str | None) -> Caller | None:
+    """The item's caller with a live token; None when its credential is unknown yet (no tick since a
+    restart) or could not be renewed for now. Raises `CredentialRevoked` after pausing the item."""
+    if auth_session_id:
+        _credentials[item_id] = auth_session_id
+    credential = _credentials.get(item_id)
     caller = _callers.get(item_id)
-    if caller is None and auth_session_id:
-        caller = Caller(player_id=player_id, session_id=UUID(auth_session_id), role="", token="", expires_at=0)
+    if caller is not None and credential and str(caller.session_id) != credential:
+        caller = None  # A Resume issued a new credential.
+    if caller is None and credential:
+        caller = Caller(player_id=player_id, session_id=UUID(credential), role="", token="", expires_at=0)
     if caller is None:
         return None
     try:
         caller = await mooi.renewed(caller)
-    except ApiException:
-        LOG.warning("Work item %s lost the sign-in it runs as", item_id)
+    except ApiException as failure:
         _callers.pop(item_id, None)
-        return None
+        if failure.status_code not in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+            LOG.warning("Work item %s could not renew its credential; retrying", item_id)
+            return None
+        LOG.info("Work item %s lost its factory credential; pausing it", item_id)
+        await _pause_revoked(item_id, player_id, caller.session_id)
+        raise CredentialRevoked() from None
     _callers[item_id] = caller
     return caller
+
+
+async def _pause_revoked(item_id: UUID, player_id: UUID, credential: UUID) -> None:
+    """Pauses the item with a visible reason, unless a Resume already gave it another credential."""
+    _credentials.pop(item_id, None)
+    try:
+        answer = await mooi.set_item_status(item_id, "paused", pause_reason=CREDENTIAL_REVOKED,
+                                            auth_session_id=credential)
+    except ApiException:
+        LOG.warning("Work item %s could not be paused after its credential was revoked", item_id, exc_info=True)
+        return
+    _publish_item(UUID(answer["playerId"]) if answer.get("playerId") else player_id, answer.get("item"))
+
+
+async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -> Caller | None:
+    try:
+        return await _renew(item_id, player_id, auth_session_id)
+    except CredentialRevoked:
+        return None
 
 
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
@@ -1028,6 +1073,10 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     caller = await _caller(item_id, player_id, entry.get("authSessionId"))
     if caller is None:
         return
+    for run in list(_runs.values()):
+        if run.item_id == item_id and run.resettle and item.get("status") == "running":
+            run.resettle = False
+            _background(_after_turn(run))
     registry = get_registry()
     tasks = item["tasks"]
     recoveries: dict[str, Json] = {}
@@ -1721,6 +1770,9 @@ async def _settle_turn(run: TaskRun) -> None:
         if not _current(run) or session.closing or session.queue:
             return
         await _settle(run, session)
+    except CredentialRevoked:
+        # The item is paused; its task keeps its state and settles again once resumed.
+        run.resettle = True
     except Exception as failure:
         LOG.warning("Task %s could not settle", run.task_id, exc_info=True)
         run.phase = "working"
@@ -1746,8 +1798,9 @@ async def _settle(run: TaskRun, session: Session) -> None:
             # corrected report rather than treating the still-open turn as a missing result.
             return
         if not run.nudged:
+            caller = await _run_caller(run)
             run.nudged = True
-            await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), await _run_caller(run))
+            await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), caller)
             return
         await _save(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
         return
@@ -1939,9 +1992,9 @@ async def _close_failed(session_id: UUID) -> None:
 
 
 async def _run_caller(run: TaskRun) -> Caller:
-    caller = await _caller(run.item_id, run.player_id, None)
+    caller = await _renew(run.item_id, run.player_id, None)
     if caller is None:
-        raise ApiException.conflict("The sign-in that started this work ended: start it again")
+        raise ApiException.conflict("The factory credential of this work is not available right now")
     return caller
 
 

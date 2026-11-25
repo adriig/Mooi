@@ -174,6 +174,18 @@ public class Auth {
         Optional<AuthenticatedPlayer> resolve(UUID sessionId, UUID playerId);
     }
 
+    /**
+     * Port implemented by the feature owning the session tables: the software factory's own sign-in
+     * for a player, independent of any browser. One live per player, reused by every item it runs;
+     * signing out a device leaves it alone, signing out everywhere, an administrator's sign-out and a
+     * ban revoke it.
+     */
+    public interface FactoryCredentials {
+
+        /** The id of the player's live factory sign-in, opened when there is none. */
+        UUID factoryCredential(UUID playerId);
+    }
+
     /** A bad, expired or revoked credential. Rendered as a 401 by the shared error contract. */
     public static class AuthenticationException extends ResponseStatusException {
 

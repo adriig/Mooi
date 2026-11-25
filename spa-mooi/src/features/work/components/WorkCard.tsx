@@ -59,7 +59,12 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
         </span>
       </button>
 
-      {entry.item?.status === 'paused' ? <div className="px-1.5"><Badge tone="warning">Paused</Badge></div> : null}
+      {entry.item?.status === 'paused' ? (
+        <div className="flex flex-col gap-1 px-1.5">
+          <span><Badge tone="warning">Paused</Badge></span>
+          {entry.item.pauseReason ? <span className="text-[12px] text-warning">{entry.item.pauseReason}</span> : null}
+        </div>
+      ) : null}
 
       {deployment ? (
         <div className="flex flex-wrap items-center gap-1.5 px-1.5">

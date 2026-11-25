@@ -20,9 +20,13 @@ const SYSTEMS: [RegExp, string][] = [
   [/CrOS/, 'ChromeOS'], [/Linux/, 'Linux'],
 ];
 
+/** The software factory's own sign-in, listed with the player's devices. */
+const FACTORY_DEVICE = 'Mooi Software Factory';
+
 /** "Chrome on macOS" from a user agent, enough to recognise a device. */
 export const deviceLabel = (userAgent: string | null): string => {
   if (!userAgent) return 'Unknown device';
+  if (userAgent === FACTORY_DEVICE) return userAgent;
   const browser = BROWSERS.find(([pattern]) => pattern.test(userAgent))?.[1];
   const system = SYSTEMS.find(([pattern]) => pattern.test(userAgent))?.[1];
   if (browser && system) return `${browser} on ${system}`;

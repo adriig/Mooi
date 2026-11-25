@@ -395,9 +395,12 @@ async def report_defect(qa_task_id: UUID, report: dict) -> dict:
                        report) or {}
 
 
-async def set_item_status(item_id: UUID, status: str) -> dict:
+async def set_item_status(item_id: UUID, status: str, *, pause_reason: str | None = None,
+                          auth_session_id: UUID | None = None) -> dict:
+    """With `auth_session_id`, applies only while the item still runs with that credential."""
     return await _send("PUT", f"/internal/work/items/{item_id}/status", None, "Item not found",
-                       {"status": status}) or {}
+                       {"status": status, "pauseReason": pause_reason,
+                        "authSessionId": str(auth_session_id) if auth_session_id else None}) or {}
 
 
 # --- analytics: AI visibility (GEO) runs, for the runner ----------------------------------------

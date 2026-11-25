@@ -163,12 +163,15 @@ public class ProjectWorkFeature {
         return work.deleteTask(principal.player().id(), projectId, itemId, taskId);
     }
 
-    /** Hands the item to the runner, which acts for this very sign-in until the item ends. */
+    /**
+     * Starts or resumes the item. The runner acts with the player's factory credential, not this
+     * sign-in, so signing out of the device that pressed Start does not stop it.
+     */
     @PostMapping("/me/projects/{projectId}/work/items/{itemId}/start")
     @Auth.Authenticated
     @Auth.ServiceCall
     public ItemPayload start(@PathVariable UUID projectId, @PathVariable UUID itemId, Auth.Principal principal) {
-        return work.start(principal.player().id(), principal.sessionId(), projectId, itemId);
+        return work.start(principal.player().id(), projectId, itemId);
     }
 
     /** No task starts or auto-merges while paused; live sessions still save their work and results. */
@@ -279,7 +282,7 @@ public class ProjectWorkFeature {
     @PutMapping("/internal/work/items/{itemId}/status")
     @Auth.ServiceOnly
     public RunnerItem itemStatus(@PathVariable UUID itemId, @Valid @RequestBody ItemStatusChange change) {
-        return work.itemStatus(itemId, change.status());
+        return work.itemStatus(itemId, change.status(), change.pauseReason(), change.authSessionId());
     }
 
     // --- application ---
@@ -300,6 +303,7 @@ public class ProjectWorkFeature {
         private final TaskRecoveryRepository recoveries;
         private final WorkQaDeliveryRepository qaDeliveries;
         private final WorkSettingsRepository settings;
+        private final Auth.FactoryCredentials credentials;
         private final Clock clock;
         private final ObjectMapper json = JsonMapper.shared();
 
@@ -550,8 +554,11 @@ public class ProjectWorkFeature {
         }
 
         @Transactional
-        public ItemPayload start(UUID playerId, UUID authSessionId, UUID projectId, UUID itemId) {
+        public ItemPayload start(UUID playerId, UUID projectId, UUID itemId) {
             project(playerId, projectId);
+            // Issued on every start and resume, so a revoked credential is replaced by a live one. First,
+            // because issuing it clears the persistence context; a refused start rolls it back.
+            UUID credential = credentials.factoryCredential(playerId);
             WorkItem item = lockedItem(projectId, itemId);
             List<WorkTask> all = tasks.findByItemId(itemId);
             if (item.getStatus() == ItemStatus.done) {
@@ -573,7 +580,8 @@ public class ProjectWorkFeature {
                     });
             tasks.saveAll(all);
             item.setStatus(ItemStatus.running);
-            item.setRunnerAuthSessionId(authSessionId);
+            item.setPauseReason(null);
+            item.setRunnerAuthSessionId(credential);
             item.setRunnerPlayerId(playerId);
             if (item.getStartedAt() == null) {
                 item.setStartedAt(OffsetDateTime.now(clock));
@@ -588,6 +596,7 @@ public class ProjectWorkFeature {
             WorkItem item = lockedItem(projectId, itemId);
             if (item.getStatus() == ItemStatus.running) {
                 item.setStatus(ItemStatus.paused);
+                item.setPauseReason(null);
                 items.save(item);
             }
             return toPayload(item, tasks.findByItemId(itemId));
@@ -995,13 +1004,16 @@ public class ProjectWorkFeature {
         }
 
         @Transactional
-        public RunnerItem itemStatus(UUID itemId, ItemStatus status) {
+        public RunnerItem itemStatus(UUID itemId, ItemStatus status, String pauseReason, UUID authSessionId) {
             WorkItem item = items.findLockedById(itemId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
-            if (item.getStatus() == ItemStatus.done) {
+            if (item.getStatus() == ItemStatus.done
+                    || (authSessionId != null && !authSessionId.equals(item.getRunnerAuthSessionId()))) {
                 return runnerItem(item, tasks.findByItemId(itemId));
             }
             item.setStatus(status);
+            item.setPauseReason(status == ItemStatus.paused && pauseReason != null && !pauseReason.isBlank()
+                    ? pauseReason.strip() : null);
             if (status == ItemStatus.done) {
                 item.setFinishedAt(OffsetDateTime.now(clock));
             }
@@ -1303,7 +1315,9 @@ public class ProjectWorkFeature {
 
         private ItemPayload toPayload(WorkItem item, List<WorkTask> all) {
             return new ItemPayload(item.getId(), item.getProjectId(), item.getKind(), item.getIssueNumber(),
-                    item.getTitle(), item.getSpec(), item.getStatus(), item.getDependsOnId(), item.getStartedAt(),
+                    item.getTitle(), item.getSpec(), item.getStatus(),
+                    item.getStatus() == ItemStatus.paused ? item.getPauseReason() : null, item.getDependsOnId(),
+                    item.getStartedAt(),
                     item.getFinishedAt(), item.getCreatedAt(), item.getUpdatedAt(), deployment(item, all),
                     all.stream().sorted(Comparator.comparingInt(WorkTask::getPosition)
                                     .thenComparing(task -> task.getQaOfId() != null)
@@ -1568,8 +1582,12 @@ public class ProjectWorkFeature {
         @Column(name = "rank", nullable = false)
         private long rank;
 
+        /** The player's factory credential the runner acts with (see {@link Auth.FactoryCredentials}). */
         @Column(name = "runner_auth_session_id")
         private UUID runnerAuthSessionId;
+
+        @Column(name = "pause_reason", length = 300)
+        private String pauseReason;
 
         @Column(name = "runner_player_id")
         private UUID runnerPlayerId;
@@ -2088,7 +2106,13 @@ public class ProjectWorkFeature {
                            @Size(max = 4_000) String blockerCause) {
     }
 
-    public record ItemStatusChange(@NotNull ItemStatus status) {
+    /**
+     * {@code pauseReason} is kept only with {@code paused}: why the runner had to stop the item. With
+     * {@code authSessionId} the change applies only while the item still runs with that credential, so
+     * a revocation noticed late never pauses an item a Resume already gave a new one.
+     */
+    public record ItemStatusChange(@NotNull ItemStatus status, @Size(max = 300) String pauseReason,
+                                   UUID authSessionId) {
     }
 
     public record TaskPayload(UUID id, String key, String title, TaskCategory category, String description,
@@ -2102,8 +2126,10 @@ public class ProjectWorkFeature {
                                OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }
 
+    /** {@code pauseReason}: why the runner paused the item on its own; null for the player's own pause. */
     public record ItemPayload(UUID id, UUID projectId, ItemKind kind, Integer issueNumber, String title, String spec,
-                              ItemStatus status, UUID dependsOn, OffsetDateTime startedAt, OffsetDateTime finishedAt,
+                              ItemStatus status, String pauseReason, UUID dependsOn, OffsetDateTime startedAt,
+                              OffsetDateTime finishedAt,
                               OffsetDateTime createdAt, OffsetDateTime updatedAt, DeploymentPayload deployment,
                               List<TaskPayload> tasks) {
     }

@@ -183,6 +183,9 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
         ) : null}
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={status.tone}>{status.label}</Badge>
+          {feature.status === 'paused' && feature.pauseReason ? (
+            <span className="text-xs font-medium text-warning">{feature.pauseReason}</span>
+          ) : null}
           <span className="font-mono text-[11px] text-ink-subtle tabular-nums">{done}/{tasks.length} done</span>
           <WorkRunButton item={feature} busy={busy} onStart={() => { void run(() => startWorkItem(projectId, feature.id)); }}
             onPause={() => { void run(() => pauseWorkItem(projectId, feature.id)); }} />
