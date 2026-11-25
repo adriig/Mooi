@@ -96,7 +96,7 @@ export const AnalyticsSearchSection = (props: AnalyticsSearchSectionProps) => {
 
   return (
     <section aria-labelledby="analytics-search" className="flex min-w-0 flex-col gap-3">
-      <h2 id="analytics-search" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">Search positioning</h2>
+      <div><h2 id="analytics-search" className="text-[13px] font-semibold tracking-[0.02em] text-ink-muted uppercase">Google Search Console · search performance</h2><p className="mt-1 text-xs text-ink-subtle">Google’s organic search impressions, clicks, CTR and average position. This does not come from the Mooi tracker.</p></div>
       {missing ? (
         <AnalyticsGoogleErrorState code={missing} onAction={onAction} />
       ) : daily.error ? (
@@ -122,7 +122,7 @@ export const AnalyticsSearchSection = (props: AnalyticsSearchSectionProps) => {
           </ul>
           <Card className="flex flex-col gap-4 p-4 sm:p-5">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-semibold">Position over time</h3>
+              <h3 className="text-sm font-semibold">Average Google position over time</h3>
               <span className="text-[11px] text-ink-subtle">Lower is better</span>
             </div>
             <AnalyticsPositionChart rows={daily.data.rows} />

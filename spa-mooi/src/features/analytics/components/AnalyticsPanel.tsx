@@ -119,8 +119,8 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
           <Card className="h-72 animate-pulse-soft" />
         </div>
       ) : hasData === false ? (
-        <EmptyState icon={BarChart3} title="No data in this range yet"
-          description="Install the tracker in your production app, or pick a wider range. Events appear here as visitors browse.">
+        <EmptyState icon={BarChart3} title="No Mooi tracker data in this range yet"
+          description="Install the Mooi tracker to measure production traffic and clicks, or pick a wider range. Google Search Console and Analytics reports below use their own Google data sources.">
           <Button variant="secondary" onClick={() => update({ range: '90d' })}>Show the last 90 days</Button>
         </EmptyState>
       ) : (
@@ -139,7 +139,7 @@ export const AnalyticsPanel = ({ projectId, onFix }: AnalyticsPanelProps) => {
           </section>
 
           <section aria-labelledby="analytics-traffic" className="flex flex-col gap-3">
-            <h2 id="analytics-traffic" className={GROUP_TITLE}>Traffic</h2>
+            <div><h2 id="analytics-traffic" className={GROUP_TITLE}>Traffic · Mooi tracker</h2><p className="mt-1 text-xs text-ink-subtle">First-party production visits and clicks recorded by the installed Mooi snippet.</p></div>
             <div className="grid gap-3 md:grid-cols-2">
               <AnalyticsBreakdownCard projectId={projectId} range={range} dimension="page" title="Top pages" measure="pageviews" />
               <AnalyticsBreakdownCard projectId={projectId} range={range} dimension="referrer" title="Referrers" measure="visitors" />

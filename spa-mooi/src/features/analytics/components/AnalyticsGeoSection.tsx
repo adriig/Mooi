@@ -107,21 +107,21 @@ export const AnalyticsGeoSection = ({ projectId, range, onFix }: Props) => {
   };
 
   return <section aria-labelledby="analytics-geo" className="flex flex-col gap-4">
-    <div className="flex flex-wrap items-end justify-between gap-2"><div><h2 id="analytics-geo" className="text-[13px] font-semibold uppercase tracking-wide text-ink-muted">GEO · AI visibility</h2><p className="mt-1 text-sm text-ink-subtle">AI answer engine traffic, brand visibility and discoverability.</p></div></div>
+    <div className="flex flex-wrap items-end justify-between gap-2"><div><h2 id="analytics-geo" className="text-[13px] font-semibold uppercase tracking-wide text-ink-muted">GEO · AI visibility</h2><p className="mt-1 text-sm text-ink-subtle">Two separate signals: AI referrals measured by the Mooi tracker, and brand visibility measured by running prompts through linked AI providers.</p></div></div>
     {error ? <p role="alert" className="rounded-control border border-danger/30 bg-danger-soft px-3 py-2 text-sm text-danger">{error}</p> : null}
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      <Metric title="AI visitors" value={aiVisitors.toLocaleString()} hint="From AI answer engines" />
-      <Metric title="Share of total" value={`${totalVisitors ? (aiVisitors / totalVisitors * 100).toFixed(1) : '0.0'}%`} hint={`${totalVisitors.toLocaleString()} total visitors`} />
-      <Metric title="Share of voice" value={`${overall.share.toFixed(1)}%`} hint="Across answered prompts" />
-      <Metric title="Citation rate" value={`${overall.citation.toFixed(1)}%`} hint={overall.position == null ? 'Avg. position unavailable' : `Avg. first mention #${overall.position.toFixed(1)}`} />
+      <Metric title="AI referral visitors · Mooi tracker" value={aiVisitors.toLocaleString()} hint="Visits attributed to recognized AI referrers" />
+      <Metric title="Share of tracked visits" value={totalVisitors ? `${(aiVisitors / totalVisitors * 100).toFixed(1)}%` : '—'} hint={`${totalVisitors.toLocaleString()} Mooi-tracked visitors`} />
+      <Metric title="Prompt share of voice" value={summary?.visibility.length ? `${overall.share.toFixed(1)}%` : '—'} hint="Brand mentions across answered prompts" />
+      <Metric title="Prompt citation rate" value={summary?.visibility.length ? `${overall.citation.toFixed(1)}%` : '—'} hint={overall.position == null ? 'No prompt run data for this range' : `Avg. first mention #${overall.position.toFixed(1)}`} />
     </div>
     <div className={columns}>
-      <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">AI sources</h3><Rows rows={aiSources} empty="No AI referrals in this range." /></Card>
+      <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">AI referral sources · Mooi tracker</h3><Rows rows={aiSources} empty="No recognized AI referrals in this range. These require the Mooi tracker on the production site." /></Card>
       <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">AI landing pages</h3><Rows rows={aiLandings} empty="No AI landing pages in this range." /></Card>
       <Card className="flex min-w-0 flex-col gap-3 p-4 md:col-span-2"><h3 className="text-sm font-semibold">Visibility trend</h3><AnalyticsTimeSeriesChart points={trend} label="Share of voice (%)" /></Card>
     </div>
     <div className={columns}>
-      <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">Share of voice by engine</h3>{summary?.visibility.length ? summary.visibility.map((item) => <div key={`${item.provider}:${item.model}`} className="flex justify-between gap-3 text-sm"><span className="truncate">{item.provider} · {item.model}</span><span className="tabular-nums">{item.shareOfVoice.toFixed(1)}% <span className="text-ink-subtle">· cited {item.citationRate.toFixed(1)}%</span></span></div>) : <p className="text-sm text-ink-subtle">Run prompts to measure brand visibility.</p>}</Card>
+      <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">Prompt results by AI engine</h3>{summary?.visibility.length ? summary.visibility.map((item) => <div key={`${item.provider}:${item.model}`} className="flex justify-between gap-3 text-sm"><span className="truncate">{item.provider} · {item.model}</span><span className="tabular-nums">{item.shareOfVoice.toFixed(1)}% <span className="text-ink-subtle">· cited {item.citationRate.toFixed(1)}%</span></span></div>) : <p className="text-sm text-ink-subtle">No prompt run data in this range. Configure prompts and run AI visibility to measure mentions and citations.</p>}</Card>
       <Card className="flex min-w-0 flex-col gap-3 p-4"><h3 className="text-sm font-semibold">Competitor mentions</h3><Rows rows={Object.entries(summary?.visibility.reduce<Record<string, number>>((acc, item) => { Object.entries(item.competitorMentions).forEach(([name, count]) => { acc[name] = (acc[name] ?? 0) + count; }); return acc; }, {}) ?? {}).map(([key, visitors]) => ({ key, visitors }))} empty="No competitor mentions yet." /></Card>
     </div>
 
