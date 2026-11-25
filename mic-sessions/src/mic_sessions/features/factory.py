@@ -35,6 +35,7 @@ import hashlib
 import logging
 import re
 import time
+import unicodedata
 import weakref
 from collections.abc import Coroutine
 from contextlib import suppress
@@ -1778,6 +1779,8 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
     # Reconcile paused tasks above, but never open a new session until Resume.
     if item.get("status") != "running":
         return
+    # Before launching, so the tasks it unblocks already find the current design on the default branch.
+    await _write_feature_document(item, caller)
     if item.get("dependsOn") and not await _dependency_done(caller, item):
         return
     done = {task["id"] for task in tasks if task["status"] == "done"}
@@ -2054,6 +2057,103 @@ def _assigned_connection(assignment: Json, connections: list[Json]) -> str | Non
 def _same_assignment(left: Json, right: Json) -> bool:
     fields = ("provider", "connectionId", "model", "effort")
     return all(left.get(field) == right.get(field) for field in fields)
+
+
+# --- design memory: each feature's document in the repository -------------------------------------
+#
+# A feature's spec and task breakdown are also written to `docs/features/<slug>-<id8>/FEATURE.md` on the
+# default branch, so the design travels with merges and reads without Mooi; development tasks add their
+# `decisions/<task key>.md` beside it on their own branches. The platform stays the source of truth for
+# state: the document holds no statuses, assignments or dates, so it only changes when the design does.
+
+_CATEGORY_LABELS = {"ux": "UX/UI", "dev": "Development", "qa": "QA", "infra": "Infra/DevOps", "docs": "Documentation"}
+
+# Item id → digest of the document the default branch is known to hold; lost on restart, which only
+# costs one fetch that finds nothing to commit.
+_documents: dict[UUID, str] = {}
+
+
+def _feature_slug(item: Json) -> str:
+    title = unicodedata.normalize("NFKD", item.get("title") or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "-", title).strip("-")[:48].strip("-") or "feature"
+
+
+def feature_directory(item: Json) -> str:
+    """The one place a feature's design memory lives in its repository: `docs/features/<slug>-<id8>/`. The
+    first 8 characters of the item id keep it unique and let a renamed feature's folder be found again."""
+    return f"docs/features/{_feature_slug(item)}-{str(item['id'])[:8]}/"
+
+
+def _table_cell(value: str) -> str:
+    return " <br> ".join(line.strip() for line in value.strip().splitlines() if line.strip()).replace("|", "\\|")
+
+
+def feature_document(item: Json) -> str:
+    """`FEATURE.md`: title, item id, the full spec and the task table (fix tasks QA raises are execution,
+    not design, and stay out)."""
+    tasks = [task for task in item.get("tasks", []) if not task.get("fixOf")]
+    keys = {task["id"]: task.get("key") or task["id"] for task in tasks}
+    rows = [
+        "| " + " | ".join(_table_cell(value) for value in (
+            task.get("key") or "", task.get("title") or "",
+            _CATEGORY_LABELS.get(task.get("category") or "", task.get("category") or ""),
+            ", ".join(keys.get(dependency, dependency) for dependency in task.get("dependsOn") or []) or "-",
+            task.get("acceptance") or "-",
+        )) + " |"
+        for task in tasks
+    ]
+    table = "\n".join(["| Key | Title | Category | Depends on | Acceptance criteria |",
+                       "| --- | --- | --- | --- | --- |", *rows]) if rows else "No tasks yet."
+    return "\n".join([
+        f"# {(item.get('title') or '').strip()}",
+        "",
+        "Design memory of a Mooi software factory feature, kept by the platform. Its live state (task statuses,",
+        "sessions, assignments) lives in Mooi; each task's technical decisions are in `decisions/`.",
+        "",
+        "## Item",
+        "",
+        f"`{item['id']}`",
+        "",
+        "## Goal and spec",
+        "",
+        (item.get("spec") or "").strip() or "No spec yet.",
+        "",
+        "## Tasks",
+        "",
+        table,
+        "",
+    ])
+
+
+async def _write_feature_document(item: Json, caller: Caller) -> None:
+    """Commits the feature's document onto the default branch when its design changed since the last
+    write. Runs under the item's lock, so no task of the item claims a merge meanwhile; a failure is
+    only logged and retried on the next tick, never blocking or pausing the feature."""
+    if item.get("kind") != "feature" or item.get("issueNumber") is not None:
+        return
+    item_id = UUID(item["id"])
+    directory, content = feature_directory(item), feature_document(item)
+    digest = hashlib.sha256(f"{directory}\0{content}".encode()).hexdigest()
+    if _documents.get(item_id) == digest:
+        return
+    if (any(task["status"] == "merging" for task in item.get("tasks", []))
+            or any(run.item_id == item_id and run.phase in ("resolving", "merging") for run in _runs.values())):
+        return  # A task merge already claimed is pushing: write on a later tick instead of racing it.
+    slug = _feature_slug(item)
+    try:
+        project = await mooi.fetch_project(caller, UUID(item["projectId"]))
+        token, identity = await asyncio.gather(mooi.fetch_github_token(caller), mooi.fetch_github_identity(caller))
+        await workspaces.commit_documents(
+            project.full_name, project.default_branch, directory.rstrip("/"), {"FEATURE.md": content},
+            f"docs(factory): update {slug} feature document", identity, token,
+            adopt_suffix=f"-{str(item['id'])[:8]}")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOG.warning("The document of feature %s could not be written; retrying on the next tick", item_id,
+                    exc_info=True)
+        return
+    _documents[item_id] = digest
 
 
 def _spec_revision(spec: str) -> str:

@@ -1,6 +1,7 @@
 """Managed session directories, Git clones, release checkouts and index-preserving diffs.
 
-Only marked directories in sessions/<UUID> and production/<operation UUID> belong to this implementation.
+Only marked directories in sessions/<UUID>, production/<operation UUID> and documents/<operation UUID> belong
+to this implementation.
 Legacy caches, workspaces and reservations are never reconciled.
 """
 
@@ -22,7 +23,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
 from mic_sessions.shared.env import get_settings
@@ -385,6 +386,90 @@ class Workspaces:
             await asyncio.to_thread(shutil.rmtree, directory)
             raise
 
+    def _document_directory(self, operation_id: UUID) -> Path:
+        documents = self.root / "documents"
+        if documents.is_symlink():
+            raise RuntimeError("Managed documents root cannot be a symlink")
+        return documents / str(operation_id)
+
+    async def _remove_document_directory(self, operation_id: UUID) -> None:
+        directory = self._document_directory(operation_id)
+        if directory.is_symlink():
+            raise RuntimeError("Refusing a symlink in the document checkout path")
+        marker = directory / ".mooi-document"
+        if directory.exists() and marker.is_file() and not marker.is_symlink() and marker.read_text() == str(operation_id):
+            await asyncio.to_thread(shutil.rmtree, directory)
+
+    async def commit_documents(
+        self, project_full_name: str, target: str, directory: str, files: dict[str, str], message: str,
+        identity: GitIdentity, token: str, *, adopt_suffix: str | None = None,
+    ) -> str | None:
+        """Writes `files` (names relative to `directory`) onto the target branch as one commit and pushes it.
+
+        Works on a shallow fetch with a throwaway index and no checkout, so it never touches a session's
+        workspace. A sibling directory whose name ends with `adopt_suffix` is moved into `directory` first
+        (a renamed feature keeps its decisions). Returns None, with nothing pushed, when the target already
+        holds the same tree; like `merge`, a concurrent push is rejected, never forced.
+        """
+        await self.validate_branch(target)
+        parent_directory = PurePosixPath(directory).parent
+        if not _BRANCH_PATTERN.match(directory) or ".." in PurePosixPath(directory).parts or directory.startswith("/"):
+            raise ApiException.bad_request("Invalid document directory")
+        operation_id = uuid4()
+        root = self._document_directory(operation_id)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.mkdir()
+        try:
+            (root / ".mooi-document").write_text(str(operation_id))
+            repository = root / "repository"
+            repository.mkdir()
+            git = ("-C", str(repository))
+            await self._git(*git, "init", "-q")
+            await self._git(*git, "remote", "add", "origin", f"https://github.com/{project_full_name}.git")
+            remote = f"refs/remotes/origin/{target}"
+            code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, *git, "fetch", "--depth", "1", "--no-tags",
+                                              "origin", f"+refs/heads/{target}:{remote}", auth=token)
+            if code != 0:
+                LOG.warning("git fetch failed with %s: %s", code, detail or "no output")
+                raise ApiException.bad_gateway(detail or "The default branch could not be fetched")
+            env = {"GIT_INDEX_FILE": str(root / "index"), **_identity_env(identity)}
+            await self._git(*git, "read-tree", remote, extra_env=env)
+            entries: list[str] = []
+            if adopt_suffix:
+                listed = await self._git(*git, "ls-tree", "-d", "-z", "--name-only", remote,
+                                         f"{parent_directory}/")
+                for previous in filter(None, listed.split("\0")):
+                    if previous == directory or not PurePosixPath(previous).name.endswith(adopt_suffix):
+                        continue
+                    moved = await self._git(*git, "ls-tree", "-r", "-z", "--full-tree", remote, "--", previous)
+                    for line in filter(None, moved.split("\0")):
+                        meta, path = line.split("\t", 1)
+                        mode, kind, sha = meta.split()
+                        entries.append(f"0 {'0' * len(sha)}\t{path}")
+                        entries.append(f"{mode} {kind} {sha}\t{directory}{path[len(previous):]}")
+            for name, content in files.items():
+                path = f"{directory}/{name}"
+                blob = (await self._git(*git, "hash-object", "-w", "--stdin", stdin=content)).strip()
+                entries.append(f"100644 blob {blob}\t{path}")
+            await self._git(*git, "update-index", "-z", "--index-info", extra_env=env,
+                            stdin="".join(f"{entry}\0" for entry in entries))
+            tree = (await self._git(*git, "write-tree", extra_env=env)).strip()
+            if tree == (await self._git(*git, "rev-parse", f"{remote}^{{tree}}")).strip():
+                return None
+            commit = (await self._git(*git, "commit-tree", tree, "-p", remote, "-m", message,
+                                      extra_env=env)).strip()
+            code, _, detail = await self._run(*_NO_CREDENTIAL_HELPER, *git, "push", "--porcelain", "origin",
+                                              f"{commit}:refs/heads/{target}", auth=token)
+            if code != 0:
+                LOG.warning("git push failed with %s: %s", code, detail or "no output")
+                if "rejected" in detail or "non-fast-forward" in detail or "fetch first" in detail:
+                    raise ApiException.conflict(f"{target} changed while writing documents. Try again.")
+                raise ApiException.bad_gateway(detail or "The documents could not be pushed")
+            LOG.info("Documents in %s committed onto %s at %s", directory, target, commit[:7])
+            return commit
+        finally:
+            await self._remove_document_directory(operation_id)
+
     async def remove_release_checkout(self, operation_id: UUID) -> None:
         directory = self._release_directory(operation_id)
         if directory.is_symlink():
@@ -446,6 +531,11 @@ class Workspaces:
                 with_uuid = re.fullmatch(r"[0-9a-f-]{36}", directory.name)
                 if with_uuid and directory.is_dir() and not directory.is_symlink():
                     await self.remove_release_checkout(UUID(directory.name))
+        documents = self.root / "documents"
+        if documents.is_dir() and not documents.is_symlink():
+            for directory in documents.iterdir():
+                if re.fullmatch(r"[0-9a-f-]{36}", directory.name) and directory.is_dir() and not directory.is_symlink():
+                    await self._remove_document_directory(UUID(directory.name))
         sessions = self.root / "sessions"
         if sessions.is_symlink():
             raise RuntimeError("Managed sessions root cannot be a symlink")
@@ -1371,3 +1461,11 @@ async def delete_remote_branch(workspace: Path, branch: str, token: str) -> None
 
 async def set_identity(workspace: Path, identity: GitIdentity) -> None:
     await get_workspaces().set_identity(workspace, identity)
+
+
+async def commit_documents(
+    project_full_name: str, target: str, directory: str, files: dict[str, str], message: str,
+    identity: GitIdentity, token: str, *, adopt_suffix: str | None = None,
+) -> str | None:
+    return await get_workspaces().commit_documents(project_full_name, target, directory, files, message, identity,
+                                                   token, adopt_suffix=adopt_suffix)
