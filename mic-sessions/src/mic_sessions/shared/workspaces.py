@@ -791,6 +791,7 @@ class Workspaces:
             git_dir = Path((await self._git("-C", str(workspace), "rev-parse", "--absolute-git-dir")).strip())
             temporary_index = git_dir / f"mooi-recovery-{uuid4().hex}.index"
             bundle_tmp: Path | None = None
+            recovery_ref: str | None = None
             try:
                 env = {"GIT_INDEX_FILE": str(temporary_index), **_identity_env(_SNAPSHOT_IDENTITY)}
                 await self._git("-C", str(workspace), "read-tree", base, extra_env=env)
@@ -844,7 +845,12 @@ class Workspaces:
                 staging = revisions / f".capture-{uuid4().hex}"
                 staging.mkdir(mode=0o700)
                 bundle_tmp = staging / "objects.bundle"
-                bundle_args = ["-C", str(workspace), "bundle", "create", str(bundle_tmp), synthetic]
+                # `git bundle create` only bundles ref tips, so a bare SHA yields "empty bundle":
+                # name the synthetic commit with a private, unique ref that is never pushed and
+                # always deleted below.
+                recovery_ref = f"refs/mooi/recovery/{uuid4().hex}"
+                await self._git("-C", str(workspace), "update-ref", recovery_ref, synthetic, "")
+                bundle_args = ["-C", str(workspace), "bundle", "create", str(bundle_tmp), recovery_ref]
                 if base_is_commit:
                     bundle_args.append(f"^{base}")
                 await self._git(*bundle_args)
@@ -872,6 +878,9 @@ class Workspaces:
                 return RecoverySnapshot(task_id, attempt, branch, base, head, revision, sorted(candidates))
             finally:
                 temporary_index.unlink(missing_ok=True)
+                if recovery_ref is not None and not await self._git_ok(
+                        "-C", str(workspace), "update-ref", "-d", recovery_ref):
+                    LOG.warning("Task recovery could not delete its temporary reference")
                 if bundle_tmp is not None and bundle_tmp.parent.exists() and bundle_tmp.parent.name.startswith(".capture-"):
                     with contextlib.suppress(OSError):
                         shutil.rmtree(bundle_tmp.parent)
