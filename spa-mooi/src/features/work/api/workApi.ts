@@ -90,7 +90,7 @@ export const updateWorkIssue = (projectId: string, number: number,
 export const ensureIssueItem = (projectId: string, number: number) =>
   send<WorkItem>(workPath(projectId, `/issues/${number}/item`), 'PUT', 'Could not prepare this issue to run.');
 
-/** Opens or resumes the issue's read-only definition conversation with a server-selected assignment. */
+/** Opens or resumes the issue's scoped definition conversation with a server-selected assignment. */
 export const defineWorkIssue = (projectId: string, number: number) =>
   send<Session>(workPath(projectId, `/issues/${number}/define`), 'POST',
     'Could not open the definition session.');

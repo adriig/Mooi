@@ -541,7 +541,7 @@ async def _definition_assignment(caller: Caller, project_id: UUID) -> Json:
 @router.post("/projects/{project_id}/work/issues/{number}/define", status_code=status.HTTP_201_CREATED)
 async def define_issue(project_id: UUID, number: int,
                        caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    """Create or reopen one read-only issue-definition conversation with an economical valid assignment."""
+    """Create or reopen a scoped issue-definition conversation with an economical valid assignment."""
     for existing in get_registry().list_for(caller.player_id, project_id):
         if (existing.kind == "definition" and existing.definition_issue_number == number
                 and not existing.closing):
@@ -569,9 +569,11 @@ async def define_issue(project_id: UUID, number: int,
             "clarify its scope and verifiable acceptance criteria; decide whether it is a defect or improvement; "
             "use `kind: debt` for an Improvement because that is the compatible API identifier; "
             "and recommend whether it should be split into issues or promoted to a feature. Discuss and iterate "
-            "with the user. Do not edit GitHub issues or create/update items, tasks, or features. Read "
-            "docs/issue-definitions.md for the proposal contract. Read the current definition using the scoped "
-            "session API, then save a reviewable proposal through its authorized definition proposal endpoint. "
+            "with the user. Do not edit GitHub issues or create/update items or features. You may refine an "
+            "existing task belonging to this issue while it is NEW through the scoped task PATCH endpoint; "
+            "never change another item's tasks. Read docs/issue-definitions.md for the proposal contract. Read "
+            "the current definition using the scoped session API, then save a reviewable proposal through its "
+            "authorized definition proposal endpoint. "
             "Do not apply a proposal; only explicit user acceptance does that."
         )
         assignment = await _definition_assignment(caller, project_id)
@@ -890,6 +892,26 @@ async def agent_propose_issue_definition(session_id: UUID, number: int, request:
     return await _change_definition(caller, session.project_id, number, "proposal", proposal)
 
 
+@router.patch("/sessions/{session_id}/work/agent/issues/{number}/tasks/{task_id}")
+async def agent_update_definition_task(session_id: UUID, number: int, task_id: UUID, request: Request,
+                                       update: Annotated[Json, Body()]) -> Json:
+    """Let Define edit only an existing task belonging to its issue, without accepting the definition."""
+    session, caller = await sessions._agent_access(session_id, request, "definition")
+    if session.definition_issue_number != number:
+        raise ApiException.not_found("Not found")
+    work = await mooi.fetch_work(caller, session.project_id)
+    item = next((row for row in work.get("items", [])
+                 if row.get("issueNumber") == number and row.get("definitionState") == "NEW"), None)
+    if item is None:
+        raise ApiException.not_found("An editable task for this issue was not found")
+    task = next((row for row in item.get("tasks", []) if row.get("id") == str(task_id)), None)
+    if task is None:
+        raise ApiException.not_found("Task not found")
+    if task.get("status") in ("running", "merging", "resolving"):
+        raise ApiException.conflict("An active task cannot be edited while defining its issue")
+    return await _update_task(caller, session.project_id, UUID(item["id"]), task_id, update)
+
+
 async def _project_definition_access(session_id: UUID, request: Request) -> tuple[Session, Caller]:
     """Plain sessions (the first request of a new project, orchestrators designing the next roadmap entry)
     and the project's own definition chat, a definition session tied to no issue."""
@@ -987,7 +1009,9 @@ def _work_section(session: Session, root: str) -> str:
             "## Scoped definition API\n"
             f"- `GET {root}/work/agent/issues/{session.definition_issue_number}/definition` reads this issue's current definition.\n"
             f"- `PUT {root}/work/agent/issues/{session.definition_issue_number}/definition/proposal` saves a revisioned, reviewable proposal. "
-            "This is the only write operation available to this session; acceptance is a separate explicit user action."
+            f"- `PATCH {root}/work/agent/issues/{session.definition_issue_number}/tasks/<taskId>` updates an existing task on this issue while its definition is NEW. "
+            "Use this only to refine that issue's task; it cannot change another item, create executable work, or accept the definition. "
+            "The repository remains read-only and acceptance is a separate explicit user action."
         )
     analyst = _analysts.get(session.id)
     if analyst is not None:

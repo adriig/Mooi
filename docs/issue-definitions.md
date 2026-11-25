@@ -19,7 +19,10 @@ y `work.item`. `work.definition` añade `{projectId, number, definition}` para s
 mic-mooi ofrece las mismas rutas bajo `/me/projects`, autenticadas mediante el servicio y limitadas
 al propietario del proyecto. Los agentes tienen `GET` y `PUT /proposal` bajo
 `/sessions/{sessionId}/work/agent/issues/{number}/definition`; la aceptación se reserva a la API
-autenticada del usuario y no tiene una ruta de agente.
+autenticada del usuario y no tiene una ruta de agente. Una sesión Define también puede actualizar
+una tarea existente del mismo issue NEW con
+`PATCH /sessions/{sessionId}/work/agent/issues/{number}/tasks/{taskId}`. El repositorio sigue siendo
+de solo lectura; la actualización de una tarea no acepta la definición ni vuelve ejecutable el issue.
 
 Ejemplo de propuesta para un issue individual:
 

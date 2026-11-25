@@ -10,7 +10,7 @@ import type { SessionStatus } from '@/features/sessions/types/SessionStatus';
 export interface Session {
   id: string;
   kind: SessionKind;
-  /** GitHub issue under definition for a read-only definition chat. */
+  /** GitHub issue under definition for a scoped issue-definition chat. */
   definitionIssueNumber?: number | null;
   projectId: string;
   projectFullName: string;

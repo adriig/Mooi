@@ -124,11 +124,13 @@ Each project plans and builds its work as a software factory: agents design it, 
     missing). GitHub Issues hold only these two kinds, never features; their execution settings live in the
     platform. A single task asked in a session is developed in that session and never becomes a work item.
     Debt is presented as **Improvement**. Open issues without an accepted definition are **NEW** and
-    cannot start. **Define** creates or reopens an associated session with read-only repository access
-    and an economical model/effort selected from the owner's available accounts within quota. The agent
+    cannot start. **Define** creates or reopens an associated session with read-only repository access,
+    scoped permission to update existing tasks belonging to that NEW issue, and an economical
+    model/effort selected from the owner's available accounts within quota. The agent
     proposes title, description, validity, acceptance criteria, kind, category and any split or feature
-    promotion. Proposals change no issues or executable work. Only user acceptance applies them and moves
-    the issue to **DEFINED**; splits create separate issues and promotion uses the feature contract.
+    promotion. Proposals change no issues or create executable work. Define may refine existing tasks
+    belonging to that NEW issue through its scoped API; the issue remains non-executable until user
+    acceptance moves it to **DEFINED**. Splits create separate issues and promotion uses the feature contract.
     Proposal, acceptance and reopening are revisioned and idempotent; reopening returns it to **NEW**.
     Features bypass NEW. Existing items with complete execution settings remain defined.
 - **Project definition and Feature 0**: a new project — no feature items and at most 10 versioned files

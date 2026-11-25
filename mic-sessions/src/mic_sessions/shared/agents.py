@@ -114,7 +114,7 @@ _READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch", "
 
 
 def _definition_api_command(command: Any, api_prefix: str | None) -> bool:
-    """Allow only a one-line Python urllib call to this definition session's two scoped API routes."""
+    """Allow one-line Python urllib calls only to this definition session's scoped API routes."""
     if not isinstance(command, str) or not api_prefix:
         return False
     executable, marker, source = command.partition(" -c '")
@@ -170,9 +170,15 @@ def _definition_api_command(command: Any, api_prefix: str | None) -> bool:
         if function in ("urllib.request.Request", "Request"):
             url = literal(node.args[0]) if node.args else None
             method = next((literal(item.value) for item in node.keywords if item.arg == "method"), "GET")
-            if url not in (api_prefix, f"{api_prefix}/proposal") or method not in ("GET", "PUT"):
-                return False
-            if (url == api_prefix and method != "GET") or (url.endswith("/proposal") and method != "PUT"):
+            issue_prefix = api_prefix.removesuffix("/definition")
+            task_route = (re.fullmatch(re.escape(f"{issue_prefix}/tasks/") + r"[0-9a-fA-F-]{36}", url)
+                          if isinstance(url, str) else None)
+            allowed = (
+                (url == api_prefix and method == "GET")
+                or (url == f"{api_prefix}/proposal" and method == "PUT")
+                or (task_route is not None and method == "PATCH")
+            )
+            if not allowed:
                 return False
             requests.append((node, url, method))
             for statement in ast.walk(tree):
@@ -1316,7 +1322,7 @@ class ClaudeAgentRuntime:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
-                return PermissionResultDeny(message="This definition session is read-only")
+                return PermissionResultDeny(message="Definition sessions allow only read tools and scoped API writes")
             return PermissionResultAllow(updated_input=input_data)
 
         request_id = uuid4().hex
@@ -2091,7 +2097,7 @@ class ClaudeCliAgentRuntime:
         """Only user decisions pause the session; tool execution is automatic."""
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
-                return {"behavior": "deny", "message": "This definition session is read-only"}
+                return {"behavior": "deny", "message": "Definition sessions allow only read tools and scoped API writes"}
             return {"behavior": "allow", "updatedInput": input_data}
         request_id = uuid4().hex
         questions = list(input_data.get("questions") or [])
@@ -3671,7 +3677,7 @@ class AntigravityCliAgentRuntime:
             return antigravity.deny("Definition sessions allow shell commands only for their scoped definition API")
         if self._read_only and name in {"write_file", "write_to_file", "edit_file", "replace_file_content",
                                         "multi_replace_file_content", "sed_file", "notebook_edit"}:
-            return antigravity.deny("This definition session is read-only")
+            return antigravity.deny("Definition sessions cannot modify repository files")
         asked = antigravity.questions(payload)
         if asked is None:
             return antigravity.allow()
