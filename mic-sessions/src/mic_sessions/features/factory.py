@@ -756,6 +756,8 @@ _runner_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
 _lock = asyncio.Lock()
 _last_recovery_cleanup = 0.0
+_LAUNCH_QUOTA_TTL = 300
+_launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
 
 
 def wake() -> None:
@@ -1139,8 +1141,40 @@ async def _assign(caller: Caller, task: Json, quota_limit: float) -> Json | None
     launches on an account whose known quota reached `quota_limit` or whose catalog lacks the model."""
     connections = [connection for connection in await mooi.fetch_agent_connections(caller)
                    if connection.get("provider") in PROVIDERS and not connection.get("stale")]
-    catalogs = await _account_catalogs(caller, connections)
-    return _select_assignment(task, connections, quota_limit, catalogs)
+    catalogs, snapshots = await asyncio.gather(
+        _account_catalogs(caller, connections), _launch_quota_snapshots(caller, connections))
+    return _select_assignment(task, connections, quota_limit, catalogs, snapshots)
+
+
+async def _launch_quota_snapshots(caller: Caller, connections: list[Json]) -> dict[str, Json]:
+    """Refresh provider quota for accounts without live session data, caching results briefly."""
+    now = asyncio.get_running_loop().time()
+    missing = [connection for connection in connections
+               if _highest_percent(str(connection["id"])) is None]
+    pending: list[Json] = []
+    snapshots: dict[str, Json] = {}
+    for connection in missing:
+        connection_id = str(connection["id"])
+        cached = _launch_quota_cache.get(connection_id)
+        if cached and now - cached[0] < _LAUNCH_QUOTA_TTL:
+            if cached[1] is not None:
+                snapshots[connection_id] = cached[1]
+        else:
+            pending.append(connection)
+    if pending:
+        refreshed = await _refresh_account_quotas(caller, pending)
+        checked_at = asyncio.get_running_loop().time()
+        for connection in pending:
+            connection_id = str(connection["id"])
+            snapshot = refreshed.get(connection_id)
+            _launch_quota_cache[connection_id] = (checked_at, snapshot)
+            if snapshot:
+                snapshots[connection_id] = snapshot
+        if len(_launch_quota_cache) > 1024:
+            oldest = sorted(_launch_quota_cache, key=lambda key: _launch_quota_cache[key][0])
+            for connection_id in oldest[:len(_launch_quota_cache) - 1024]:
+                _launch_quota_cache.pop(connection_id, None)
+    return snapshots
 
 
 def _select_assignment(task: Json, connections: list[Json], quota_limit: float,
