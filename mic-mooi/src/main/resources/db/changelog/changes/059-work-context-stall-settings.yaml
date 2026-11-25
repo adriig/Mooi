@@ -1,0 +1,39 @@
+databaseChangeLog:
+  - changeSet:
+      id: 059-work-context-stall-settings
+      author: mooi
+      changes:
+        # Unattended continuity: the context share at which a task session checkpoints and hands off
+        # to a fresh session, and the consecutive turns without progress before a task waits for the user.
+        - addColumn:
+            tableName: work_settings
+            columns:
+              - column:
+                  name: context_handoff_percent
+                  type: integer
+                  defaultValueNumeric: 60
+                  constraints:
+                    nullable: false
+              - column:
+                  name: stall_turns
+                  type: integer
+                  defaultValueNumeric: 3
+                  constraints:
+                    nullable: false
+        - sql:
+            sql: >
+              ALTER TABLE work_settings
+              ADD CONSTRAINT ck_work_settings_context_handoff CHECK (context_handoff_percent BETWEEN 20 AND 90),
+              ADD CONSTRAINT ck_work_settings_stall_turns CHECK (stall_turns BETWEEN 1 AND 10)
+      rollback:
+        - sql:
+            sql: >
+              ALTER TABLE work_settings
+              DROP CONSTRAINT ck_work_settings_context_handoff,
+              DROP CONSTRAINT ck_work_settings_stall_turns
+        - dropColumn:
+            tableName: work_settings
+            columnName: stall_turns
+        - dropColumn:
+            tableName: work_settings
+            columnName: context_handoff_percent

@@ -18,6 +18,10 @@ const FIELDS: { key: keyof WorkSettings; label: string; hint: string; min: numbe
     hint: 'Fixes run automatically after a failed QA before it waits for you. 0 hands every failure to you.' },
   { key: 'maxResolutions', label: 'Conflict resolutions', min: 0, max: 5,
     hint: 'Agentic merge attempts when a task conflicts with the default branch. 0 leaves conflicts to you.' },
+  { key: 'contextHandoffPercent', label: 'Context handoff', min: 20, max: 90, suffix: '%',
+    hint: 'When a task session\'s context reaches this share, the runner checkpoints and continues in a fresh session.' },
+  { key: 'stallTurns', label: 'Stall turns', min: 1, max: 10,
+    hint: 'Consecutive segments or turns without progress before a task waits for you.' },
 ];
 
 /** The project's factory limits, from Work and the Board alike; agents change the same settings. */

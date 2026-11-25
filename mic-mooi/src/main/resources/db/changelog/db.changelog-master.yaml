@@ -117,3 +117,5 @@ databaseChangeLog:
       file: db/changelog/changes/057-work-deployed-version.yaml
   - include:
       file: db/changelog/changes/058-work-task-attempts-base.yaml
+  - include:
+      file: db/changelog/changes/059-work-context-stall-settings.yaml

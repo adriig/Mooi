@@ -630,12 +630,14 @@ public class ProjectWorkFeature {
             row.setMaxAttempts(payload.maxAttempts());
             row.setMaxQaRounds(payload.maxQaRounds());
             row.setMaxResolutions(payload.maxResolutions());
+            row.setContextHandoffPercent(payload.contextHandoffPercent());
+            row.setStallTurns(payload.stallTurns());
             return toPayload(settings.save(row));
         }
 
         private static WorkSettingsPayload toPayload(WorkSettings row) {
             return new WorkSettingsPayload(row.getQuotaLimit(), row.getMaxAttempts(), row.getMaxQaRounds(),
-                    row.getMaxResolutions());
+                    row.getMaxResolutions(), row.getContextHandoffPercent(), row.getStallTurns());
         }
 
         /**
@@ -1856,6 +1858,12 @@ public class ProjectWorkFeature {
 
         @Column(name = "max_resolutions", nullable = false)
         private int maxResolutions;
+
+        @Column(name = "context_handoff_percent", nullable = false)
+        private int contextHandoffPercent;
+
+        @Column(name = "stall_turns", nullable = false)
+        private int stallTurns;
     }
 
     public interface WorkSettingsRepository extends JpaRepository<WorkSettings, UUID> {
@@ -2126,12 +2134,16 @@ public class ProjectWorkFeature {
      * which an account is spared and a task's alternatives are tried; {@code maxAttempts}: sessions a
      * task may lose before it waits for the player; {@code maxQaRounds}: fix-and-check-again rounds
      * after a failed QA (0 hands every failure to the player); {@code maxResolutions}: agentic merge
-     * attempts on conflicts (0 leaves conflicts to the player).
+     * attempts on conflicts (0 leaves conflicts to the player); {@code contextHandoffPercent}: the
+     * context share at which a task session checkpoints and continues in a fresh session;
+     * {@code stallTurns}: consecutive segments or turns without progress before a task waits for the
+     * player.
      */
     public record WorkSettingsPayload(@Min(10) @Max(100) int quotaLimit, @Min(1) @Max(10) int maxAttempts,
-                                      @Min(0) @Max(10) int maxQaRounds, @Min(0) @Max(5) int maxResolutions) {
+                                      @Min(0) @Max(10) int maxQaRounds, @Min(0) @Max(5) int maxResolutions,
+                                      @Min(20) @Max(90) int contextHandoffPercent, @Min(1) @Max(10) int stallTurns) {
 
-        static final WorkSettingsPayload DEFAULTS = new WorkSettingsPayload(85, 3, 3, 2);
+        static final WorkSettingsPayload DEFAULTS = new WorkSettingsPayload(85, 3, 3, 2, 60, 3);
     }
 
     public record RunnerItem(UUID playerId, UUID authSessionId, WorkSettingsPayload settings, ItemPayload item) {
