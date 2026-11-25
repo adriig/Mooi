@@ -5,6 +5,7 @@ import type { PlatformEnvironmentVariable } from '@/features/platform/types/Plat
 import type { PlatformSnapshot } from '@/features/platform/types/PlatformSnapshot';
 import type { PlatformStreamState } from '@/features/platform/types/PlatformStreamState';
 import type { ProjectDefinition } from '@/features/work/types/ProjectDefinition';
+import type { IssueDefinition } from '@/features/work/api/workApi';
 import type { ProjectWork } from '@/features/work/types/ProjectWork';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
@@ -102,7 +103,7 @@ export const useLiveStore = create<LiveState>((set) => ({
     if (frame.type === 'work.definition') {
       const current = state.work[projectId] ?? EMPTY_WORK;
       return { work: { ...state.work, [projectId]: { ...current,
-        issueDefinitions: { ...(current.issueDefinitions ?? {}), [Number(data.number)]: data.definition as import('@/features/work/api/workApi').IssueDefinition } } } };
+        issueDefinitions: { ...(current.issueDefinitions ?? {}), [Number(data.number)]: data.definition as IssueDefinition } } } };
     }
     if (frame.type === 'work.removed') {
       const current = state.work[projectId];
@@ -161,6 +162,12 @@ export const useLiveStore = create<LiveState>((set) => ({
   adoptWorkIssue: (projectId, issue) => set((state) => ({
     work: { ...state.work, [projectId]: upsertIssue(state.work[projectId], issue) },
   })),
+
+  adoptIssueDefinition: (projectId, number, definition) => set((state) => {
+    const current = state.work[projectId] ?? EMPTY_WORK;
+    return { work: { ...state.work, [projectId]: { ...current,
+      issueDefinitions: { ...(current.issueDefinitions ?? {}), [number]: definition } } } };
+  }),
 
   reconnect: () => set((state) => ({ generation: state.generation + 1 })),
 

@@ -3,6 +3,7 @@ import type { PlatformEnvironmentVariable } from '@/features/platform/types/Plat
 import type { PlatformSnapshot } from '@/features/platform/types/PlatformSnapshot';
 import type { PlatformStreamState } from '@/features/platform/types/PlatformStreamState';
 import type { ProjectDefinition } from '@/features/work/types/ProjectDefinition';
+import type { IssueDefinition } from '@/features/work/api/workApi';
 import type { ProjectWork } from '@/features/work/types/ProjectWork';
 import type { WorkIssue } from '@/features/work/types/WorkIssue';
 import type { WorkItem } from '@/features/work/types/WorkItem';
@@ -43,6 +44,7 @@ export interface LiveState {
   /** One item as an answer or an event brought it. */
   adoptWorkItem: (item: WorkItem) => void;
   adoptWorkIssue: (projectId: string, issue: WorkIssue) => void;
+  adoptIssueDefinition: (projectId: string, number: number, definition: IssueDefinition) => void;
   adoptWorkSettings: (projectId: string, settings: WorkSettings) => void;
   reconnect: () => void;
   reset: () => void;

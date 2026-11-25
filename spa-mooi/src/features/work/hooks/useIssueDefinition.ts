@@ -1,68 +1,63 @@
 import { useCallback, useEffect, useState } from 'react';
 import { acceptIssueDefinition, fetchIssueDefinition, reopenIssueDefinition, WorkApiError } from '@/features/work/api/workApi';
 import type { IssueDefinition } from '@/features/work/api/workApi';
+import type { WorkIssue } from '@/features/work/types/WorkIssue';
+import type { WorkItem } from '@/features/work/types/WorkItem';
 import { useLiveStore } from '@/stores/liveStore';
+
+const staleMessage = 'The proposal changed while you were reviewing it. The latest proposal is loaded; review it and try again.';
+type MutationResult = { definition: IssueDefinition; issues: WorkIssue[]; items: WorkItem[] };
 
 export const useIssueDefinition = (projectId: string, number: number, enabled = true) => {
   const definition = useLiveStore((live) => live.work[projectId]?.issueDefinitions?.[number] ?? null);
   const epoch = useLiveStore((live) => live.epoch);
+  const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+
   const refresh = useCallback(async () => {
-    const value = await fetchIssueDefinition(projectId, number);
-    useLiveStore.setState((state) => {
-      const current = state.work[projectId];
-      return { work: { ...state.work, [projectId]: { ...(current ?? { items: null, issues: null }),
-        issueDefinitions: { ...(current?.issueDefinitions ?? {}), [number]: value } } } };
-    });
+    useLiveStore.getState().adoptIssueDefinition(projectId, number, await fetchIssueDefinition(projectId, number));
   }, [projectId, number]);
 
   useEffect(() => {
-    if (!enabled) return undefined;
+    if (!enabled || !number) return undefined;
     let active = true;
     fetchIssueDefinition(projectId, number).then((value) => {
-      if (!active) return;
-      useLiveStore.setState((state) => {
-        const current = state.work[projectId];
-        return { work: { ...state.work, [projectId]: { ...(current ?? { items: null, issues: null }),
-          issueDefinitions: { ...(current?.issueDefinitions ?? {}), [number]: value } } } };
-      });
-      setLoadError(null);
-    }).catch((error: Error) => { if (active) setLoadError(error.message); });
+      if (active) {
+        useLiveStore.getState().adoptIssueDefinition(projectId, number, value);
+        setLoadError(null);
+      }
+    }).catch((failure: Error) => { if (active) setLoadError(failure.message); });
     return () => { active = false; };
-  }, [projectId, number, epoch, enabled]);
+  }, [projectId, number, enabled, epoch]);
 
-  const mutate = useCallback(async (action: () => Promise<{ definition: IssueDefinition; issues: import('@/features/work/types/WorkIssue').WorkIssue[]; items: import('@/features/work/types/WorkItem').WorkItem[] }>) => {
-    setBusy(true); setActionError(null);
+  const mutate = useCallback(async (action: () => Promise<MutationResult>) => {
+    setBusy(true);
+    setActionError(null);
     try {
       const result = await action();
-      useLiveStore.setState((state) => {
-        const current = state.work[projectId] ?? { items: null, issues: null };
-        let issues = current.issues;
-        let items = current.items;
-        for (const issue of result.issues) if (issues) {
-          const index = issues.findIndex((candidate) => candidate.number === issue.number);
-          issues = index < 0 ? [issue, ...issues] : issues.map((candidate) => candidate.number === issue.number ? issue : candidate);
-        }
-        for (const item of result.items) if (items) {
-          const index = items.findIndex((candidate) => candidate.id === item.id);
-          items = index < 0 ? [item, ...items] : items.map((candidate) => candidate.id === item.id ? item : candidate);
-        }
-        return { work: { ...state.work, [projectId]: { ...current, issues, items,
-          issueDefinitions: { ...(current.issueDefinitions ?? {}), [number]: result.definition } } } };
-      });
+      const live = useLiveStore.getState();
+      live.adoptIssueDefinition(projectId, number, result.definition);
+      result.issues.forEach((issue) => live.adoptWorkIssue(projectId, issue));
+      result.items.forEach((item) => live.adoptWorkItem(item));
       return true;
-    } catch (error) {
-      setActionError(error instanceof WorkApiError && error.status === 409
-        ? `This proposal is out of date. The latest revision has been loaded; review it and try again. (${error.message})`
-        : error instanceof Error ? error.message : 'Something went wrong.');
-      if (error instanceof WorkApiError && error.status === 409) void refresh().catch(() => undefined);
+    } catch (failure) {
+      if (failure instanceof WorkApiError && failure.status === 409) {
+        setActionError(`${staleMessage} (${failure.message})`);
+        void refresh().catch(() => undefined);
+      } else setActionError(failure instanceof Error ? failure.message : 'Something went wrong.');
       return false;
     } finally { setBusy(false); }
-  }, [number, projectId, refresh]);
+  }, [projectId, number, refresh]);
 
-  return { definition, loadError, actionError, busy,
+  return {
+    definition,
+    busy,
+    loadError,
+    actionError,
+    error: actionError ?? loadError,
     accept: (proposalId: string) => mutate(() => acceptIssueDefinition(projectId, number, proposalId)),
-    reopen: (proposalId: string | null) => mutate(() => reopenIssueDefinition(projectId, number, proposalId)) };
+    reopen: (proposalId: string | null) => mutate(() => reopenIssueDefinition(projectId, number, proposalId)),
+    clearError: () => { setLoadError(null); setActionError(null); },
+  };
 };

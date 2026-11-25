@@ -1,4 +1,4 @@
-import { AlertTriangle, KeyRound, Network } from 'lucide-react';
+import { AlertTriangle, FileCheck2, KeyRound, Network } from 'lucide-react';
 import { CommitLink } from '@/features/work/components/CommitLink';
 import { segmentLabel, taskNotice } from '@/features/work/lib/taskNotice';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
@@ -23,11 +23,12 @@ interface WorkCardProps {
   onStart: () => void;
   onPause: () => void;
   onDefine?: () => void;
+  onReviewProposal?: () => void;
   onViewBoard?: () => void;
 }
 
 /** One feature, defect or debt on the board: what it is, how far it got, where it stands and its run control. */
-export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause, onDefine, onViewBoard }: WorkCardProps) => {
+export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart, onPause, onDefine, onReviewProposal, onViewBoard }: WorkCardProps) => {
   const kind = WORK_KINDS[entry.kind];
   const Icon = kind.icon;
   const tasks = entry.item?.tasks ?? [];
@@ -118,7 +119,8 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
         </div>
       ) : null}
       {entry.column === 'new' ? (
-        <div className="flex justify-end px-1">
+        <div className="flex justify-end gap-2 px-1">
+          {entry.issue ? <Button size="sm" variant="secondary" disabled={busy} onClick={onReviewProposal}><FileCheck2 className="size-4" /> Revisar propuesta</Button> : null}
           <Button size="sm" variant="brand" disabled={busy} onClick={onDefine}>Define</Button>
         </div>
       ) : null}
