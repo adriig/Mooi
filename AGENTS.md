@@ -182,8 +182,35 @@ Each project plans and builds its work as a software factory: agents design it, 
 - **Factory settings** (per project, from the Board or the chat): the quota percent from which an
   account is spared (default 85%), the sessions a task may lose before it waits for the user (3), the
   fix-and-check-again rounds after a failed QA (3; 0 hands every failure to the user) and the agentic merge
-  attempts on conflicts (2; 0 leaves conflicts to the user).
+  attempts on conflicts (2; 0 leaves conflicts to the user), the context percent that triggers a handoff to a
+  new session (`contextHandoffPercent`, 20-90, default 60) and the consecutive turns or segments without
+  progress before a task waits for the user (`stallTurns`, 1-10, default 3).
 - Managed from UI or chat (session agents use the same platform API); changes stream live to every view.
+
+### Unattended continuity
+
+All of this is deterministic runner code, never a supervisor LLM (only the change analyst is a one-off agent
+session). State is durable in the platform, never only in runner memory, and new states and reasons show live
+in To-dos, the Board and the task editor.
+
+- **Context handoff**: when a task's session passes `contextHandoffPercent`, the runner asks the agent for a
+  checkpoint (state, next step, files), saves the recovery snapshot and continues the task in a new session
+  restored from it. A handoff starts a new **segment** of the same attempt and consumes no attempt. Past the
+  threshold plus 15 points with no checkpoint, the runner cuts the session and hands off from the last snapshot.
+- **No-progress detection**: when `stallTurns` consecutive segments or turns end with an unchanged snapshot
+  revision and no result, the task moves to attention with reason "No progress".
+- **Cross-verification**: a development `done` with no real changes against its base is rejected: the agent is
+  warned once, then the task moves to attention. Reported files that did not change are noted in the handoff.
+- **Quota pause and resume**: when a running session hits the provider limit, the runner saves a snapshot, closes
+  the session and leaves the task queued as "Waiting for quota until HH:MM". It relaunches by itself from the
+  snapshot on the first alternative with quota, or when the window resets.
+- **Runner credential**: Start creates or reuses the user's own authentication session labelled "Mooi Software
+  Factory", independent of any browser. Signing out on a device does not stop the factory; signing out everywhere,
+  revoking it, or an admin ban pauses the items with reason "Credential revoked".
+- **Change requests**: the user (or the chat) queues a free-text request on a running feature. At a safe point
+  (no task of the feature merging) an analyst agent adjusts the spec and the unstarted tasks and adds delta tasks;
+  it never rewrites finished tasks. If the scope changes, the proposal waits for user confirmation.
+- Each operation has a user route and a mirror under the session agent API, and publishes live `work.*` events.
 
 ### Task handoffs and recovery
 
@@ -204,6 +231,8 @@ Each project plans and builds its work as a software factory: agents design it, 
   mismatched or unsafe, the task moves to attention with a reason; the runner does not relaunch from a clean
   checkout or claim that unsaved work was recovered. Finalized task recovery is retired; abandoned recovery
   revisions have bounded retention, while an active consumer is never deleted underneath.
+- Context handoffs, quota pauses and revoked-credential pauses reuse this recovery: the new session is restored from
+  the last saved snapshot as a new segment of the same attempt, under the same rules.
 - This recovery contract complements debt #31, which owns compacting general briefs and removing duplicated
   brief content. It does not duplicate that work or depend on its merge order; task-specific handoff and recovery
   remain compatible with old reports and legacy tasks.
