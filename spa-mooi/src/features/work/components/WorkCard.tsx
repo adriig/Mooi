@@ -1,5 +1,6 @@
-import { AlertTriangle, Network } from 'lucide-react';
+import { AlertTriangle, KeyRound, Network } from 'lucide-react';
 import { CommitLink } from '@/features/work/components/CommitLink';
+import { segmentLabel, taskNotice } from '@/features/work/lib/taskNotice';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import { Button } from '@/shared/components/Button';
 import { entryDeployment } from '@/features/work/lib/workEntries';
@@ -63,17 +64,26 @@ export const WorkCard = ({ entry, projectName, repository, busy, onOpen, onStart
         </span>
       </button>
 
-      {tasks.filter((task) => task.contextHandoff || task.status === 'attention').map((task) => (
-        task.report ? <span key={task.id} className="line-clamp-2 px-1.5 text-[12px] text-warning"
-          title={`${task.title}: ${task.report}`}>
-          {task.title} · Segment {(task.segments ?? 0) + 1}: {task.report}
-        </span> : null
-      ))}
+      {tasks.map((task) => {
+        const notice = taskNotice(task);
+        if (!notice) return null;
+        return (
+          <span key={task.id} title={`${task.title}: ${notice.text}`}
+            className={cn('flex items-start gap-1 px-1.5 text-[12px] leading-snug', notice.tone === 'danger' ? 'text-danger' : 'text-warning')}>
+            <notice.icon className="mt-0.5 size-3.5 shrink-0" />
+            <span className="line-clamp-2 min-w-0 break-words">
+              {task.title}{segmentLabel(task) ? ` · ${segmentLabel(task)}` : ''}: {notice.text}
+            </span>
+          </span>
+        );
+      })}
 
       {entry.item?.status === 'paused' ? (
         <div className="flex flex-col gap-1 px-1.5">
           <span><Badge tone="warning">Paused</Badge></span>
-          {entry.item.pauseReason ? <span className="text-[12px] text-warning">{entry.item.pauseReason}</span> : null}
+          {entry.item.pauseReason ? <span className="flex items-start gap-1 text-[12px] text-warning">
+            <KeyRound className="mt-0.5 size-3.5 shrink-0" /> <span className="min-w-0 break-words">{entry.item.pauseReason}</span>
+          </span> : null}
         </div>
       ) : null}
 

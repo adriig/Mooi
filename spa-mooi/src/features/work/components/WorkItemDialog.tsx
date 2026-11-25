@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, Network, RefreshCw, Settings2, Trash2 } from 'lucide-react';
+import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, KeyRound, Network, RefreshCw, Settings2, Trash2 } from 'lucide-react';
 import { projectPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
@@ -92,7 +92,9 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
           <Badge tone={kind.tone} icon={kind.icon}>{kind.label}</Badge>
           <Badge tone={status.tone}>{status.label}</Badge>
           {item?.status === 'paused' && item.pauseReason ? (
-            <span className="text-xs font-medium text-warning">{item.pauseReason}</span>
+            <span className="inline-flex min-w-0 items-start gap-1 text-xs font-medium text-warning">
+              <KeyRound className="mt-px size-3.5 shrink-0" /> <span className="break-words">{item.pauseReason}</span>
+            </span>
           ) : null}
           {deployment ? (
             <Badge tone={deployment.state === 'deployed' ? 'success' : 'neutral'}>

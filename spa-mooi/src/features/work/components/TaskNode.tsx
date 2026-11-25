@@ -6,6 +6,7 @@ import { TaskQuickControls } from '@/features/work/components/TaskQuickControls'
 import { NODE_HEIGHT, NODE_WIDTH } from '@/features/work/lib/layoutTaskGraph';
 import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
 import { taskStyle } from '@/features/work/lib/taskCategories';
+import { segmentLabel, taskNotice } from '@/features/work/lib/taskNotice';
 import { TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
 import type { WorkTask } from '@/features/work/types/WorkTask';
 import type { WorkTaskUpdate } from '@/features/work/types/WorkTaskUpdate';
@@ -43,6 +44,7 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
   const done = task.status === 'done';
   const findings = qaFindings(task);
   const blocker = qaBlocker(task);
+  const notice = taskNotice(task);
   const qaOrigin = task.fixOf ? tasks.find((candidate) => candidate.id === task.fixOf) : null;
   const findingTitle = qaOrigin
     ? qaFindings(qaOrigin).find((finding) => finding.id === task.findingId)?.title
@@ -70,11 +72,13 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
           {done ? <CheckCircle2 className="mr-1 inline size-3.5 -translate-y-px text-success" /> : null}
           {task.title}
         </span>
-        {(task.segments ?? 0) > 0 ? (
-          <span className="text-[10.5px] text-ink-subtle">Segment {(task.segments ?? 0) + 1}</span>
-        ) : null}
-        {task.report && (task.contextHandoff || state === 'attention') ? (
-          <span title={task.report} className="line-clamp-1 text-[10.5px] text-warning">{task.report}</span>
+        {segmentLabel(task) ? <span className="text-[10.5px] text-ink-subtle">{segmentLabel(task)}</span> : null}
+        {notice ? (
+          <span title={notice.text} className={cn('flex items-start gap-1 text-[10.5px] leading-snug',
+            notice.tone === 'danger' ? 'text-danger' : 'text-warning')}>
+            <notice.icon className="mt-px size-3 shrink-0" />
+            <span className="line-clamp-2 min-w-0 break-words">{notice.text}</span>
+          </span>
         ) : null}
         {blocker ? (
           <span title={blocker.cause} className="line-clamp-1 text-[10.5px] leading-snug text-warning">
