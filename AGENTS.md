@@ -381,6 +381,13 @@ in Planification, the Board and the task editor.
   pages, impressions, clicks, click-through rate and average position.
 - The page provides overview and traffic/click reports, live visitors, date ranges and source-specific
   sections for the Mooi tracker, GA4 and Search Console, with explicit empty and partial setup states.
+- Analytics diagnostics retain immutable, authorized project/range evidence for the tracker, GA4,
+  Search Console, tracker AI referrals, historical prompt visibility runs and SEO/GEO audits. Each
+  source keeps its status, actual period/timezone, retrieval date, coverage and execution provenance;
+  missing or failed sources never mean zero. Generation state and structured results persist across
+  restarts and stream on the owner's live channel. Findings cite saved evidence, recommendations give
+  justified priorities/actions/verification, and general suggestions stay separate. Evidence collection
+  is read-only: it never changes configuration, reconnects accounts or starts GEO runs or audits.
 - **GEO** includes AI-referral traffic from tracker visits; AI visibility monitoring that runs tracked
   prompts through the user's already linked provider accounts, manually or on a weekly schedule, while
   respecting account quotas; and an on-demand SEO & GEO audit of production sites. Audits check AI crawler

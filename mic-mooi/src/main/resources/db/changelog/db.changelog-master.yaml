@@ -133,3 +133,5 @@ databaseChangeLog:
       file: db/changelog/changes/063-google-oauth-account-settings.yaml
   - include:
       file: db/changelog/changes/064-work-clean-restart.yaml
+  - include:
+      file: db/changelog/changes/065-analytics-analyses.yaml

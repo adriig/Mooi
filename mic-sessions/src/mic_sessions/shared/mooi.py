@@ -334,16 +334,35 @@ async def send_analytics(caller: Caller, method: str, project_id: UUID, path: st
                          params: dict[str, str | int] | None = None) -> Any:
     # An audit (20 s) and a site evidence collection (25 s) have server-side budgets beyond the 10 s default.
     slow = method == "POST" and path in ("/audits", "/geo/suggestions/evidence")
+    # Saved analysis evidence can aggregate several provider requests for one source.
+    analysis_evidence = method == "POST" and path.startswith("/analyses/") and "/evidence/" in path
     try:
         response = await get_http_client().request(
             method, f"{get_settings().mooi_api_base_url}/me/projects/{project_id}/analytics{path}",
             headers=_bearer(caller), params=params, json=payload,
-            timeout=40.0 if slow else 10.0,
+            timeout=90.0 if analysis_evidence else 40.0 if slow else 10.0,
         )
     except httpx.HTTPError:
         raise ApiException.bad_gateway() from None
     _raise_for_status(response, "Analytics not found")
     return response.json() if response.content else None
+
+
+async def fetch_analysis_events() -> list[dict]:
+    response = await get_http_client().get(
+        f"{get_settings().mooi_api_base_url}/internal/analytics/analyses/events",
+        headers=_service_headers(None),
+    )
+    _raise_for_status(response, "Analytics events unavailable")
+    return response.json()
+
+
+async def acknowledge_analysis_event(analysis_id: UUID, revision: int) -> None:
+    response = await get_http_client().delete(
+        f"{get_settings().mooi_api_base_url}/internal/analytics/analyses/events/{analysis_id}",
+        headers=_service_headers(None), params={"revision": revision},
+    )
+    _raise_for_status(response, "Analytics event unavailable")
 
 
 async def fetch_issues(caller: Caller, project_id: UUID) -> dict:

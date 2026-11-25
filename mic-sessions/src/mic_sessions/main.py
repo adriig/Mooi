@@ -33,9 +33,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     sessions.start_reconciler()
     factory.start_runner()
     geo.start_runner()
+    analytics.start_analysis_events()
     try:
         yield
     finally:
+        await analytics.close_analysis_events()
         await geo.close_runner()
         await factory.close_runner()
         await agent_connections.close_all()

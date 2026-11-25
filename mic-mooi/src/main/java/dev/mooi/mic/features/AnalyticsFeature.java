@@ -328,8 +328,11 @@ public class AnalyticsFeature {
     public record Ga4Metrics(long activeUsers, long sessions, long screenPageViews, long eventCount,
                              double bounceRate, double averageSessionDuration) { }
     public record Ga4Row(String key, Ga4Metrics metrics) { }
+    public record Ga4Sampling(String samplesReadCount, String samplingSpaceSize) { }
+    public record Ga4Coverage(String timeZone, Boolean subjectToThresholding, Boolean dataLossFromOtherRow,
+                              List<Ga4Sampling> sampling, Long totalRows, String emptyReason) { }
     public record Ga4Report(String propertyId, String report, String from, String to, Ga4Metrics totals,
-                            List<Ga4Row> rows, Instant fetchedAt) { }
+                            List<Ga4Row> rows, Instant fetchedAt, Ga4Coverage coverage) { }
 
     public record MetricValue(long value, Long previous, Double deltaPercent) { }
     public record OverviewPayload(MetricValue visitors, MetricValue sessions, MetricValue pageviews,
@@ -735,6 +738,16 @@ public class AnalyticsFeature {
             AnalyticsSite site = ownedSite(projectId, playerId);
             GeoRun run = ownedRun(site.getId(), runId);
             return runDetail(run);
+        }
+
+        @Transactional(readOnly = true)
+        public GeoRunDetail geoEvidenceRun(UUID projectId, UUID playerId, UUID runId) {
+            requireProject(projectId, playerId);
+            AnalyticsSite site = sites.findByProjectId(projectId).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Analytics site not found"));
+            GeoRun run = ownedRun(site.getId(), runId);
+            return new GeoRunDetail(runPayload(run), geoResults.findByRunIdOrderByIdAsc(runId, PageRequest.of(0, 100))
+                    .stream().map(this::resultPayload).toList());
         }
 
         @Transactional
@@ -1905,6 +1918,9 @@ public class AnalyticsFeature {
     }
 
     public interface AnalyticsAuditRepository extends JpaRepository<AnalyticsAudit, UUID> {
+        @Query("select a from AnalyticsAudit a where a.siteId = :site and a.createdAt >= :from and a.createdAt < :to order by a.createdAt desc, a.id desc")
+        List<AnalyticsAudit> findEvidenceAudits(@Param("site") UUID site, @Param("from") Instant from,
+                @Param("to") Instant to, Pageable page);
         List<AnalyticsAudit> findBySiteIdOrderByCreatedAtDesc(UUID siteId, org.springframework.data.domain.Pageable page);
         java.util.Optional<AnalyticsAudit> findByIdAndSiteId(UUID id, UUID siteId);
     }
@@ -2065,8 +2081,18 @@ public class AnalyticsFeature {
                 totals = total.isArray() ? ga4Metrics(headers, total) : NO_METRICS;
             }
             if (report.equals("timeseries")) rows = dailySeries(range, rows);
+            JsonNode metadata = response.path("metadata");
+            List<Ga4Sampling> sampling = new ArrayList<>();
+            for (JsonNode sample : metadata.path("samplingMetadatas")) {
+                sampling.add(new Ga4Sampling(text(sample.path("samplesReadCount")), text(sample.path("samplingSpaceSize"))));
+            }
+            Ga4Coverage coverage = new Ga4Coverage(text(metadata.path("timeZone")),
+                    metadata.has("subjectToThresholding") ? metadata.path("subjectToThresholding").asBoolean() : null,
+                    metadata.has("dataLossFromOtherRow") ? metadata.path("dataLossFromOtherRow").asBoolean() : null,
+                    sampling, response.has("rowCount") ? response.path("rowCount").asLong() : null,
+                    text(metadata.path("emptyReason")));
             result = new Ga4Report(selection.property(), report, range.from().toString(), range.to().toString(),
-                    totals, List.copyOf(rows), Instant.now());
+                    totals, List.copyOf(rows), Instant.now(), coverage);
             store(key, result);
             return result;
         }
@@ -2540,12 +2566,16 @@ public class AnalyticsFeature {
     }
 
     public interface GeoRunRepository extends JpaRepository<GeoRun, UUID> {
+        @Query("select r from AnalyticsGeoRun r where r.siteId = :site and r.createdAt >= :from and r.createdAt < :to order by r.createdAt desc, r.id desc")
+        List<GeoRun> findEvidenceRuns(@Param("site") UUID site, @Param("from") Instant from,
+                @Param("to") Instant to, Pageable page);
         boolean existsBySiteIdAndStatusIn(UUID siteId, List<String> statuses);
         List<GeoRun> findBySiteIdOrderByCreatedAtDesc(UUID siteId, Pageable pageable);
         List<GeoRun> findBySiteIdAndCreatedAtBetweenOrderByCreatedAtAsc(UUID siteId, Instant from, Instant to);
     }
 
     public interface GeoResultRepository extends JpaRepository<GeoResult, UUID> {
+        List<GeoResult> findByRunIdOrderByIdAsc(UUID runId, Pageable page);
         List<GeoResult> findByRunIdOrderByProviderAscModelAscPromptIdAsc(UUID runId);
         List<GeoResult> findByRunIdIn(java.util.Collection<UUID> runIds);
         java.util.Optional<GeoResult> findByRunIdAndPromptIdAndProviderAndModel(
