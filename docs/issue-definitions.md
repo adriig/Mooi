@@ -24,6 +24,17 @@ una tarea existente del mismo issue NEW con
 `PATCH /sessions/{sessionId}/work/agent/issues/{number}/tasks/{taskId}`. El repositorio sigue siendo
 de solo lectura; la actualización de una tarea no acepta la definición ni vuelve ejecutable el issue.
 
+### Seguridad de ejecución
+
+Los adaptadores de Define no activan los sandboxes basados en `bwrap`: en Linux requieren namespaces de
+usuario sin privilegios, que algunos kernels y contenedores deshabilitan. Define aplica en su lugar una
+lista de comandos de lectura y permite Python únicamente para una petición `urllib` a las rutas GET y
+PUT de propuesta de esa misma sesión (y PATCH de una tarea existente del mismo issue). No se permite
+composición del shell, escritura de archivos, otros destinos HTTP, comandos destructivos, despliegues,
+aceptación de propuestas ni operaciones de GitHub Issues. Las herramientas de escritura de repositorio
+se rechazan por separado. Un rechazo identifica los comandos permitidos para que el agente pueda
+corregir la operación; no se solicita elevación de privilegios.
+
 Ejemplo de propuesta para un issue individual:
 
 ```json

@@ -36,13 +36,10 @@ Nothing outside this module changes.
 from __future__ import annotations
 
 import asyncio
-import ast
 import json
 import logging
 import math
 import os
-import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -87,6 +84,10 @@ from claude_agent_sdk import (
 
 from mic_sessions.shared import antigravity, claude_cli, opencode
 from mic_sessions.shared.agent_conduct import conduct_instructions
+from mic_sessions.shared.definition_execution import (
+    definition_api_command as _definition_api_command_impl,
+    definition_api_prefix as _definition_api_prefix_impl,
+)
 from mic_sessions.shared.browser import playwright_server
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared import images as session_images
@@ -114,112 +115,11 @@ _READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch", "
 
 
 def _definition_api_command(command: Any, api_prefix: str | None) -> bool:
-    """Allow one-line Python urllib calls only to this definition session's scoped API routes."""
-    if not isinstance(command, str) or not api_prefix:
-        return False
-    executable, marker, source = command.partition(" -c '")
-    if executable not in ("python", "python3") or not marker or not source.endswith("'"):
-        return False
-    source = source[:-1]
-    if "'" in source:
-        return False
-    try:
-        tokens = shlex.split(command)
-        tree = ast.parse(source, mode="exec")
-    except (ValueError, SyntaxError):
-        return False
-    if len(tokens) != 3 or tokens[0] != executable or tokens[1] != "-c" or tokens[2] != source:
-        return False
-
-    allowed_nodes = {
-        ast.Module, ast.Import, ast.ImportFrom, ast.alias, ast.Assign, ast.Name, ast.Load, ast.Store,
-        ast.Call, ast.Attribute, ast.Constant, ast.keyword, ast.Dict, ast.List, ast.Tuple, ast.Expr,
-        ast.With, ast.withitem, ast.Subscript, ast.BinOp, ast.Add,
-    }
-    if any(type(node) not in allowed_nodes for node in ast.walk(tree)):
-        return False
-    allowed_attributes = {"request", "Request", "urlopen", "dumps", "loads", "encode", "read", "decode"}
-    if any(isinstance(node, ast.Attribute) and node.attr not in allowed_attributes for node in ast.walk(tree)):
-        return False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import) and any(alias.name not in ("urllib.request", "json")
-                                                or alias.asname for alias in node.names):
-            return False
-        if isinstance(node, ast.ImportFrom) and (
-            node.module != "urllib.request" or any(alias.name not in ("Request", "urlopen") for alias in node.names)
-        ):
-            return False
-
-    def dotted(node: ast.expr) -> str:
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            parent = dotted(node.value)
-            return f"{parent}.{node.attr}" if parent else ""
-        return ""
-
-    def literal(node: ast.expr | None) -> Any:
-        return node.value if isinstance(node, ast.Constant) else None
-
-    requests: list[tuple[ast.Call, str, str]] = []
-    request_names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        function = dotted(node.func)
-        if function in ("urllib.request.Request", "Request"):
-            url = literal(node.args[0]) if node.args else None
-            method = next((literal(item.value) for item in node.keywords if item.arg == "method"), "GET")
-            issue_prefix = api_prefix.removesuffix("/definition")
-            task_route = (re.fullmatch(re.escape(f"{issue_prefix}/tasks/") + r"[0-9a-fA-F-]{36}", url)
-                          if isinstance(url, str) else None)
-            allowed = (
-                (url == api_prefix and method == "GET")
-                or (url == f"{api_prefix}/proposal" and method == "PUT")
-                or (task_route is not None and method == "PATCH")
-            )
-            if not allowed:
-                return False
-            requests.append((node, url, method))
-            for statement in ast.walk(tree):
-                if isinstance(statement, ast.Assign) and statement.value is node:
-                    request_names.update(target.id for target in statement.targets if isinstance(target, ast.Name))
-        elif function not in (
-            "urllib.request.urlopen", "urlopen", "json.dumps", "json.loads", "print", "encode", "read", "decode",
-        ):
-            return False
-        elif function in ("urllib.request.urlopen", "urlopen"):
-            if not node.args or not (
-                (isinstance(node.args[0], ast.Name) and node.args[0].id in request_names)
-                or (isinstance(node.args[0], ast.Call)
-                    and dotted(node.args[0].func) in ("urllib.request.Request", "Request"))
-            ):
-                # Assignment order is not guaranteed by ast.walk; the second pass below validates names.
-                if not (node.args and isinstance(node.args[0], ast.Name)):
-                    return False
-    if len(requests) != 1:
-        return False
-    allowed_request_names = set()
-    request_call = requests[0][0]
-    for statement in ast.walk(tree):
-        if isinstance(statement, ast.Assign) and statement.value is request_call:
-            allowed_request_names.update(target.id for target in statement.targets if isinstance(target, ast.Name))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and dotted(node.func) in ("urllib.request.urlopen", "urlopen"):
-            if not node.args or not (
-                (isinstance(node.args[0], ast.Name) and node.args[0].id in allowed_request_names)
-                or (node.args[0] is request_call)
-            ):
-                return False
-    return True
+    return _definition_api_command_impl(command, api_prefix)
 
 
 def _definition_api_prefix(instructions: str) -> str | None:
-    match = re.search(
-        r"GET (http://127\.0\.0\.1:\d+/sessions/[^/\s]+/work/agent/issues/\d+/definition)",
-        instructions,
-    )
-    return match.group(1) if match else None
+    return _definition_api_prefix_impl(instructions)
 IMAGE_GENERATION_TOOL = "ImageGeneration"
 VIEW_IMAGE_TOOL = "ViewImage"
 _DENIED_MESSAGE = "The user declined this action"
@@ -1274,14 +1174,15 @@ class ClaudeAgentRuntime:
                 "CLAUDE_CODE_USE_VERTEX": "0",
                 "CLAUDE_CODE_USE_FOUNDRY": "0",
             },
-            # Full access: every tool is approved in the callback without creating a pending
-            # request, and no project setting can re-enable the bash sandbox. Only the agent's
-            # own questions reach the player.
+            # Interactive sessions approve tools without creating permission cards; Define uses
+            # the same callback to reject every tool outside its scoped read/API allowlist.
             permission_mode="plan" if self._read_only else "default",
             can_use_tool=self._can_use_tool,
             hooks=hooks,
-            sandbox=({"enabled": True, "filesystem": {"denyWrite": [str(self._workspace)]}}
-                     if self._read_only else {"enabled": False}),
+            # Define's host may forbid unprivileged user namespaces, which Claude's bwrap sandbox
+            # needs. Its shell is instead constrained by _definition_api_command and file tools by
+            # _can_use_tool; normal sessions keep their existing full-access configuration.
+            sandbox={"enabled": False},
             include_partial_messages=True,
             max_buffer_size=settings.agent_claude_max_message_bytes,
             # Native project discovery; cwd and these settings are not a host
@@ -1323,6 +1224,11 @@ class ClaudeAgentRuntime:
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
                 return PermissionResultDeny(message="Definition sessions allow only read tools and scoped API writes")
+            if self._read_only and tool_name == "Bash" and not _definition_api_command(
+                input_data.get("command"), self._definition_api_prefix, self._workspace
+            ):
+                return PermissionResultDeny(message=("Define command denied. Use read-only commands (rg, sed, ls) "
+                                                    "or Python urllib only for this session's definition API."))
             return PermissionResultAllow(updated_input=input_data)
 
         request_id = uuid4().hex
@@ -2053,9 +1959,9 @@ class ClaudeCliAgentRuntime:
             # Full access: every tool is approved over stdio without a pending request, and no
             # project setting can re-enable the bash sandbox. Only the agent's questions reach the player.
             "--permission-mode", "plan" if self._read_only else "default", "--permission-prompt-tool", "stdio",
-            "--settings", json.dumps(
-                {"sandbox": {"enabled": True, "filesystem": {"denyWrite": [str(self._workspace)]}}
-                 if self._read_only else {"enabled": False}}),
+            # See ClaudeAgentRuntime: Define deliberately avoids bwrap and enforces the smaller
+            # command and tool allowlists in the permission callback.
+            "--settings", json.dumps({"sandbox": {"enabled": False}}),
             # Native project discovery; cwd and these settings are not a host filesystem boundary.
             "--setting-sources=project,local",
             "--mcp-config", json.dumps({"mcpServers": {"playwright": playwright_server()}}),
@@ -2098,6 +2004,12 @@ class ClaudeCliAgentRuntime:
         if tool_name != _QUESTION_TOOL:
             if self._read_only and tool_name not in _READ_ONLY_TOOLS:
                 return {"behavior": "deny", "message": "Definition sessions allow only read tools and scoped API writes"}
+            if self._read_only and tool_name == "Bash" and not _definition_api_command(
+                input_data.get("command"), self._definition_api_prefix, self._workspace
+            ):
+                return {"behavior": "deny", "message": (
+                    "Define command denied. Use read-only commands (rg, sed, ls) or Python urllib only for "
+                    "this session's definition API.")}
             return {"behavior": "allow", "updatedInput": input_data}
         request_id = uuid4().hex
         questions = list(input_data.get("questions") or [])
@@ -2462,6 +2374,7 @@ class CodexAgentRuntime:
         self._instructions = instructions
         self._environment = dict(environment or {})
         self._read_only = read_only
+        self._definition_api_prefix = _definition_api_prefix(instructions) if read_only else None
         self._account = None
         self._client = None
         # The credential the connection was opened with, and whether it has loaded the thread.
@@ -2488,7 +2401,11 @@ class CodexAgentRuntime:
         params = {
             "cwd": str(self._workspace),
             "model": self._config.model,
-            **({"approvalPolicy": "never", "sandbox": "read-only"} if self._read_only else _CODEX_ACCESS),
+            # Codex's read-only sandbox also uses bwrap on Linux. In Define, every command
+            # approval is checked against the scoped allowlist below and every file-change approval
+            # is declined; untrusted mode ensures commands reach this adapter for a decision.
+            **({"approvalPolicy": "untrusted", "sandbox": "danger-full-access"}
+               if self._read_only else _CODEX_ACCESS),
             "developerInstructions": "\n\n".join(filter(None, [_CODEX_CONDUCT, self._instructions])),
         }
         if self._environment:
@@ -2612,6 +2529,16 @@ class CodexAgentRuntime:
         if not is_question and not is_permissions and method not in (
             "item/commandExecution/requestApproval", "item/fileChange/requestApproval"
         ):
+            return decline(method)
+        if self._read_only and not is_question:
+            if method == "item/commandExecution/requestApproval" and _definition_api_command(
+                params.get("command"), self._definition_api_prefix, self._workspace
+            ):
+                return {"decision": "accept"}
+            if method == "item/commandExecution/requestApproval":
+                await self._publish(agent_error(
+                    "Define command denied. Use read-only repository commands or Python urllib only for this "
+                    "session's definition API."))
             return decline(method)
         self._pending[request_id] = (future, is_question)
         try:
@@ -3672,9 +3599,12 @@ class AntigravityCliAgentRuntime:
         if self._closing or self._interrupted:
             return antigravity.deny("The turn was interrupted")
         if self._read_only and name == "run_command" and not _definition_api_command(
-            _antigravity_value(args, "CommandLine", "Command", "command"), self._definition_api_prefix
+            _antigravity_value(args, "CommandLine", "Command", "command"), self._definition_api_prefix,
+            self._workspace,
         ):
-            return antigravity.deny("Definition sessions allow shell commands only for their scoped definition API")
+            return antigravity.deny(
+                "Define command denied. Use read-only repository commands or Python urllib only for this session's "
+                "definition API.")
         if self._read_only and name in {"write_file", "write_to_file", "edit_file", "replace_file_content",
                                         "multi_replace_file_content", "sed_file", "notebook_edit"}:
             return antigravity.deny("Definition sessions cannot modify repository files")
@@ -4366,7 +4296,10 @@ class OpenCodeAcpAgentRuntime:
         if self._read_only:
             tool_call = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
             raw_input = tool_call.get("rawInput") if isinstance(tool_call.get("rawInput"), dict) else {}
-            if not _definition_api_command(raw_input.get("command"), self._definition_api_prefix):
+            if not _definition_api_command(raw_input.get("command"), self._definition_api_prefix, self._workspace):
+                await self._publish(agent_error(
+                    "Define command denied. Use read-only repository commands or Python urllib only for this "
+                    "session's definition API."))
                 return {"outcome": {"outcome": "cancelled"}}
         selected = next((item for item in options if item.get("kind") == "allow_once"), None) or next(
             (item for item in options if str(item.get("kind", "")).startswith("allow")), None)
