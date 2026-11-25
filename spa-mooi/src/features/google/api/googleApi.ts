@@ -1,5 +1,6 @@
 import { authenticatedFetch } from '@/features/auth/lib/authenticatedFetch';
 import type { GoogleConnection } from '@/features/google/types/GoogleConnection';
+import type { GoogleOAuthSettings, SaveGoogleOAuthSettings } from '@/features/google/types/GoogleOAuthSettings';
 import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const path = '/me/google/connections';
@@ -14,6 +15,16 @@ const request = async (suffix: string, options?: RequestInit): Promise<Response>
 
 export const fetchGoogleConnections = async (): Promise<GoogleConnection[]> =>
   (await request('')).json() as Promise<GoogleConnection[]>;
+
+export const fetchGoogleOAuthSettings = async (): Promise<GoogleOAuthSettings> =>
+  (await request('/config')).json() as Promise<GoogleOAuthSettings>;
+
+export const saveGoogleOAuthSettings = async (settings: SaveGoogleOAuthSettings): Promise<GoogleOAuthSettings> =>
+  (await request('/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  })).json() as Promise<GoogleOAuthSettings>;
 
 export const startGoogleAuthorization = async (connectionId?: string): Promise<string> => {
   const response = await request('/authorize', {

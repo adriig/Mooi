@@ -35,6 +35,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
@@ -50,6 +51,8 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -71,6 +74,19 @@ public class GoogleConnectionFeature {
     public Authorization authorize(@Valid @RequestBody(required = false) AuthorizeRequest request,
                                    Auth.Principal principal) {
         return service.authorize(principal.player().id(), request == null ? null : request.connectionId());
+    }
+
+    @GetMapping("/me/google/connections/config")
+    @Auth.Authenticated
+    public OAuthSettingsPayload oauthSettings(Auth.Principal principal) {
+        return service.oauthSettings(principal.player().id());
+    }
+
+    @PutMapping("/me/google/connections/config")
+    @Auth.Authenticated
+    public OAuthSettingsPayload saveOAuthSettings(@Valid @RequestBody OAuthSettingsRequest request,
+                                                   Auth.Principal principal, HttpServletRequest servletRequest) {
+        return service.saveOAuthSettings(principal.player().id(), request, servletRequest.getHeader("Origin"));
     }
 
     // Google redirects to the protected SPA route, which posts with the player's Mooi access token.
@@ -97,41 +113,121 @@ public class GoogleConnectionFeature {
     @RequiredArgsConstructor
     public static class GoogleConnectionService implements GoogleTokens {
         private final GoogleConnectionRepository repository;
+        private final GoogleOAuthSettingsRepository settingsRepository;
         private final GoogleOAuth oauth;
         private final Crypto.SecretBox secretBox;
         private final Clock clock;
 
         @Transactional(readOnly = true)
+        public OAuthSettingsPayload oauthSettings(UUID playerId) {
+            return settingsRepository.findByPlayerId(playerId)
+                    .map(row -> payload(settings(row)))
+                    .orElseGet(() -> payload(oauth.instanceSettings()));
+        }
+
+        @Transactional
+        public OAuthSettingsPayload saveOAuthSettings(UUID playerId, OAuthSettingsRequest request, String origin) {
+            URI redirect;
+            try {
+                redirect = URI.create(request.redirectUri().strip());
+            } catch (IllegalArgumentException exception) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter a valid Google callback URL");
+            }
+            String host = redirect.getHost();
+            boolean localHttp = "http".equalsIgnoreCase(redirect.getScheme()) && host != null
+                    && List.of("localhost", "127.0.0.1", "::1").contains(host.toLowerCase());
+            boolean sameOrigin = sameOrigin(origin, redirect);
+            if (host == null || redirect.getUserInfo() != null || redirect.getQuery() != null
+                    || redirect.getFragment() != null
+                    || !("https".equalsIgnoreCase(redirect.getScheme()) || localHttp)
+                    || redirect.getPath() == null
+                    || !redirect.getPath().endsWith("/account/google/callback") || !sameOrigin) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "The callback must use this Mooi origin and end in /account/google/callback (HTTP is allowed on localhost)");
+            }
+
+            GoogleOAuthSettings row = settingsRepository.lockByPlayerId(playerId).orElseGet(() -> {
+                GoogleOAuthSettings created = new GoogleOAuthSettings();
+                created.setId(UUID.randomUUID());
+                created.setPlayerId(playerId);
+                return created;
+            });
+            String secret = request.clientSecret() == null ? "" : request.clientSecret().strip();
+            if (secret.isEmpty() && row.getClientSecret() == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Enter your Google OAuth client secret");
+            }
+            row.setClientId(request.clientId().strip());
+            row.setRedirectUri(redirect.toASCIIString());
+            if (!secret.isEmpty()) {
+                row.setClientSecret(secretBox.encrypt(secret));
+            }
+            GoogleOAuthSettings saved = settingsRepository.saveAndFlush(row);
+            return payload(settings(saved));
+        }
+
+        private static boolean sameOrigin(String origin, URI redirect) {
+            if (origin == null || origin.isBlank()) {
+                return false;
+            }
+            try {
+                URI source = URI.create(origin);
+                return source.getHost() != null && source.getScheme() != null
+                        && source.getScheme().equalsIgnoreCase(redirect.getScheme())
+                        && source.getHost().equalsIgnoreCase(redirect.getHost())
+                        && effectivePort(source) == effectivePort(redirect);
+            } catch (IllegalArgumentException exception) {
+                return false;
+            }
+        }
+
+        private static int effectivePort(URI uri) {
+            if (uri.getPort() >= 0) {
+                return uri.getPort();
+            }
+            return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+        }
+
+        @Transactional(readOnly = true)
         public Authorization authorize(UUID playerId, UUID connectionId) {
-            oauth.requireConfigured();
+            OAuthClientSettings clientSettings = clientSettings(playerId);
+            oauth.requireConfigured(clientSettings);
             GoogleConnection existing = connectionId == null ? null : require(playerId, connectionId);
             String verifier = oauth.random();
             // Authenticated encryption hides the verifier and binds state to player, expiry and relink target.
             String state = secretBox.encrypt(playerId + "|" + clock.instant().plus(oauth.stateTtl).getEpochSecond()
-                    + "|" + verifier + "|" + (connectionId == null ? "" : connectionId));
-            return new Authorization(oauth.authorizeUrl(state, verifier,
+                    + "|" + verifier + "|" + (connectionId == null ? "" : connectionId)
+                    + "|" + (clientSettings.accountConfigured() ? "account" : "instance")
+                    + "|" + clientSettings.revision());
+            return new Authorization(oauth.authorizeUrl(clientSettings, state, verifier,
                     existing == null ? null : existing.getGoogleEmail()));
         }
 
         @Transactional
         public ConnectionPayload connect(UUID playerId, String code, String state) {
-            oauth.requireConfigured();
             String[] parts;
             UUID relinkId;
+            OAuthClientSettings clientSettings;
             try {
                 parts = secretBox.decrypt(state).split("\\|", -1);
-                if (parts.length != 4 || !parts[0].equals(playerId.toString())
+                if (parts.length != 6 || !parts[0].equals(playerId.toString())
                         || Long.parseLong(parts[1]) <= clock.instant().getEpochSecond()) {
                     throw new IllegalArgumentException();
                 }
                 relinkId = parts[3].isEmpty() ? null : UUID.fromString(parts[3]);
+                clientSettings = clientSettings(playerId);
+                if (!parts[4].equals(clientSettings.accountConfigured() ? "account" : "instance")
+                        || Long.parseLong(parts[5]) != clientSettings.revision()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Google OAuth settings changed. Start linking again from Account → Google");
+                }
             } catch (IllegalStateException | IllegalArgumentException exception) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid or expired Google authorization state");
             }
+            oauth.requireConfigured(clientSettings);
             GoogleConnection relink = relinkId == null ? null : repository.lockOwned(relinkId, playerId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Google connection not found"));
-            JsonNode grant = oauth.token(Map.of("grant_type", "authorization_code", "code", code,
-                    "redirect_uri", oauth.redirectUri, "code_verifier", parts[2]), false);
+            JsonNode grant = oauth.token(clientSettings, Map.of("grant_type", "authorization_code", "code", code,
+                    "redirect_uri", clientSettings.redirectUri(), "code_verifier", parts[2]), false);
             JsonNode identity = oauth.identity(grant.path("access_token").asText());
             String subject = identity.path("sub").asText("");
             String email = identity.path("email").asText("");
@@ -177,7 +273,9 @@ public class GoogleConnectionFeature {
             }
             if (!connection.getAccessExpiresAt().isAfter(OffsetDateTime.now(clock).plus(oauth.refreshSkew))) {
                 try {
-                    JsonNode grant = oauth.token(Map.of("grant_type", "refresh_token",
+                    OAuthClientSettings clientSettings = clientSettings(playerId);
+                    oauth.requireConfigured(clientSettings);
+                    JsonNode grant = oauth.token(clientSettings, Map.of("grant_type", "refresh_token",
                             "refresh_token", secretBox.decrypt(connection.getRefreshToken())), true);
                     applyGrant(connection, grant);
                     if (grant.hasNonNull("scope")) {
@@ -207,6 +305,24 @@ public class GoogleConnectionFeature {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Google connection not found"));
         }
 
+        private OAuthClientSettings clientSettings(UUID playerId) {
+            return settingsRepository.findByPlayerId(playerId).map(this::settings)
+                    .orElseGet(oauth::instanceSettings);
+        }
+
+        private OAuthClientSettings settings(GoogleOAuthSettings row) {
+            return new OAuthClientSettings(row.getClientId(), secretBox.decrypt(row.getClientSecret()),
+                    row.getRedirectUri(), row.getRevision(), true);
+        }
+
+        private static OAuthSettingsPayload payload(OAuthClientSettings settings) {
+            boolean hasSecret = settings.clientSecret() != null && !settings.clientSecret().isBlank();
+            boolean configured = settings.clientId() != null && !settings.clientId().isBlank()
+                    && hasSecret && settings.redirectUri() != null && !settings.redirectUri().isBlank();
+            return new OAuthSettingsPayload(settings.clientId(), settings.redirectUri(), configured,
+                    hasSecret, !settings.accountConfigured());
+        }
+
         private void applyGrant(GoogleConnection connection, JsonNode grant) {
             connection.setAccessToken(secretBox.encrypt(grant.path("access_token").asText()));
             connection.setAccessExpiresAt(OffsetDateTime.now(clock).plusSeconds(grant.path("expires_in").asLong()));
@@ -227,9 +343,9 @@ public class GoogleConnectionFeature {
     /** Only protocol mechanics; no tokens or provider response bodies are logged or exposed on errors. */
     @Component
     public static class GoogleOAuth {
-        private final String clientId;
-        private final String clientSecret;
-        private final String redirectUri;
+        private final String instanceClientId;
+        private final String instanceClientSecret;
+        private final String instanceRedirectUri;
         private final String authorizeUri;
         private final String tokenUri;
         private final String revokeUri;
@@ -253,9 +369,9 @@ public class GoogleConnectionFeature {
                     @Value("${app.google-oauth.state-expires-in}") String stateTtl,
                     @Value("${app.google-oauth.token-refresh-skew}") String refreshSkew,
                     @Value("${app.google-oauth.request-timeout}") String timeout) {
-            this.clientId = clientId;
-            this.clientSecret = clientSecret;
-            this.redirectUri = redirectUri;
+            this.instanceClientId = clientId;
+            this.instanceClientSecret = clientSecret;
+            this.instanceRedirectUri = redirectUri;
             this.authorizeUri = authorizeUri;
             this.tokenUri = tokenUri;
             this.revokeUri = revokeUri;
@@ -268,10 +384,16 @@ public class GoogleConnectionFeature {
                     .followRedirects(HttpClient.Redirect.NEVER).build();
         }
 
-        void requireConfigured() {
-            if (clientId.isBlank() || clientSecret.isBlank() || redirectUri.isBlank()) {
+        OAuthClientSettings instanceSettings() {
+            return new OAuthClientSettings(instanceClientId, instanceClientSecret, instanceRedirectUri, -1, false);
+        }
+
+        void requireConfigured(OAuthClientSettings settings) {
+            if (settings.clientId() == null || settings.clientId().isBlank()
+                    || settings.clientSecret() == null || settings.clientSecret().isBlank()
+                    || settings.redirectUri() == null || settings.redirectUri().isBlank()) {
                 throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                        "Google Analytics linking is not configured on this Mooi instance");
+                        "Configure a Google OAuth client in Account → Google before linking an account");
             }
         }
 
@@ -281,11 +403,12 @@ public class GoogleConnectionFeature {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
         }
 
-        String authorizeUrl(String state, String verifier, String email) {
+        String authorizeUrl(OAuthClientSettings settings, String state, String verifier, String email) {
             try {
                 String challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(
                         MessageDigest.getInstance("SHA-256").digest(verifier.getBytes(StandardCharsets.US_ASCII)));
-                return authorizeUri + "?" + form(Map.of("client_id", clientId, "redirect_uri", redirectUri,
+                return authorizeUri + "?" + form(Map.of("client_id", settings.clientId(),
+                        "redirect_uri", settings.redirectUri(),
                         "response_type", "code", "scope", scopes, "state", state, "access_type", "offline",
                         "prompt", "consent select_account", "code_challenge", challenge, "code_challenge_method", "S256"))
                         + (email == null ? "" : "&login_hint=" + encode(email));
@@ -294,9 +417,10 @@ public class GoogleConnectionFeature {
             }
         }
 
-        JsonNode token(Map<String, String> values, boolean refreshing) {
-            requireConfigured();
-            String body = form(values) + "&client_id=" + encode(clientId) + "&client_secret=" + encode(clientSecret);
+        JsonNode token(OAuthClientSettings settings, Map<String, String> values, boolean refreshing) {
+            requireConfigured(settings);
+            String body = form(values) + "&client_id=" + encode(settings.clientId())
+                    + "&client_secret=" + encode(settings.clientSecret());
             HttpResponse<String> response = send(post(tokenUri, body));
             JsonNode grant = read(response);
             if (response.statusCode() == 400 && "invalid_grant".equals(grant.path("error").asText())) {
@@ -415,8 +539,45 @@ public class GoogleConnectionFeature {
         Optional<GoogleConnection> lockOwned(UUID id, UUID playerId);
     }
 
+    public interface GoogleOAuthSettingsRepository extends JpaRepository<GoogleOAuthSettings, UUID> {
+        Optional<GoogleOAuthSettings> findByPlayerId(UUID playerId);
+
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @Query("select s from GoogleOAuthSettings s where s.playerId = :playerId")
+        Optional<GoogleOAuthSettings> lockByPlayerId(UUID playerId);
+    }
+
+    @Getter
+    @Setter
+    @NoArgsConstructor
+    @Entity(name = "GoogleOAuthSettings")
+    @Table(name = "google_oauth_settings")
+    public static class GoogleOAuthSettings extends Db.Auditable {
+        @Id
+        private UUID id;
+        @Column(name = "player_id", nullable = false, unique = true, updatable = false)
+        private UUID playerId;
+        @Column(name = "client_id", nullable = false, length = 512)
+        private String clientId;
+        @Column(name = "client_secret", nullable = false, columnDefinition = "text")
+        private String clientSecret;
+        @Column(name = "redirect_uri", nullable = false, length = 2048)
+        private String redirectUri;
+        @Version
+        @Column(name = "revision", nullable = false)
+        private long revision;
+    }
+
+    private record OAuthClientSettings(String clientId, String clientSecret, String redirectUri,
+                                       long revision, boolean accountConfigured) { }
+
     public record Authorization(String authorizeUrl) {}
     public record AuthorizeRequest(UUID connectionId) {}
+    public record OAuthSettingsRequest(@NotBlank @Size(max = 512) String clientId,
+                                       @Size(max = 4096) String clientSecret,
+                                       @NotBlank @Size(max = 2048) String redirectUri) {}
+    public record OAuthSettingsPayload(String clientId, String redirectUri, boolean configured,
+                                       boolean hasClientSecret, boolean usingInstanceDefaults) {}
     public record CallbackRequest(@NotBlank @Size(max = 8192) String code,
                                   @NotBlank @Size(max = 4096) String state) {}
     public record ConnectionPayload(UUID id, String email, List<String> scopes, OffsetDateTime linkedAt,

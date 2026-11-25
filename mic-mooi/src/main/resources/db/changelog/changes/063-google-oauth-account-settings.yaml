@@ -1,0 +1,58 @@
+databaseChangeLog:
+  - changeSet:
+      id: 063-google-oauth-account-settings
+      author: mooi
+      changes:
+        - createTable:
+            tableName: google_oauth_settings
+            columns:
+              - column:
+                  name: id
+                  type: uuid
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: player_id
+                  type: uuid
+                  constraints:
+                    nullable: false
+                    unique: true
+                    referencedTableName: players
+                    referencedColumnNames: id
+                    foreignKeyName: fk_google_oauth_settings_player
+                    deleteCascade: true
+              - column:
+                  name: client_id
+                  type: varchar(512)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: client_secret
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: redirect_uri
+                  type: varchar(2048)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: revision
+                  type: bigint
+                  defaultValueNumeric: 0
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+              - column:
+                  name: updated_at
+                  type: timestamptz
+                  constraints:
+                    nullable: false
+      rollback:
+        - dropTable:
+            tableName: google_oauth_settings
