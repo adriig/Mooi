@@ -5,8 +5,8 @@ import type { AppNavLink } from '@/shared/types/AppNavLink';
 export const appNavLinks: AppNavLink[] = [
   { id: 'projects', label: 'Projects', to: ROUTES.projects, icon: FolderGit2 },
   { id: 'todos', label: 'To-dos', to: ROUTES.todos, icon: ListTodo },
-  { id: 'analytics', label: 'Analytics', to: ROUTES.analytics, icon: ChartLine },
-  { id: 'deployments', label: 'Deployments', to: ROUTES.deployments, icon: Rocket },
   { id: 'backups', label: 'Backups', to: ROUTES.backups, icon: DatabaseBackup },
+  { id: 'deployments', label: 'Deployments', to: ROUTES.deployments, icon: Rocket },
+  { id: 'analytics', label: 'Analytics', to: ROUTES.analytics, icon: ChartLine },
   { id: 'admin', label: 'Admin', to: ROUTES.admin, icon: ShieldCheck, adminOnly: true },
 ];
