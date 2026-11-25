@@ -21,6 +21,11 @@ automatic (agentic on conflicts) or by the player; a QA task ends when its accep
 and a defect it finds becomes a fix task the QA waits for. A finished task's session is closed. The
 runner reconciles running and paused items from `mic-mooi` on every tick, adopting live sessions and
 preserving durable results across restarts. Paused items open no sessions and defer auto-merge until Resume.
+
+**Concurrency.** There is no global lock: each item advances in its own task, under its own lock, so
+one player's slow merge never holds back another's work. Locks guard reading and saving state only;
+snapshots, merges and pushes run unlocked under a per-run claim, and the state is checked again when
+they return.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ import hashlib
 import logging
 import re
 import time
+import weakref
 from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -194,12 +200,20 @@ async def _sync_issues(caller: Caller, project_id: UUID) -> Json:
     return result
 
 
+async def _synced_issues(caller: Caller, project_id: UUID) -> Json:
+    """One GitHub sync per project at a time; other projects sync in parallel."""
+    async with _lock_for(_project_locks, project_id):
+        return await _sync_issues(caller, project_id)
+
+
 async def _sync_issues_if_due(caller: Caller, project_id: UUID) -> Json | None:
     """Keep background GitHub polling bounded while noticing external closes promptly."""
-    last_sync = _issue_sync_at.get(project_id)
-    if last_sync is not None and time.monotonic() - last_sync < _ISSUE_SYNC_INTERVAL_SECONDS:
-        return None
-    return await _sync_issues(caller, project_id)
+    async with _lock_for(_project_locks, project_id):
+        # Checked under the project's lock, so a sync that just finished elsewhere counts.
+        last_sync = _issue_sync_at.get(project_id)
+        if last_sync is not None and time.monotonic() - last_sync < _ISSUE_SYNC_INTERVAL_SECONDS:
+            return None
+        return await _sync_issues(caller, project_id)
 
 
 async def _save_settings(caller: Caller, project_id: UUID, settings: Json) -> Json:
@@ -229,8 +243,7 @@ async def project_work(project_id: UUID, caller: Annotated[Caller, Depends(curre
 
 @router.get("/projects/{project_id}/work/issues")
 async def project_issues(project_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    async with _lock:
-        return await _sync_issues(caller, project_id)
+    return await _synced_issues(caller, project_id)
 
 
 @router.post("/projects/{project_id}/work/features", status_code=status.HTTP_201_CREATED)
@@ -285,7 +298,7 @@ async def delete_task(project_id: UUID, item_id: UUID, task_id: UUID,
 @router.post("/projects/{project_id}/work/items/{item_id}/start")
 async def start_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
     """Hands the item to the runner, which acts for this sign-in from now on, with or without devices."""
-    async with _lock:
+    async with _lock_for(_item_locks, item_id):
         item = _publish_item(caller.player_id,
                              await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/start"))
         _callers[item_id] = caller
@@ -295,9 +308,9 @@ async def start_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, 
 
 @router.post("/projects/{project_id}/work/items/{item_id}/pause")
 async def pause_item(project_id: UUID, item_id: UUID, caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    # Serialize Pause with launches and merges: an operation already in flight finishes before
-    # Pause takes effect, and no runner operation can use an earlier item state afterwards.
-    async with _lock:
+    # Serialize Pause with the item's launches and merge claims: an operation already in flight finishes
+    # before Pause takes effect, and no runner operation can use an earlier item state afterwards.
+    async with _lock_for(_item_locks, item_id):
         item = _publish_item(caller.player_id,
                              await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/pause"))
     wake()
@@ -313,7 +326,7 @@ async def create_issue(project_id: UUID, draft: Annotated[Json, Body()],
 @router.patch("/projects/{project_id}/work/issues/{number}")
 async def update_issue(project_id: UUID, number: int, update: Annotated[Json, Body()],
                        caller: Annotated[Caller, Depends(current_caller)]) -> Json:
-    async with _lock:
+    async with _lock_for(_project_locks, project_id):
         changed = await mooi.send_work(caller, "PATCH", project_id, f"/issues/{number}", update, github=True) or {}
         _publish_issue(caller.player_id, project_id, changed.get("issue"))
         _publish_item(caller.player_id, changed.get("item"))
@@ -366,8 +379,7 @@ class TaskReport(BaseModel):
 async def agent_work(session_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
     try:
-        async with _lock:
-            issues = (await _sync_issues(caller, session.project_id)).get("issues", [])
+        issues = (await _synced_issues(caller, session.project_id)).get("issues", [])
         issues_error = None
     except ApiException as failure:
         issues, issues_error = [], failure.message
@@ -545,6 +557,7 @@ async def agent_report_task(session_id: UUID, request: Request, report: TaskRepo
             "report": report.blockerCause or report.summary or report.title,
             "qaReport": report.model_dump(exclude_none=True, by_alias=True),
         })
+        _touch(run.item_id)
         _publish_item(run.player_id, persisted.get("item"))
     await _persist_recovery(run, session, report=report)
     run.outcome = report
@@ -774,6 +787,11 @@ class TaskRun:
     # The project's factory limits as of the latest tick (see `DEFAULT_LIMITS`).
     limits: Json = field(default_factory=lambda: dict(DEFAULT_LIMITS))
     recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # Claims, not locks: one settlement (snapshot, merge) and one finish at a time, held across the long
+    # git and network work they do while the item stays free for everyone else.
+    settling: bool = False
+    settle_again: bool = False
+    finishing: bool = False
 
 
 _runs: dict[UUID, TaskRun] = {}
@@ -782,8 +800,18 @@ _callers: dict[UUID, Caller] = {}
 _tasks: set[asyncio.Task[None]] = set()
 _runner_task: asyncio.Task[None] | None = None
 _wake_event: asyncio.Event | None = None
-_lock = asyncio.Lock()
 _last_recovery_cleanup = 0.0
+# Held only while reading and saving one item's (or one project's issue) state, never across git,
+# merges or snapshots; a lock lives as long as someone holds or awaits it.
+_item_locks: weakref.WeakValueDictionary[UUID, asyncio.Lock] = weakref.WeakValueDictionary()
+_project_locks: weakref.WeakValueDictionary[UUID, asyncio.Lock] = weakref.WeakValueDictionary()
+# The runner's save counter and each item's latest save: a tick's snapshot of an item saved since the
+# tick began reading is stale, so the item waits for a fresh read instead of acting on it.
+_generation = 0
+_saved: dict[UUID, int] = {}
+# Items whose advance is in flight, and those a tick had to skip meanwhile (woken when it ends).
+_advancing: dict[UUID, asyncio.Task[None]] = {}
+_behind: set[UUID] = set()
 _issue_sync_at: dict[UUID, float] = {}
 _LAUNCH_QUOTA_TTL = 300
 _launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
@@ -792,6 +820,24 @@ _launch_quota_cache: dict[str, tuple[float, Json | None]] = {}
 def wake() -> None:
     if _wake_event is not None:
         _wake_event.set()
+
+
+def _lock_for(locks: weakref.WeakValueDictionary[UUID, asyncio.Lock], key: UUID) -> asyncio.Lock:
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
+def _touch(item_id: UUID) -> None:
+    """Records that the runner saved this item; called once mic-mooi has answered."""
+    global _generation
+    _generation += 1
+    _saved[item_id] = _generation
+
+
+def _current(run: TaskRun) -> bool:
+    return _runs.get(run.session_id) is run
 
 
 def _background(coro: Coroutine[Any, Any, None]) -> None:
@@ -832,6 +878,9 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
             "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha,
             "qaHandoff": qa_handoff}
     answer = await mooi.report_task(task_id, body)
+    item_id = run_or_task.item_id if isinstance(run_or_task, TaskRun) else (answer.get("item") or {}).get("id")
+    if item_id:
+        _touch(UUID(str(item_id)))
     player_id = UUID(answer["playerId"]) if answer.get("playerId") else player_hint
     if player_id is not None:
         _publish_item(player_id, answer.get("item"))
@@ -900,40 +949,78 @@ async def _runner_loop() -> None:
 
 
 async def _tick() -> None:
-    async with _lock:
-        entries = await mooi.fetch_running_work()
-        limits: dict[UUID, int] = {}
-        synchronized: dict[UUID, Json | None] = {}
-        for entry in entries:
-            try:
-                item = entry["item"]
-                if item.get("status") not in ("running", "paused"):
-                    continue
-                if item.get("issueNumber") is not None:
-                    item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
-                    project_id = UUID(item["projectId"])
-                    caller = await _caller(item_id, player_id, entry.get("authSessionId"))
-                    if caller is None:
-                        continue
-                    if project_id not in synchronized:
-                        synchronized[project_id] = await _sync_issues_if_due(caller, project_id)
-                    synced = synchronized[project_id]
-                    if synced is not None:
-                        entry = {**entry, "item": next(
-                            (row for row in synced.get("items", []) if row["id"] == item["id"]), item)}
-                await _advance(entry, limits)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                LOG.warning("Work item %s could not advance", (entry.get("item") or {}).get("id"), exc_info=True)
+    """Hands every running or paused item to its own advance, so no item waits for another's."""
+    started = _generation
+    for item_id, saved in list(_saved.items()):
+        if saved <= started and item_id not in _advancing:
+            del _saved[item_id]
+    entries = await mooi.fetch_running_work()
+    session_limits: dict[UUID, int] = {}
+    synchronized: dict[UUID, asyncio.Task[Json | None]] = {}
+    for entry in entries:
+        try:
+            item = entry["item"]
+            if item.get("status") not in ("running", "paused"):
+                continue
+            item_id = UUID(item["id"])
+        except Exception:
+            LOG.warning("The factory runner skipped an unreadable work item", exc_info=True)
+            continue
+        if item_id in _advancing:
+            _behind.add(item_id)
+            continue
+        task = asyncio.create_task(_advance_item(entry, started, session_limits, synchronized))
+        _advancing[item_id] = task
+        _tasks.add(task)
+        task.add_done_callback(lambda done, item_id=item_id: _advanced(item_id, done))
+
+
+def _advanced(item_id: UUID, task: asyncio.Task[None]) -> None:
+    _tasks.discard(task)
+    if _advancing.get(item_id) is task:
+        del _advancing[item_id]
+    if item_id in _behind:
+        _behind.discard(item_id)
+        wake()
+
+
+async def _advance_item(entry: Json, started: int, session_limits: dict[UUID, int],
+                        synchronized: dict[UUID, asyncio.Task[Json | None]]) -> None:
+    item = entry["item"]
+    try:
+        item_id = UUID(item["id"])
+        if item.get("issueNumber") is not None:
+            player_id, project_id = UUID(entry["playerId"]), UUID(item["projectId"])
+            caller = await _caller(item_id, player_id, entry.get("authSessionId"))
+            if caller is None:
+                return
+            # At most one GitHub sync per project and tick, shared by the project's items, and only
+            # once the project's polling interval has passed.
+            if project_id not in synchronized:
+                synchronized[project_id] = asyncio.create_task(_sync_issues_if_due(caller, project_id))
+            synced = await synchronized[project_id]
+            if synced is not None:
+                entry = {**entry, "item": next(
+                    (row for row in synced.get("items", []) if row["id"] == item["id"]), item)}
+        async with _lock_for(_item_locks, item_id):
+            if _saved.get(item_id, 0) > started:
+                # Saved by a settlement or finish since this tick read it: act on a fresh read instead.
+                _behind.add(item_id)
+                return
+            await _advance(entry, session_limits)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOG.warning("Work item %s could not advance", item.get("id"), exc_info=True)
 
 
 async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
+    """Runs under the item's lock: relaunches lost tasks and launches the unblocked ones."""
     item = entry["item"]
     if item.get("status") not in ("running", "paused"):
         return
     item_id, player_id = UUID(item["id"]), UUID(entry["playerId"])
-    limits = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
+    limits: Json = {**DEFAULT_LIMITS, **(entry.get("settings") or {})}
     for run in _runs.values():
         if run.item_id == item_id:
             run.limits = limits
@@ -973,6 +1060,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                                              report="Its saved QA result is invalid and needs attention")
                     else:
                         answer = await mooi.report_defect(UUID(task["id"]), _qa_delivery_payload(report))
+                        _touch(item_id)
                         item = answer.get("item") or item
                         _publish_item(player_id, item)
                         await _retire_task_recovery(player_id, UUID(item["projectId"]), UUID(item["id"]),
@@ -989,16 +1077,19 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                 else:
                     # Let normal close lifecycle save this workspace, then the next tick will restore
                     # only that durable handoff. A provisioning failure before cloning yields attention.
-                    await sessions.close_session(live.id)
-                    _runs.pop(live.id, None)
+                    # The close snapshots the workspace, so it runs outside the item's lock; ticks skip
+                    # the session meanwhile, as it is closing.
+                    _background(_close_failed(live.id))
                 continue
             if (live.status == STATUS_READY and live.pending is None and not live.queue
-                    and run.phase != "merging"):
-                if adopted:
-                    await _persist_recovery(run, live, report=run.outcome)
+                    and run.phase != "merging" and not run.settling and not run.finishing):
+                # Snapshots and settlements do git work and take the item's lock to save, so they run
+                # outside this one; a settlement snapshots the workspace first.
                 if run.status != "attention" and (run.outcome is not None or run.phase == "resolving") and (
                         adopted or item.get("status") == "running"):
-                    await _settle(run, live)
+                    _background(_after_turn(run))
+                elif adopted:
+                    _background(_snapshot(run, live))
             continue
         if task.get("qaOf") and isinstance(task.get("qaReport"), dict):
             # QA's structured delivery is durable on the task itself. It can be committed safely
@@ -1012,6 +1103,7 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
                                      report="Its saved QA result is invalid and needs attention")
             else:
                 answer = await mooi.report_defect(UUID(task["id"]), _qa_delivery_payload(report))
+                _touch(item_id)
                 item = answer.get("item") or item
                 _publish_item(player_id, item)
                 await _retire_task_recovery(player_id, UUID(item["projectId"]), UUID(item["id"]),
@@ -1566,35 +1658,82 @@ async def _before_workspace_cleanup(session: Session) -> None:
 sessions.workspace_cleanup_listeners.append(_before_workspace_cleanup)
 
 
+async def _snapshot(run: TaskRun, session: Session) -> None:
+    """Saves an adopted workspace's recovery evidence in the background."""
+    try:
+        await _persist_recovery(run, session, report=run.outcome)
+    except Exception:
+        LOG.warning("Task %s could not save its recovery snapshot", run.task_id, exc_info=True)
+
+
 async def _set_status(run: TaskRun, status_: str, report: str | None) -> None:
-    async with _lock:
-        if _runs.get(run.session_id) is run and run.status != status_ and run.phase != "merging":
+    async with _lock_for(_item_locks, run.item_id):
+        if _current(run) and run.status != status_ and run.phase != "merging" and not run.finishing:
             await _report(run, status_, report=report)
 
 
-async def _after_turn(run: TaskRun) -> None:
-    async with _lock:
-        session = get_registry().get(run.session_id)
-        if _runs.get(run.session_id) is not run or session is None or session.closing:
+async def _save(run: TaskRun, status_: str, *, report: str | None = None) -> bool:
+    """Saves a run's progress under its item's lock, unless the run ended while it worked unlocked."""
+    async with _lock_for(_item_locks, run.item_id):
+        if not _current(run):
+            return False
+        await _report(run, status_, report=report)
+        return True
+
+
+async def _deliver(run: TaskRun, report: TaskReport) -> None:
+    """Hands a QA result to mic-mooi, which records its fixes or the pass, and closes the QA session."""
+    async with _lock_for(_item_locks, run.item_id):
+        if not _current(run):
             return
-        try:
-            await _persist_recovery(run, session, report=run.outcome)
-            if session.queue:
-                return
-            await _settle(run, session)
-        except Exception as failure:
-            LOG.warning("Task %s could not settle", run.task_id, exc_info=True)
-            run.phase = "working"
-            reason = failure.message if isinstance(failure, ApiException) else "Its work could not be wrapped up"
-            with suppress(Exception):
-                await _report(run, "attention", report=f"{reason}: continue in its session or start the item again")
+        answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
+        _touch(run.item_id)
+        _publish_item(run.player_id, answer.get("item"))
+        run.outcome = None
+        await _close(run)
+    await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
+
+
+async def _after_turn(run: TaskRun) -> None:
+    """Settles the end of a turn. One settlement per run at a time: a turn ending meanwhile is settled
+    right after it, never alongside, so a task is merged once."""
+    if run.settling:
+        run.settle_again = True
+        return
+    run.settling = True
+    try:
+        run.settle_again = True
+        while run.settle_again:
+            run.settle_again = False
+            await _settle_turn(run)
+    finally:
+        run.settling = False
     wake()
+
+
+async def _settle_turn(run: TaskRun) -> None:
+    session = get_registry().get(run.session_id)
+    if not _current(run) or session is None or session.closing or run.finishing:
+        return
+    try:
+        await _persist_recovery(run, session, report=run.outcome)
+        if not _current(run) or session.closing or session.queue:
+            return
+        await _settle(run, session)
+    except Exception as failure:
+        LOG.warning("Task %s could not settle", run.task_id, exc_info=True)
+        run.phase = "working"
+        reason = failure.message if isinstance(failure, ApiException) else "Its work could not be wrapped up"
+        with suppress(Exception):
+            await _save(run, "attention", report=f"{reason}: continue in its session or start the item again")
 
 
 async def _settle(run: TaskRun, session: Session) -> None:
     if run.phase == "merging":
+        # The merge went through and its `merge.completed` event finishes the task.
         return
     if run.phase == "resolving" or (run.phase == "review" and run.auto_merge and not run.qa):
+        # `review` with auto-merge: a merge deferred while its item was paused, retried on Resume.
         await _merge(run)
         return
     if run.phase == "review":
@@ -1609,7 +1748,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
             run.nudged = True
             await sessions.queue_message(run.session_id, SendMessageRequest(text=NUDGE), await _run_caller(run))
             return
-        await _report(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
+        await _save(run, "attention", report="The agent stopped without reporting its outcome: continue in its session")
         return
     run.nudged = False
     if not run.qa and report.outcome == "done":
@@ -1645,7 +1784,7 @@ async def _settle(run: TaskRun, session: Session) -> None:
                 )
                 return
             run.outcome = None
-            await _report(
+            await _save(
                 run, "attention",
                 report=("Reported done again, but the task branch still has no changes relative to its base "
                         "commit. No merge was performed."),
@@ -1656,105 +1795,125 @@ async def _settle(run: TaskRun, session: Session) -> None:
         run.verification_nudged = False
     if report.outcome == "blocked":
         if run.qa:
-            answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
-            _publish_item(run.player_id, answer.get("item"))
-            await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
-            run.outcome = None
-            await _close(run)
+            await _deliver(run, report)
         else:
             run.outcome = None
-            await _report(run, "attention", report=report.summary)
+            await _save(run, "attention", report=report.summary)
     elif report.outcome == "passed":
         if run.qa:
-            answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
-            _publish_item(run.player_id, answer.get("item"))
-            await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
-            run.outcome = None
-            await _close(run)
+            await _deliver(run, report)
         else:
             run.outcome = None
-            await _finish(run, report.summary, locked=True)
+            await _finish(run, report.summary)
     elif report.outcome == "defect":
-        answer = await mooi.report_defect(run.task_id, _qa_delivery_payload(report))
-        _publish_item(run.player_id, answer.get("item"))
-        await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
-        run.outcome = None
-        await _close(run)
+        await _deliver(run, report)
     elif run.auto_merge:
         await _merge(run)
     else:
         run.phase = "review"
-        await _report(run, "review", report=f"{report.summary}\n\nReady for your merge from its session.")
+        await _save(run, "review", report=f"{report.summary}\n\nReady for your merge from its session.")
 
 
 async def _merge(run: TaskRun) -> None:
-    """Merges a finished development task: clean merges at once, conflicts through the agent first."""
+    """Merges a finished development task: clean merges at once, conflicts through the agent first.
+    Git and GitHub work runs with no lock held; the run is checked again after each step. A paused item
+    defers the merge until Resume."""
     caller = await _run_caller(run)
-    work = await mooi.fetch_work(caller, run.project_id)
-    item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), {})
-    if item.get("status") != "running":
-        if item.get("status") == "paused":
-            run.phase = "review"
-            if run.status != "review":
-                summary = run.outcome.summary if run.outcome else "Work finished."
-                await _report(run, "review", report=f"{summary}\n\nReady to merge when the item resumes.")
+    if not await _claim_merge(run, caller):
         return
     preview = await sessions.check_merge(run.session_id, caller)
+    if not _current(run):
+        return
     if preview.state == "up_to_date":
-        await _finish(run, "Nothing to merge: the default branch already holds this work", locked=True)
+        await _finish(run, "Nothing to merge: the default branch already holds this work")
         return
     if preview.state == "conflicts":
         if run.resolutions >= run.limits["maxResolutions"]:
-            await _report(run, "attention", report="Its merge conflicts could not be resolved automatically")
+            await _save(run, "attention", report="Its merge conflicts could not be resolved automatically")
             return
-        run.resolutions += 1
-        run.phase = "resolving"
-        await _report(run, "merging", report="Resolving merge conflicts with the agent")
-        await sessions.resolve_merge_conflicts(run.session_id, caller)
+        if await _claim_merge(run, caller, phase="resolving", report="Resolving merge conflicts with the agent"):
+            run.resolutions += 1
+            await sessions.resolve_merge_conflicts(run.session_id, caller)
         return
     message = (preview.suggestedMessage or f"{'fix' if run.issue_number else 'feat'}: {run.title}").strip()
     if run.issue_number:
         message = f"{message[:180]} (fixes #{run.issue_number})"
-    run.phase = "merging"
-    await _report(run, "merging", report=None)
+    if not await _claim_merge(run, caller, phase="merging"):
+        return
     result = await sessions.merge_session(run.session_id, MergeRequest(message=message[:200]), caller)
-    if result.state == "conflicts":
+    if result.state == "conflicts" and _current(run):
         run.phase = "working"
         await _merge(run)
+    elif result.state == "up_to_date":
+        run.phase = "working"
+        await _finish(run, "Nothing to merge: the default branch already holds this work")
     # A merged result is finished by the `merge.completed` event.
 
 
-async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha: str | None = None) -> None:
-    """The task is done: saved as such, its session closed, and the runner looks for what it unblocked."""
-    if not locked:
-        async with _lock:
-            await _finish(run, report, locked=True, merge_sha=merge_sha)
-        wake()
+async def _claim_merge(run: TaskRun, caller: Caller, *, phase: str | None = None, report: str | None = None) -> bool:
+    """Whether the run's item still runs, read under the item's lock so Pause lands either before (and
+    defers the merge, keeping the work in review until Resume) or after the claim. With a `phase`, the
+    run also enters it and saves its task as merging in the same lock."""
+    async with _lock_for(_item_locks, run.item_id):
+        if not _current(run):
+            return False
+        work = await mooi.fetch_work(caller, run.project_id)
+        item = next((row for row in work.get("items", []) if row["id"] == str(run.item_id)), {})
+        if item.get("status") != "running":
+            if item.get("status") == "paused":
+                run.phase = "review"
+                if run.status != "review":
+                    summary = run.outcome.summary if run.outcome else "Work finished."
+                    await _report(run, "review", report=f"{summary}\n\nReady to merge when the item resumes.")
+            return False
+        if phase is not None:
+            run.phase = phase
+            await _report(run, "merging", report=report)
+        return True
+
+
+async def _finish(run: TaskRun, report: str, *, merge_sha: str | None = None) -> None:
+    """The task is done: saved as such, its session closed, and the runner looks for what it unblocked.
+    Claimed by the run, so it happens once; its snapshot is taken before the item's lock."""
+    if run.finishing or not _current(run):
         return
-    if _runs.get(run.session_id) is not run:
+    run.finishing = True
+    try:
+        session = get_registry().get(run.session_id)
+        if session is not None:
+            await _persist_recovery(run, session, final_summary=report,
+                                    final_outcome="passed" if run.qa else "done")
+        handoff = None
+        if not run.qa:
+            outcome = run.outcome
+            handoff = {
+                "summary": _handoff_text(outcome.summary if outcome else report),
+                "files": _handoff_files(outcome.files if outcome else []),
+                "verifications": [
+                    _handoff_text(value)[:2_000] for value in (outcome.verifications if outcome else [])[:200]
+                ],
+                "preparation": _handoff_text(outcome.preparation if outcome else ""),
+                "obstacles": [
+                    _handoff_text(value)[:2_000] for value in (outcome.obstacles if outcome else [])[:200]
+                ],
+            }
+        async with _lock_for(_item_locks, run.item_id):
+            if not _current(run):
+                return
+            item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None,
+                                 qa_handoff=handoff)
+            await _close(run)
+    except Exception as failure:
+        LOG.warning("Task %s could not finish", run.task_id, exc_info=True)
+        run.phase = "working"
+        reason = failure.message if isinstance(failure, ApiException) else "Its work could not be wrapped up"
+        with suppress(Exception):
+            await _save(run, "attention", report=f"{reason}: continue in its session or start the item again")
         return
-    session = get_registry().get(run.session_id)
-    if session is not None:
-        await _persist_recovery(run, session, final_summary=report,
-                                final_outcome="passed" if run.qa else "done")
-    handoff = None
-    if not run.qa:
-        outcome = run.outcome
-        handoff = {
-            "summary": _handoff_text(outcome.summary if outcome else report),
-            "files": _handoff_files(outcome.files if outcome else []),
-            "verifications": [
-                _handoff_text(value)[:2_000] for value in (outcome.verifications if outcome else [])[:200]
-            ],
-            "preparation": _handoff_text(outcome.preparation if outcome else ""),
-            "obstacles": [
-                _handoff_text(value)[:2_000] for value in (outcome.obstacles if outcome else [])[:200]
-            ],
-        }
-    item = await _report(run, "done", report=report, merge_sha=merge_sha if not run.qa else None,
-                         qa_handoff=handoff)
+    finally:
+        run.finishing = False
+    wake()
     await _retire_task_recovery(run.player_id, run.project_id, run.item_id, run.task_id, run.attempts)
-    await _close(run)
     if run.issue_number and item.get("status") == "done":
         # A merge titled by the player may not name the issue: closing it here is idempotent.
         with suppress(Exception):
@@ -1764,12 +1923,18 @@ async def _finish(run: TaskRun, report: str, *, locked: bool = False, merge_sha:
             _publish_issue(run.player_id, run.project_id, changed.get("issue"))
             # Closing an issue is a runner-owned event, so reconcile its other queued tasks now
             # instead of making them wait for the next periodic GitHub poll.
-            await _sync_issues(caller, run.project_id)
+            await _synced_issues(caller, run.project_id)
 
 
 async def _close(run: TaskRun) -> None:
     _runs.pop(run.session_id, None)
     _background(sessions.close_session(run.session_id))
+
+
+async def _close_failed(session_id: UUID) -> None:
+    """Closes a failed task session; its run stays known until the close saved its workspace's handoff."""
+    await sessions.close_session(session_id)
+    _runs.pop(session_id, None)
 
 
 async def _run_caller(run: TaskRun) -> Caller:
