@@ -2197,7 +2197,10 @@ async def _launch(item: Json, task: Json, caller: Caller, player_id: UUID, setti
         source_attempt = task["attempts"] if quota_wait else max(0, task["attempts"] - 1)
         discarded = (task.get("recoveryDisposition") or {}).get("discardedAttempt")
         if discarded is not None and source_attempt <= discarded:
-            await _report(task, "attention", report="No eligible recovery snapshot exists after the discarded attempt")
+            # Classify it as missing so an explicit clean restart is offered; mic-mooi keeps the
+            # historical discardedAttempt marker, and Retry still refuses to start from scratch.
+            await _report(task, "attention", report="No eligible recovery snapshot exists after the discarded attempt",
+                          recovery_state="missing")
             return
         recovery = await _task_recovery(UUID(task["id"]), source_attempt, task.get("segments", 0))
         if quota_wait and recovery is None:

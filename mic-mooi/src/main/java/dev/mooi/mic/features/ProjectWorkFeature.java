@@ -938,7 +938,10 @@ public class ProjectWorkFeature {
             }
             boolean classified = disposition != null
                     && Set.of("missing", "invalid", "incomplete", "unrestorable").contains(disposition);
-            boolean recoveryUsable = recoveries.findByTaskIdAndAttempt(taskId, task.getAttempts())
+            // Evidence of an already discarded attempt is ineligible even while its cleanup is deferred.
+            boolean discardedEvidence = task.getDiscardedAttempt() != null
+                    && task.getAttempts() <= task.getDiscardedAttempt();
+            boolean recoveryUsable = !discardedEvidence && recoveries.findByTaskIdAndAttempt(taskId, task.getAttempts())
                     .map(TaskRecovery::isSnapshotValid).orElse(false);
             if (!classified || recoveryUsable) {
                 throw conflict("Clean restart is available only after recovery is classified as unusable");
