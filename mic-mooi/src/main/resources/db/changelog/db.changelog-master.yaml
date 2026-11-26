@@ -137,3 +137,5 @@ databaseChangeLog:
       file: db/changelog/changes/065-analytics-analyses.yaml
   - include:
       file: db/changelog/changes/066-analytics-analysis-generation.yaml
+  - include:
+      file: db/changelog/changes/067-work-task-cancelled-status.yaml
