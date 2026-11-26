@@ -236,6 +236,20 @@ public class ProjectWorkFeature {
         return work.restartCleanTask(principal.player().id(), projectId, itemId, taskId);
     }
 
+    /**
+     * Turns a development task's unresolved product blocker into one NEW defect or debt issue, prefilled
+     * from its handoff and marked with the source task. Idempotent: a repeat returns the same issue.
+     * It never creates an item, assignment or task: Define and acceptance come first.
+     */
+    @PostMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}/follow-up-issue")
+    @Auth.Authenticated
+    @Auth.ServiceCall
+    public IssueItemPayload followUpIssue(@PathVariable UUID projectId, @PathVariable UUID itemId,
+                                          @PathVariable UUID taskId, @Valid @RequestBody FollowUpDraft draft,
+                                          Auth.Principal principal) {
+        return issues.followUp(principal.player().id(), projectId, itemId, taskId, draft);
+    }
+
     @DeleteMapping("/me/projects/{projectId}/work/items/{itemId}/tasks/{taskId}")
     @Auth.Authenticated
     @Auth.ServiceCall
@@ -1162,6 +1176,19 @@ public class ProjectWorkFeature {
             } else if (progress.qaReport() != null) {
                 task.setQaReport(json.writeValueAsString(progress.qaReport()));
             }
+            // A relaunch keeps the blocker for the record and for the next brief; it is just no longer current.
+            Map<String, Object> blocker = readQaHandoff(task.getBlockerHandoff());
+            if (blocker != null && Boolean.TRUE.equals(blocker.get("active"))
+                    && progress.status() == TaskStatus.running && progress.sessionId() != null
+                    && !java.util.Objects.equals(previousSessionId, progress.sessionId())) {
+                blocker.put("active", false);
+                task.setBlockerHandoff(json.writeValueAsString(blocker));
+            }
+            // QA blockers keep their own delivery semantics; development blockers merge into a revision.
+            if (progress.blockerHandoff() != null && task.getQaOfId() == null) {
+                task.setBlockerHandoff(json.writeValueAsString(mergeBlocker(
+                        readQaHandoff(task.getBlockerHandoff()), progress.blockerHandoff(), task, now)));
+            }
             // Only a successful development merge supplies this; later progress must never clear it.
             if (progress.status() == TaskStatus.done && task.getQaOfId() == null
                     && task.getMergeSha() == null && progress.mergeSha() != null) {
@@ -1793,6 +1820,55 @@ public class ProjectWorkFeature {
             }
         }
 
+        /** Text fields of a blocker handoff with their bounds; a blank reported value keeps the previous one. */
+        private static final Map<String, Integer> BLOCKER_TEXT = Map.of(
+                "cause", 4_000, "summary", 20_000, "nextStep", 20_000, "preparation", 20_000);
+        /** List fields with their entry count and entry length bounds. */
+        private static final Map<String, int[]> BLOCKER_LISTS = Map.of(
+                "obstacles", new int[]{200, 2_000}, "verifications", new int[]{200, 2_000},
+                "files", new int[]{500, 1_024});
+        private static final int BLOCKER_HISTORY = 10;
+
+        /**
+         * One more revision of a development blocker: fields the new report leaves blank keep their
+         * previous value, and the previous revision moves into a bounded history, so nothing reported
+         * before is erased.
+         */
+        private static Map<String, Object> mergeBlocker(Map<String, Object> previous, Map<String, Object> reported,
+                                                        WorkTask task, OffsetDateTime now) {
+            Map<String, Object> before = previous == null ? Map.of() : previous;
+            Map<String, Object> merged = new LinkedHashMap<>();
+            merged.put("revision", (before.get("revision") instanceof Number number ? number.intValue() : 0) + 1);
+            Object kind = reported.get("kind");
+            merged.put("kind", "product".equals(kind) || "platform".equals(kind) ? kind : before.get("kind"));
+            BLOCKER_TEXT.forEach((key, limit) -> {
+                String value = reported.get(key) instanceof String text ? text.strip() : "";
+                if (value.isEmpty() && before.get(key) instanceof String kept) value = kept;
+                merged.put(key, value.length() > limit ? value.substring(0, limit) : value);
+            });
+            BLOCKER_LISTS.forEach((key, bounds) -> {
+                List<String> values = reported.get(key) instanceof List<?> list ? list.stream()
+                        .filter(String.class::isInstance).map(value -> ((String) value).strip())
+                        .filter(value -> !value.isEmpty())
+                        .map(value -> value.length() > bounds[1] ? value.substring(0, bounds[1]) : value)
+                        .limit(bounds[0]).toList() : List.of();
+                merged.put(key, values.isEmpty() && before.get(key) instanceof List<?> kept ? kept : values);
+            });
+            merged.put("active", true);
+            merged.put("attempt", task.getAttempts());
+            merged.put("segment", task.getSegments());
+            merged.put("reportedAt", now.toString());
+            List<Object> history = new ArrayList<>();
+            if (!before.isEmpty()) {
+                Map<String, Object> earlier = new LinkedHashMap<>(before);
+                Object older = earlier.remove("history");
+                history.add(earlier);
+                if (older instanceof List<?> list) history.addAll(list);
+            }
+            merged.put("history", history.subList(0, Math.min(history.size(), BLOCKER_HISTORY)));
+            return merged;
+        }
+
         private WorkItem touch(WorkItem item) {
             recomputeDeployment(item, tasks.findByItemId(item.getId()));
             item.setUpdatedAt(OffsetDateTime.now(clock));
@@ -1862,6 +1938,7 @@ public class ProjectWorkFeature {
                                      task.getFindingId(),
                                      task.getQaRounds(), task.getMergeSha(), task.getDeployedVersion(), task.getDeployedAt(),
                                      readQaHandoff(task.getQaHandoff()),
+                                     readQaHandoff(task.getBlockerHandoff()), readQaHandoff(task.getFollowUpIssue()),
                                      List.copyOf(task.getDependsOn()),
                                      task.getStartedAt(), task.getFinishedAt()))
                             .toList(), changes.findByItemIdOrderByCreatedAtAscIdAsc(item.getId()).stream()
@@ -2316,6 +2393,107 @@ public class ProjectWorkFeature {
                     issue.body()));
             work.issueTasks(item, issue, null);
             return work.reconcileIssue(item.getId(), issue);
+        }
+
+        /**
+         * One NEW issue per blocked task. The task row (under its item's lock) records it once; a GitHub
+         * create whose response was lost is found again by the stable source-task marker in its body.
+         * Only the issue is created: no item, task, assignment or quota data, so Define comes first.
+         */
+        @Transactional
+        public IssueItemPayload followUp(UUID playerId, UUID projectId, UUID itemId, UUID taskId, FollowUpDraft draft) {
+            WorkProject project = work.project(playerId, projectId);
+            WorkItem item = items.findLockedById(itemId).filter(row -> row.getProjectId().equals(projectId))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Item not found"));
+            WorkTask task = tasks.findLockedById(taskId).filter(row -> row.getItemId().equals(itemId))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found"));
+            String token = accessToken(playerId);
+            Map<String, Object> recorded = readMap(task.getFollowUpIssue());
+            if (recorded != null && recorded.get("number") instanceof Number number) {
+                Github.Issue issue = github.fetchIssue(project.getOwner(), project.getName(), number.intValue(), token);
+                ItemKind kind = Optional.ofNullable(issueKind(issue))
+                        .orElse("defect".equals(recorded.get("kind")) ? ItemKind.defect : ItemKind.debt);
+                return new IssueItemPayload(toPayload(projectId, issue, kind), work.payload(item));
+            }
+            Map<String, Object> blocker = readMap(task.getBlockerHandoff());
+            if (task.getQaOfId() != null || blocker == null) {
+                throw WorkService.conflict("Only a development task blocked in attention can open a follow-up issue");
+            }
+            if (!"product".equals(blocker.get("kind"))) {
+                throw WorkService.conflict("Only a product blocker can open a follow-up issue");
+            }
+            ItemKind kind = draft.kind() == null ? ItemKind.debt : draft.kind();
+            if (kind == ItemKind.feature) {
+                throw WorkService.badRequest("A follow-up issue is a defect or debt");
+            }
+            String marker = "<!-- mooi-follow-up:" + projectId + ":" + taskId + " -->";
+            String title = draft.title() == null || draft.title().isBlank()
+                    ? "Follow-up: " + task.getTitle() : draft.title();
+            // GitHub cannot join this transaction: a create whose response was lost is recorded now,
+            // even when the task has left attention since.
+            Optional<Github.Issue> lost = github.findIssueByBodyMarker(project.getOwner(), project.getName(), marker, token);
+            if (lost.isEmpty() && (task.getStatus() != TaskStatus.attention
+                    || !Boolean.TRUE.equals(blocker.get("active")))) {
+                throw WorkService.conflict("Only a development task blocked in attention can open a follow-up issue");
+            }
+            Github.Issue issue = lost.orElseGet(() -> {
+                ensureLabel(project, kind, token);
+                return github.createIssue(project.getOwner(), project.getName(),
+                        WorkService.requireText(title, "title"), followUpBody(item, task, blocker, marker),
+                        List.of(LABELS.get(kind)[0]), token);
+            });
+            ItemKind created = Optional.ofNullable(issueKind(issue)).orElse(kind);
+            Map<String, Object> saved = new LinkedHashMap<>();
+            saved.put("number", issue.number());
+            saved.put("kind", created.name());
+            saved.put("title", issue.title());
+            saved.put("htmlUrl", issue.htmlUrl());
+            saved.put("blockerRevision", blocker.get("revision"));
+            saved.put("createdAt", OffsetDateTime.now(clock).toString());
+            task.setFollowUpIssue(json.writeValueAsString(saved));
+            tasks.save(task);
+            item.setUpdatedAt(OffsetDateTime.now(clock));
+            items.save(item);
+            return new IssueItemPayload(toPayload(projectId, issue, created), work.payload(item));
+        }
+
+        private static String followUpBody(WorkItem item, WorkTask task, Map<String, Object> blocker, String marker) {
+            StringBuilder body = new StringBuilder("Follow-up of a product blocker reported by a software factory task.\n\n")
+                    .append("- Source work item: ").append(item.getTitle()).append(" (`").append(item.getId()).append("`)\n")
+                    .append("- Source task: ").append(task.getTitle()).append(" (`").append(task.getKey()).append("`, `")
+                    .append(task.getId()).append("`)\n")
+                    .append("- Blocker revision: ").append(blocker.get("revision")).append('\n');
+            for (String[] section : new String[][]{{"cause", "Cause"}, {"summary", "Summary"},
+                    {"nextStep", "Next step"}, {"preparation", "Preparation"}}) {
+                if (blocker.get(section[0]) instanceof String text && !text.isBlank()) {
+                    body.append("\n## ").append(section[1]).append("\n\n").append(clip(text, 8_000)).append('\n');
+                }
+            }
+            for (String[] section : new String[][]{{"obstacles", "Obstacles"}, {"verifications", "Verifications"},
+                    {"files", "Files"}}) {
+                if (blocker.get(section[0]) instanceof List<?> values && !values.isEmpty()) {
+                    body.append("\n## ").append(section[1]).append("\n\n");
+                    values.stream().limit(50).forEach(value -> body.append("- ")
+                            .append(section[0].equals("files") ? "`" + value + "`" : clip(String.valueOf(value), 1_000))
+                            .append('\n'));
+                }
+            }
+            body.append("\nThis issue is NEW: define it and accept its definition before any work starts.\n\n")
+                    .append(marker);
+            return body.toString();
+        }
+
+        private static String clip(String value, int limit) {
+            return value.length() > limit ? value.substring(0, limit) + "…" : value;
+        }
+
+        private Map<String, Object> readMap(String value) {
+            try {
+                return value == null || value.isBlank() ? null
+                        : json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            } catch (RuntimeException exception) {
+                return null;
+            }
         }
 
         private static ItemKind kindOf(Github.Issue issue) {
@@ -2944,6 +3122,17 @@ public class ProjectWorkFeature {
         @Column(name = "qa_handoff", columnDefinition = "text")
         private String qaHandoff;
 
+        /**
+         * A development task's latest structured blocker, revisioned with its earlier revisions: Retry,
+         * Resume and later reports merge into it and never erase it.
+         */
+        @Column(name = "blocker_handoff", columnDefinition = "text")
+        private String blockerHandoff;
+
+        /** The NEW issue created from this task's product blocker; set once, the idempotency anchor. */
+        @Column(name = "follow_up_issue", columnDefinition = "text")
+        private String followUpIssue;
+
         @Column(name = "position", nullable = false)
         private int position;
 
@@ -3395,7 +3584,20 @@ public class ProjectWorkFeature {
                                @Valid Assignment assignment,
                                @Pattern(regexp = "[0-9a-f]{40}") String mergeSha,
                                Map<String, Object> qaHandoff,
-                               @Pattern(regexp = "missing|invalid|incomplete|unrestorable") String recoveryState) {
+                               @Pattern(regexp = "missing|invalid|incomplete|unrestorable") String recoveryState,
+                               Map<String, Object> blockerHandoff) {
+
+        public TaskProgress(TaskStatus status, UUID sessionId, int attempts, Integer segments, Integer stalledSegments,
+                            String lastSnapshotRevision, String contextHandoff, String report,
+                            Map<String, Object> qaReport, Assignment assignment, String mergeSha,
+                            Map<String, Object> qaHandoff, String recoveryState) {
+            this(status, sessionId, attempts, segments, stalledSegments, lastSnapshotRevision, contextHandoff, report,
+                    qaReport, assignment, mergeSha, qaHandoff, recoveryState, null);
+        }
+    }
+
+    /** {@code kind} of the follow-up issue (defect or debt, debt by default) and an optional title. */
+    public record FollowUpDraft(ItemKind kind, @Size(max = 300) String title) {
     }
 
     /**
@@ -3477,6 +3679,7 @@ public class ProjectWorkFeature {
                                Map<String, Object> qaReport,
                                String findingId, int qaRounds, String mergeSha,
                                String deployedVersion, OffsetDateTime deployedAt, Map<String, Object> qaHandoff,
+                               Map<String, Object> blockerHandoff, Map<String, Object> followUpIssue,
                                List<UUID> dependsOn,
                                OffsetDateTime startedAt, OffsetDateTime finishedAt) {
     }

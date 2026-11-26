@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 068-work-task-blocker-handoff
+      author: mooi
+      changes:
+        - addColumn:
+            tableName: work_tasks
+            columns:
+              - column:
+                  name: blocker_handoff
+                  type: text
+              - column:
+                  name: follow_up_issue
+                  type: text
+      rollback:
+        - dropColumn:
+            tableName: work_tasks
+            columnName: follow_up_issue
+        - dropColumn:
+            tableName: work_tasks
+            columnName: blocker_handoff

@@ -3,6 +3,7 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { AlertCircle, Ban, CheckCircle2, Clock, GitMerge, Loader2, Lock, RotateCcw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import { TaskQuickControls } from '@/features/work/components/TaskQuickControls';
+import { DEV_BLOCKER_LABEL, devBlocker } from '@/features/work/lib/devBlocker';
 import { NODE_HEIGHT, NODE_WIDTH } from '@/features/work/lib/layoutTaskGraph';
 import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
 import { taskStyle } from '@/features/work/lib/taskCategories';
@@ -44,7 +45,9 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
   const done = task.status === 'done';
   const findings = qaFindings(task);
   const blocker = qaBlocker(task);
-  const notice = taskNotice(task);
+  const devBlocked = devBlocker(task);
+  const found = taskNotice(task);
+  const notice = devBlocked && found?.kind === 'attention' ? null : found;
   const qaOrigin = task.fixOf ? tasks.find((candidate) => candidate.id === task.fixOf) : null;
   const findingTitle = qaOrigin
     ? qaFindings(qaOrigin).find((finding) => finding.id === task.findingId)?.title
@@ -83,6 +86,11 @@ export const TaskNode = memo(({ data }: NodeProps<TaskFlowNode>) => {
         {blocker ? (
           <span title={blocker.cause} className="line-clamp-1 text-[10.5px] leading-snug text-warning">
             Blocked · {blocker.category ? `${QA_BLOCKER_LABEL[blocker.category]} · ` : ''}{blocker.cause}
+          </span>
+        ) : devBlocked ? (
+          <span title={devBlocked.cause || devBlocked.summary} className="line-clamp-2 text-[10.5px] leading-snug text-warning">
+            Blocked · {devBlocked.kind ? `${DEV_BLOCKER_LABEL[devBlocked.kind]} · ` : ''}{devBlocked.cause || devBlocked.summary}
+            {task.followUpIssue ? ` · Follow-up #${task.followUpIssue.number}` : ''}
           </span>
         ) : findings.length > 0 ? (
           <span className="text-[10.5px] font-semibold text-danger">

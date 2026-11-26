@@ -139,3 +139,5 @@ databaseChangeLog:
       file: db/changelog/changes/066-analytics-analysis-generation.yaml
   - include:
       file: db/changelog/changes/067-work-task-cancelled-status.yaml
+  - include:
+      file: db/changelog/changes/068-work-task-blocker-handoff.yaml

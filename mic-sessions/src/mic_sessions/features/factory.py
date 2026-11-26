@@ -209,6 +209,24 @@ async def _restart_clean_task(caller: Caller, project_id: UUID, item_id: UUID, t
     return item or {}
 
 
+class FollowUpDraft(BaseModel):
+    """The follow-up issue's kind (debt by default) and an optional title; its body comes from the handoff."""
+
+    kind: Literal["defect", "debt"] = "debt"
+    title: str | None = Field(default=None, max_length=300)
+
+
+async def _create_follow_up_issue(caller: Caller, project_id: UUID, item_id: UUID, task_id: UUID,
+                                  draft: FollowUpDraft) -> Json:
+    """Opens (once) the NEW issue for a blocked task's product blocker. Nothing starts: no item, task or
+    assignment is created, so the issue still needs Define and the user's acceptance."""
+    created = await mooi.send_work(caller, "POST", project_id, f"/items/{item_id}/tasks/{task_id}/follow-up-issue",
+                                   draft.model_dump(exclude_none=True), github=True) or {}
+    _publish_issue(caller.player_id, project_id, created.get("issue"))
+    created["item"] = _publish_item(caller.player_id, created.get("item"))
+    return created
+
+
 async def _reassign_tasks(caller: Caller, project_id: UUID, item_id: UUID) -> Json:
     work = await mooi.fetch_work(caller, project_id)
     item = next((entry for entry in work.get("items", []) if entry["id"] == str(item_id)), None)
@@ -473,6 +491,12 @@ async def restart_clean_task(project_id: UUID, item_id: UUID, task_id: UUID,
     return await _restart_clean_task(caller, project_id, item_id, task_id)
 
 
+@router.post("/projects/{project_id}/work/items/{item_id}/tasks/{task_id}/follow-up-issue")
+async def create_follow_up_issue(project_id: UUID, item_id: UUID, task_id: UUID, draft: FollowUpDraft,
+                                 caller: Annotated[Caller, Depends(current_caller)]) -> Json:
+    return await _create_follow_up_issue(caller, project_id, item_id, task_id, draft)
+
+
 @router.post("/projects/{project_id}/work/items/{item_id}/reassign")
 async def reassign_tasks(project_id: UUID, item_id: UUID,
                          caller: Annotated[Caller, Depends(current_caller)]) -> Json:
@@ -693,6 +717,8 @@ class TaskReport(BaseModel):
     findings: list[TaskFinding] = Field(default_factory=list, max_length=20)
     blockerCategory: Literal["access", "credentials", "infrastructure", "capacity"] | None = None
     blockerCause: str | None = Field(default=None, max_length=4_000)
+    # A development blocker only: product work still to do, or a platform capability Mooi lacks.
+    blockerKind: Literal["product", "platform"] | None = None
     next_step: str = Field(default="", alias="nextStep", max_length=20_000)
     files: list[str] = Field(default_factory=list, max_length=500)
     verifications: list[str] = Field(default_factory=list, max_length=200)
@@ -915,6 +941,14 @@ async def agent_restart_clean_task(session_id: UUID, item_id: UUID, task_id: UUI
     return await _restart_clean_task(caller, session.project_id, item_id, task_id)
 
 
+@router.post("/sessions/{session_id}/work/agent/items/{item_id}/tasks/{task_id}/follow-up-issue")
+async def agent_create_follow_up_issue(session_id: UUID, item_id: UUID, task_id: UUID, request: Request,
+                                       draft: FollowUpDraft) -> Json:
+    session, caller = await sessions._agent_access(session_id, request, "session")
+    _analyst_guard(session_id)
+    return await _create_follow_up_issue(caller, session.project_id, item_id, task_id, draft)
+
+
 @router.post("/sessions/{session_id}/work/agent/items/{item_id}/reassign")
 async def agent_reassign_tasks(session_id: UUID, item_id: UUID, request: Request) -> Json:
     session, caller = await sessions._agent_access(session_id, request, "session")
@@ -1115,6 +1149,7 @@ Platform API:
 - `POST {work}/items/<itemId>/change-requests/<changeId>/decision` with JSON `{{"decision": "accept" | "reject", "userConfirmed": true}}` decides a proposal awaiting confirmation. **Both decisions require the user's explicit confirmation of that specific proposal. Never infer it from the initial change request or decide autonomously.** Acceptance relaunches the analyst with permission; completed and active tasks remain immutable, so rework becomes delta tasks.
 - Only when explicitly requested, `POST {work}/items/<itemId>/reassign` rechecks current quota for tasks not yet running and applies the first available saved assignment/fallback; `POST {work}/items/<itemId>/tasks/<taskId>/retry` restarts a queued task or one waiting to retry. Neither starts work on a planned item.
 - Only after the user's explicit decision, `POST {work}/items/<itemId>/tasks/<taskId>/restart-clean` discards saved recovery for an attention task without a session. First confirm: “El estado guardado de esta tarea no puede recuperarse. Reiniciarla desde cero descartará cualquier cambio no integrado de la sesión anterior. Esta acción no puede recuperar ese trabajo.” Retry preserves recovery; restart-clean permanently invalidates old evidence.
+- A development task in attention may carry `blockerHandoff` (`kind`: `product` or `platform`, `cause`, `nextStep`, `obstacles`, `files`, `verifications`, `preparation`, `revision`, `active`, earlier revisions in `history`). Only when the user asks, and only for an active `product` blocker, `POST {work}/items/<itemId>/tasks/<taskId>/follow-up-issue` with JSON `{{"kind": "defect" | "debt", "title": "<optional>"}}` opens one NEW issue prefilled from the handoff and linked to the task (`followUpIssue`); repeating it returns the same issue. It starts nothing and creates no assignment: the issue still needs Define and the user's acceptance.
 - `GET {work}/settings` and `PUT {work}/settings` with JSON `{{"quotaLimit": 85, "maxAttempts": 3, "maxQaRounds": 3, "maxResolutions": 2, "contextHandoffPercent": 60, "stallTurns": 3}}`: the project's factory limits (quota percent from which an account is spared, 10-100; sessions a task may lose before it waits for the user, 1-10; fix-and-check-again rounds after a failed QA, 0-10; agentic merge attempts on conflicts, 0-5; context percent at which a task session checkpoints and hands off to a fresh session, 20-90; consecutive segments or turns without progress before a task waits for the user, 1-10). Change them only when the user asks.
 - `POST {work}/issues` with JSON `{{"kind": "defect" | "debt", "title", "body", "task": {{"acceptance", "assignment", "alternatives", "autoMerge", "tests", "qa"}}}}`: opens the GitHub issue and the settings Mooi runs it with. `task.assignment` and `task.alternatives` come from the assignment expert, just like feature task settings."""
 
@@ -1145,6 +1180,13 @@ def _task_section(run: TaskRun, root: str) -> str:
                     'cannot proceed')
     else:
         outcomes = '`{"outcome": "done", "summary": "<what you changed>"}` once the task is complete'
+    if run.qa:
+        blocked = '`{"outcome": "blocked", "blockerCause": "<concrete cause>"}`'
+    else:
+        blocked = ('`{"outcome": "blocked", "blockerKind": "product|platform", "blockerCause": "<concrete cause>", '
+                   '"summary", "nextStep", "files", "verifications", "preparation", "obstacles"}` (`product`: '
+                   'project work outside this task or needing a user decision; `platform`: a capability Mooi itself '
+                   'lacks)')
     return f"""## Software factory task
 This session runs one task of the project's software factory, on its own; there may be nobody watching. Its first message is the task.
 - Stay within the task. Other tasks run in their own sessions; the tasks this one depended on are already merged into the default branch.
@@ -1154,7 +1196,7 @@ This session runs one task of the project's software factory, on its own; there 
 - When reporting development work, include `nextStep`, `files`, `verifications`, `preparation` requirements for independent QA, and `obstacles` where useful. Keep the handoff concise and never include credentials or secret values; legacy reports with only `outcome` and `summary` remain accepted.
 - When the runner requests a context checkpoint, commit eligible work locally (never push), then report `{{"outcome":"continue","summary":"<state>","nextStep":"<next action>","files":[],"verifications":[],"obstacles":[]}}` and end the turn. QA remains read-only and reports its progress without committing.
 - QA policy: validate independently against the acceptance criteria using this task's isolated preview and the existing deployment brief. A summary is not proof of correctness. Keep exploration bounded to the criteria; report all reproducible in-scope defects together, prioritized, without searching indefinitely for unrelated problems. Separate product defects from access, credential, capacity or infrastructure blockers; blockers are not defects and must not request fixes.
-- Before every turn ends, report the outcome with `POST {report}`: {outcomes}. When the task needs more work than this turn, keep implementing, or report `continue` with its checkpoint as above to go on in a fresh session; never end a turn by only describing what is left. Report `{{"outcome": "blocked", "blockerCause": "<concrete cause>"}}` only when something outside this session must be resolved first. A turn without a report is continued automatically and counts as a turn without progress. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
+- Before every turn ends, report the outcome with `POST {report}`: {outcomes}. When the task needs more work than this turn, keep implementing, or report `continue` with its checkpoint as above to go on in a fresh session; never end a turn by only describing what is left. Report {blocked} only when something outside this session must be resolved first. A turn without a report is continued automatically and counts as a turn without progress. Legacy QA reports with `outcome=defect,title,summary` and generic `blocked,summary` remain accepted."""
 
 
 sessions.instruction_sections.append(_work_section)
@@ -1278,7 +1320,7 @@ CONTINUE = ("Software factory: your last turn ended without a task report, so th
             "then report the checkpoint with `summary` (current state), `nextStep`, `files`, `verifications` and "
             "`obstacles`; the runner restores it in a fresh session;\n"
             "   - `blocked` only for a concrete cause that truly needs someone outside this session, stated in "
-            "`blockerCause`.\n"
+            "`blockerCause` (a development task also sets `blockerKind` and its handoff fields).\n"
             "A turn that ends without a report counts as a turn without progress; after {limit} the task waits "
             "for the user.")
 _CONTINUE_MARK = CONTINUE.split("{", 1)[0]
@@ -1696,7 +1738,7 @@ async def _caller(item_id: UUID, player_id: UUID, auth_session_id: str | None) -
 
 async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID | None = None,
                   attempts: int | None = None, report: str | None = None, assignment: Json | None = None,
-                  merge_sha: str | None = None, qa_handoff: Json | None = None,
+                  merge_sha: str | None = None, qa_handoff: Json | None = None, blocker: Json | None = None,
                   clear_session: bool = False, recovery_state: str | None = None) -> Json:
     """Saves a task's progress in mic-mooi and announces its item."""
     if isinstance(run_or_task, TaskRun):
@@ -1714,7 +1756,7 @@ async def _report(run_or_task: TaskRun | Json, status_: str, *, session_id: UUID
             attempts = max(attempts, run_or_task["recoveryDisposition"]["discardedAttempt"] + 1)
     body = {"status": status_, "sessionId": str(session_id) if session_id else None, "attempts": attempts,
             "report": report[:50_000] if report else None, "assignment": assignment, "mergeSha": merge_sha,
-            "qaHandoff": qa_handoff}
+            "qaHandoff": qa_handoff, "blockerHandoff": blocker}
     if clear_session:
         body["sessionId"] = None
     if recovery_state:
@@ -2049,7 +2091,11 @@ async def _advance(entry: Json, session_limits: dict[UUID, int]) -> None:
             # orphaned active/attention tasks resume from their exact attempt and segment.
             if blocker or stalled:
                 reason = task.get("report") or (recovery or {}).get("reportedSummary") or "Task is blocked"
-                item = await _report(task, "attention", clear_session=True, report=reason)
+                # A development blocker reported before the runner settled it keeps its structured handoff.
+                unsettled = (not task.get("qaOf") and recovery and recovery.get("reportedOutcome") == "blocked"
+                             and not (task.get("blockerHandoff") or {}).get("active"))
+                item = await _report(task, "attention", clear_session=True, report=reason,
+                                     blocker=_recovered_blocker(recovery) if unsettled and recovery else None)
                 tasks = item.get("tasks", tasks)
                 continue
             if _recovery_problem(recovery) is not None:
@@ -2649,6 +2695,20 @@ def _brief(item: Json, task: Json, recovery: Json | None = None) -> str:
         block("Acceptance criteria", task.get("acceptance"), "(none given)")
         lines += ["", ("Implement it completely, keep the project's checks and build passing, and commit nothing "
                         "else than this task.")]
+        blocker = task.get("blockerHandoff")
+        if isinstance(blocker, dict) and not _clean_restart_pending(task):
+            kind = {"product": "product work", "platform": "missing platform capability"}.get(
+                blocker.get("kind") or "", "unclassified")
+            lines += ["", f"## Previous blocker (revision {blocker.get('revision', 1)}, {kind})", "",
+                      ("This task was blocked before and the user resumed it. Check whether the cause below was "
+                       "resolved before continuing; if it still holds, report `blocked` again with the updated "
+                       "handoff.")]
+            follow_up = task.get("followUpIssue")
+            if isinstance(follow_up, dict) and follow_up.get("number"):
+                lines.append(f"A follow-up issue #{follow_up['number']} records this blocker; do not duplicate it.")
+            block("Blocker cause", blocker.get("cause"))
+            block("Blocker next step", blocker.get("nextStep"))
+            block("Blocker obstacles", "\n".join(f"- {value}" for value in blocker.get("obstacles") or []))
     if recovery:
         if task.get("contextHandoff") == "resume":
             block("Context handoff", f"Continuación por contexto, tramo {task.get('segments', 0) + 1}. "
@@ -2933,6 +2993,36 @@ def _handoff_files(values: list[str]) -> list[str]:
     return sorted(set(safe))[:500]
 
 
+def _blocker_handoff(report: TaskReport) -> Json:
+    """A development blocker's durable, scrubbed handoff; mic-mooi merges it into a new revision."""
+    return {
+        "kind": report.blockerKind,
+        "cause": _handoff_text(report.blockerCause or "")[:4_000],
+        "summary": _handoff_text(report.summary),
+        "nextStep": _handoff_text(report.next_step),
+        "preparation": _handoff_text(report.preparation),
+        "files": _handoff_files(report.files),
+        "verifications": [_handoff_text(value)[:2_000] for value in report.verifications[:200]],
+        "obstacles": [_handoff_text(value)[:2_000] for value in report.obstacles[:200]],
+    }
+
+
+_BLOCKED_OBSTACLE = re.compile(r"^Blocked \((product|platform|unspecified)\): (.*)$", re.DOTALL)
+
+
+def _recovered_blocker(recovery: Json) -> Json:
+    """The blocker a development task reported before the runner could settle it, from its snapshot."""
+    obstacles = [str(value) for value in recovery.get("obstacles") or []]
+    kind, cause = None, ""
+    if obstacles and (match := _BLOCKED_OBSTACLE.match(obstacles[0])):
+        kind = match.group(1) if match.group(1) != "unspecified" else None
+        cause, obstacles = match.group(2), obstacles[1:]
+    return {"kind": kind, "cause": cause[:4_000], "summary": recovery.get("reportedSummary") or "",
+            "nextStep": recovery.get("nextStep") or "", "preparation": recovery.get("reportedPreparation") or "",
+            "files": recovery.get("files") or [], "verifications": recovery.get("verifications") or [],
+            "obstacles": obstacles}
+
+
 def _qa_delivery_payload(report: TaskReport) -> Json:
     """Exclude task-recovery handoff fields from the separate QA delivery contract."""
     return report.model_dump(exclude_none=True, include={
@@ -2957,7 +3047,7 @@ async def _persist_recovery(run: TaskRun, session: Session, *, report: TaskRepor
         verifications = [_handoff_text(value)[:2000] for value in report.verifications[:200]] if report else []
         obstacles = [_handoff_text(value)[:2000] for value in report.obstacles[:200]] if report else []
         if report and report.outcome == "blocked" and report.blockerCause:
-            category = report.blockerCategory or "unspecified"
+            category = report.blockerCategory or report.blockerKind or "unspecified"
             obstacles.insert(0, _handoff_text(f"Blocked ({category}): {report.blockerCause}")[:2000])
             obstacles = obstacles[:200]
         outcome = report.outcome if report else final_outcome
@@ -3066,12 +3156,12 @@ async def _set_status(run: TaskRun, status_: str, report: str | None) -> None:
             await _report(run, status_, report=report)
 
 
-async def _save(run: TaskRun, status_: str, *, report: str | None = None) -> bool:
+async def _save(run: TaskRun, status_: str, *, report: str | None = None, blocker: Json | None = None) -> bool:
     """Saves a run's progress under its item's lock, unless the run ended while it worked unlocked."""
     async with _lock_for(_item_locks, run.item_id):
         if not _current(run):
             return False
-        await _report(run, status_, report=report)
+        await _report(run, status_, report=report, blocker=blocker)
         return True
 
 
@@ -3209,7 +3299,8 @@ async def _settle(run: TaskRun, session: Session) -> None:
             await _deliver(run, report)
         else:
             run.outcome = None
-            await _save(run, "attention", report=report.summary)
+            await _save(run, "attention", report=report.blockerCause or report.summary,
+                        blocker=_blocker_handoff(report))
     elif report.outcome == "passed":
         if run.qa:
             await _deliver(run, report)

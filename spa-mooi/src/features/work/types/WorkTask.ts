@@ -42,6 +42,41 @@ export interface QaTaskHandoff {
   preparation: string;
 }
 
+/** `product`: project work outside the task or needing a decision; `platform`: a capability Mooi lacks. */
+export type DevBlockerKind = 'product' | 'platform';
+
+/** One revision of a development task's blocker; earlier revisions stay in `history`. */
+export interface DevBlockerRevision {
+  revision: number;
+  kind: DevBlockerKind | null;
+  cause: string;
+  summary: string;
+  nextStep: string;
+  preparation: string;
+  files: string[];
+  verifications: string[];
+  obstacles: string[];
+  /** False once the task was launched again: kept for the record, no longer what holds it. */
+  active: boolean;
+  attempt?: number;
+  segment?: number;
+  reportedAt?: string;
+}
+
+export interface DevBlockerHandoff extends DevBlockerRevision {
+  history?: DevBlockerRevision[];
+}
+
+/** The NEW issue opened once from this task's product blocker. */
+export interface FollowUpIssue {
+  number: number;
+  kind: 'defect' | 'debt';
+  title: string;
+  htmlUrl: string | null;
+  blockerRevision?: number;
+  createdAt?: string;
+}
+
 /** One task of a work item, run in its own session; `dependsOn` names tasks of the same item. */
 export interface WorkTask {
   id: string;
@@ -90,6 +125,9 @@ export interface WorkTask {
   deployedAt?: string | null;
   /** Task-scoped handoff; absent on legacy work items. */
   qaHandoff?: QaTaskHandoff | null;
+  /** Structured development blocker; absent on legacy blocked reports, which only have `report`. */
+  blockerHandoff?: DevBlockerHandoff | null;
+  followUpIssue?: FollowUpIssue | null;
   dependsOn: string[];
   startedAt: string | null;
   finishedAt: string | null;

@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 import { ArrowUpRight, Trash2 } from 'lucide-react';
 import { sessionPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
+import { BlockerHandoffDetails } from '@/features/work/components/BlockerHandoffDetails';
 import { QaTaskDetails } from '@/features/work/components/QaTaskDetails';
 import { RestartCleanControl } from '@/features/work/components/RestartCleanControl';
 import { TaskAssignmentFields } from '@/features/work/components/TaskAssignmentFields';
+import { devBlocker } from '@/features/work/lib/devBlocker';
 import { EDITABLE_CATEGORIES, TASK_CATEGORIES } from '@/features/work/lib/taskCategories';
 import { segmentLabel, taskNotice } from '@/features/work/lib/taskNotice';
 import { TASK_STATUS, taskEditable, taskState } from '@/features/work/lib/workStatus';
@@ -27,6 +29,8 @@ interface TaskEditorProps {
   onDelete: () => void;
   onOpenTask: (task: WorkTask) => void;
   onRestartClean: () => Promise<boolean>;
+  /** Opens the NEW follow-up issue of a product blocker; resolves whether it succeeded. */
+  onCreateFollowUp?: (kind: 'defect' | 'debt') => Promise<boolean>;
 }
 
 const input = 'w-full min-w-0 rounded-control border border-line bg-surface-2 px-3 text-sm text-ink outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-70';
@@ -54,7 +58,7 @@ const dependants = (taskId: string, tasks: WorkTask[]): Set<string> => {
  * Everything about one task, as the orchestrator prefilled it: what to do, how to check it, who
  * runs it and what it waits for. Editable until its session starts; afterwards it shows how it went.
  */
-export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete, onOpenTask, onRestartClean }: TaskEditorProps) => {
+export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, onDelete, onOpenTask, onRestartClean, onCreateFollowUp }: TaskEditorProps) => {
   const editable = taskEditable(task);
   const qa = task.qaOf !== null;
   const [title, setTitle] = useState(task.title);
@@ -89,7 +93,9 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
   const dirty = Object.keys(update).length > 0;
   const state = TASK_STATUS[taskState(task, tasks)];
   const found = taskNotice(task);
-  const notice = found && !(qa && found.kind === 'attention') ? found : null;
+  // A structured blocker shows its own cause below; the runner's attention notice would repeat it.
+  const blocked = devBlocker(task) !== null;
+  const notice = found && !((qa || blocked) && found.kind === 'attention') ? found : null;
   const attempts = task.attempts - (task.attemptsBase ?? 0);
 
   return (
@@ -111,12 +117,13 @@ export const TaskEditor = ({ projectId, task, tasks, connections, busy, onSave, 
           <notice.icon className={cn('mt-0.5 size-4 shrink-0', notice.tone === 'danger' ? 'text-danger' : 'text-warning')} />
           <span className="min-w-0 break-words">{notice.text}</span>
         </p>
-      ) : task.report && (!qa || task.contextHandoff) ? (
+      ) : task.report && !blocked && (!qa || task.contextHandoff) ? (
         <p className="rounded-control border border-line bg-surface-2 px-3 py-2 text-[13px] leading-relaxed whitespace-pre-line text-ink-muted">
           {task.report}
         </p>
       ) : null}
       <QaTaskDetails task={task} tasks={tasks} onOpenTask={onOpenTask} />
+      <BlockerHandoffDetails task={task} busy={busy} onCreateFollowUp={onCreateFollowUp} />
 
       <div className="flex flex-wrap items-center gap-2">
         <RestartCleanControl task={task} busy={busy} onRestart={onRestartClean} />

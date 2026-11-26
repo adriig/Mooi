@@ -7,7 +7,7 @@ import '@xyflow/react/dist/style.css';
 import { Maximize, Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
-  deleteWorkTask, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, retryWorkTask, startWorkItem, updateWorkTask,
+  createFollowUpIssue, deleteWorkTask, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, retryWorkTask, startWorkItem, updateWorkTask,
 } from '@/features/work/api/workApi';
 import { TaskEditor } from '@/features/work/components/TaskEditor';
 import { TaskNode, type TaskFlowNode } from '@/features/work/components/TaskNode';
@@ -251,6 +251,8 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
               if (success) setRestartMessage('Tarea reiniciada desde cero.');
               return success;
             }}
+            onCreateFollowUp={async (kind) =>
+              Boolean(await run(() => createFollowUpIssue(projectId, feature.id, openTask.id, kind)))}
             onOpenTask={(target) => setOpenTaskId(target.id)} />
         </Modal>
       ) : null}

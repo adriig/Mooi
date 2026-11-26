@@ -59,7 +59,12 @@ export const restartWorkTaskClean = (projectId: string, itemId: string, taskId: 
   send<WorkItem>(workPath(projectId, `/items/${itemId}/tasks/${taskId}/restart-clean`), 'POST',
     'Could not restart this task from a clean workspace.');
 
-export const reassignWorkTasks = (projectId: string, itemId: string) =>
+/** Opens (once) a NEW issue from a blocked task's product blocker; nothing starts and nothing is assigned. */
+export const createFollowUpIssue = (projectId: string, itemId: string, taskId: string, kind: 'defect' | 'debt') =>
+  send<{ issue: WorkIssue; item: WorkItem | null }>(workPath(projectId, `/items/${itemId}/tasks/${taskId}/follow-up-issue`),
+    'POST', 'Could not open the follow-up issue.', { kind });
+
+export const reassignWorkTasks =(projectId: string, itemId: string) =>
   send<{ item: WorkItem; changedCount: number; eligibleCount: number }>(
     workPath(projectId, `/items/${itemId}/reassign`), 'POST', 'Could not recalculate task assignments.');
 

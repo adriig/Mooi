@@ -310,6 +310,13 @@ in Planification, the Board and the task editor.
   secret-bearing content and unsafe paths; symlinks are rejected. Recovery bundles and host-local paths are not
   exposed in agent handoffs or API responses. Snapshots are validated, revisioned and restored only into a clean
   workspace at the recorded branch and base; active consumers hold a lease against cleanup.
+- A development task reporting `blocked` records a structured, revisioned blocker handoff (kind: product work or
+  missing platform capability, cause, next step, obstacles, files, verifications, preparation); legacy summary-only
+  reports still work. The task editor, item dialog and Board show it while the task is in attention. Retry, Resume and
+  later reports merge into a new revision and never erase it. Only an active product blocker offers **Create
+  follow-up issue** (user route and agent mirror): one NEW defect/debt issue prefilled from the handoff, linked to the
+  task by a stable marker, idempotent across retries; it creates no item, assignment or quota data and starts nothing.
+  Contract: `docs/factory-blockers.md`.
 - A recovered session is a new session with its own selected provider runtime and trace. The platform restores
   only the last successfully saved snapshot and compact result; it does not resume another provider's runtime.
   Abrupt failure guarantees only the latest snapshot already saved. If evidence is absent, invalid, incomplete,

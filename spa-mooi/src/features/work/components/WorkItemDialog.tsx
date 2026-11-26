@@ -4,7 +4,7 @@ import { CheckCircle2, ChevronRight, CircleDot, ExternalLink, KeyRound, Network,
 import { projectPath } from '@/app/paths';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
 import {
-  deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, startWorkItem,
+  createFollowUpIssue, deleteWorkItem, deleteWorkTask, ensureIssueItem, pauseWorkItem, reassignWorkTasks, restartWorkTaskClean, startWorkItem,
   updateWorkIssue, updateWorkItem,
   updateWorkTask,
 } from '@/features/work/api/workApi';
@@ -16,6 +16,7 @@ import { useIssueDefinition } from '@/features/work/hooks/useIssueDefinition';
 import { WorkRunButton } from '@/features/work/components/WorkRunButton';
 import type { UseProjectWork } from '@/features/work/hooks/useProjectWork';
 import { taskStyle } from '@/features/work/lib/taskCategories';
+import { DEV_BLOCKER_LABEL, devBlocker } from '@/features/work/lib/devBlocker';
 import { QA_BLOCKER_LABEL, qaBlocker, qaFindings } from '@/features/work/lib/qaTaskState';
 import { entryDeployment } from '@/features/work/lib/workEntries';
 import { WORK_KINDS } from '@/features/work/lib/workKinds';
@@ -232,6 +233,7 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                 const open = openTask === task.id;
                 const Icon = category.icon;
                 const blocker = qaBlocker(task);
+                const devBlocked = devBlocker(task);
                 const findings = qaFindings(task);
                 const qaOrigin = task.fixOf ? tasks.find((candidate) => candidate.id === task.fixOf) : null;
                 const findingTitle = qaOrigin
@@ -257,6 +259,10 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                             <span className="line-clamp-2 text-[11px] leading-relaxed text-danger">
                               {findings.map((finding) => `${finding.priority}: ${finding.title}`).join(' · ')}
                             </span>
+                          ) : devBlocked ? (
+                            <span title={devBlocked.cause || devBlocked.summary} className="line-clamp-2 text-[11px] leading-relaxed text-warning">
+                              {devBlocked.kind ? `${DEV_BLOCKER_LABEL[devBlocked.kind]}: ` : 'Blocked: '}{devBlocked.cause || devBlocked.summary}
+                            </span>
                           ) : task.fixOf ? (
                             <span className="line-clamp-1 text-[11px] text-danger">
                               {findingTitle ? `Fixes: ${findingTitle}` : 'QA fix'}
@@ -268,6 +274,8 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                         <Badge tone="warning">
                           Blocked{blocker.category ? ` · ${QA_BLOCKER_LABEL[blocker.category]}` : ''}
                         </Badge>
+                      ) : devBlocked ? (
+                        <Badge tone="warning">Blocked{devBlocked.kind ? ` · ${DEV_BLOCKER_LABEL[devBlocked.kind]}` : ''}</Badge>
                       ) : <Badge tone={state.tone}>{state.label}</Badge>}
                       {task.mergeSha ? (
                         <span className="inline-flex items-center gap-1.5">
@@ -293,6 +301,8 @@ export const WorkItemDialog = ({ projectId, repository, entry, features, connect
                             if (success) setRestartMessage('Tarea reiniciada desde cero.');
                             return success;
                           }}
+                          onCreateFollowUp={async (kind) =>
+                            Boolean(await run(() => createFollowUpIssue(projectId, item.id, task.id, kind)))}
                           onOpenTask={(target) => setOpenTask(target.id)} />
                       </div>
                     ) : null}
