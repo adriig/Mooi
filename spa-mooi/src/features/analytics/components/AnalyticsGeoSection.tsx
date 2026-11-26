@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, CircleHelp, LoaderCircle, Play, Plus, Search, Trash2 } from 'lucide-react';
 import { fetchAnalyticsBreakdown, fetchAnalyticsOverview } from '@/features/analytics/api/analyticsApi';
+import { GeoSuggestionPanel } from '@/features/analytics/components/GeoSuggestionPanel';
 import { AnalyticsSource } from '@/features/analytics/components/AnalyticsSource';
 import { geoApi, type GeoAudit, type GeoPrompt, type GeoRun, type GeoRunDetail, type GeoSettings, type GeoSummary } from '@/features/analytics/api/geoApi';
 import { AnalyticsTimeSeriesChart } from '@/features/analytics/components/AnalyticsTimeSeriesChart';
@@ -130,6 +131,7 @@ export const AnalyticsGeoSection = ({ projectId, range, onFix }: Props) => {
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold">Manage AI visibility</h3><p className="mt-1 text-xs text-ink-subtle">Runs use your linked provider accounts and respect their available quota.</p></div><Button variant="brand" size="sm" onClick={() => void runNow()} disabled={busy || Boolean(activeRun)}><Play className="size-4" />{activeRun ? 'Run in progress' : 'Run now'}</Button></div>
       <AnalyticsSource name="AI visibility prompt runs · responses from linked AI providers" />
       {activeRun ? <p role="status" className="flex items-center gap-2 rounded-control bg-brand/10 px-3 py-2 text-sm text-ink"><LoaderCircle className="size-4 animate-spin text-brand" />{String(liveRun?.message ?? `Visibility run ${activeRun.status}…`)} · {activeRun.status}</p> : null}
+      <GeoSuggestionPanel key={projectId} projectId={projectId} onSaved={() => void reload().catch(() => undefined)} />
       <div className={columns}>
         <label className="flex flex-col gap-2"><span className={caption}>Brand terms · comma separated</span><textarea value={termsDraft} onChange={(event) => setTermsDraft(event.target.value)} onBlur={() => void saveSettings({ brandTerms: termsDraft.split(',').map((value) => value.trim()).filter(Boolean) })} rows={2} className="rounded-control border border-line bg-surface-2 p-3 text-sm text-ink" placeholder="Your brand, product names" /></label>
         <label className="flex flex-col gap-2"><span className={caption}>Competitors · one name|domain per line</span><textarea value={competitorDraft} onChange={(event) => setCompetitorDraft(event.target.value)} onBlur={() => void saveSettings({ competitors: competitorDraft.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => { const [name, domain] = line.split('|'); return { name: name.trim(), domain: (domain ?? '').trim() }; }).filter((item) => item.name && item.domain) })} rows={2} className="rounded-control border border-line bg-surface-2 p-3 text-sm text-ink" placeholder={'Acme|acme.com'} /></label>

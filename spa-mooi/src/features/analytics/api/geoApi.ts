@@ -5,9 +5,14 @@ import type { AnalyticsRange } from '@/features/analytics/types/AnalyticsRange';
 import { apiErrorMessage } from '@/shared/utils/apiErrorMessage';
 
 const base = (projectId: string) => `/me/projects/${encodeURIComponent(projectId)}/analytics`;
+/** A failed GEO call that keeps the HTTP status, so callers can tell a revision conflict (409) from other errors. */
+export class GeoApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) { super(message); this.status = status; }
+}
 const read = async <T>(request: Promise<Response>, fallback: string): Promise<T> => {
   const response = await request;
-  if (!response.ok) throw new Error(await apiErrorMessage(response, fallback));
+  if (!response.ok) throw new GeoApiError(await apiErrorMessage(response, fallback), response.status);
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 };
 const suggestions = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/analytics/geo/suggestions`;
