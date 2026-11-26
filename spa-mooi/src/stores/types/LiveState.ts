@@ -36,6 +36,8 @@ export interface LiveState {
   analyticsAnalysisRevisions: Record<string, number>;
   /** Latest GEO runner event by project. */
   analyticsGeoRuns: Record<string, Record<string, unknown>>;
+  /** Per project and generation id: bumped on every AI visibility suggestion progress event. */
+  analyticsGeoSuggestionRevisions: Record<string, number>;
   setStreamState: (streamState: EventStreamState) => void;
   /** Folds one frame of the player's channel that is not about sessions. */
   apply: (frame: StreamFrame) => void;

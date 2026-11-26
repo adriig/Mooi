@@ -420,8 +420,16 @@ in Planification, the Board and the task editor.
   suggests brand terms, competitors and tracked prompts from a bounded, read-only crawl of the public
   production site (production targets only, an explicit choice when they name several sites; public
   addresses, robots.txt and page/byte/time/redirect limits enforced; pages consulted, date and coverage
-  shown; web content is untrusted data). Proposals are a reviewable draft saved only on explicit
-  acceptance and never start runs, audits or schedules.
+  shown; web content is untrusted data). Generation uses the user's linked accounts through their existing
+  adapters, factory quota eligibility and ordered fallback, holding a headless slot of the account session
+  limit; every item must cite verbatim quotes of the consulted pages: brand terms appear there, competitors
+  only with a name, domain and competitive relationship stated there (never mentions, partners or
+  suppliers; an empty list with its explanation otherwise), prompts are editorial proposals, never observed
+  queries. Proposals are a reviewable draft saved only on explicit acceptance of the reviewed selection,
+  which is additive, atomic, idempotent and revision-checked (a concurrent change asks to review the
+  current version) and never removes or alters existing entries, prompt ids/order/states or the weekly
+  schedule. Neither generation nor acceptance starts runs, audits or schedules; UI and chat share the
+  operations and saves stream live.
 - Analytics setup, configuration and reports converge between the page and session chat through the Mooi
   platform agent API, so agents can read statistics and retrieve the tracker snippet as well as manage
   configuration.

@@ -141,3 +141,5 @@ databaseChangeLog:
       file: db/changelog/changes/067-work-task-cancelled-status.yaml
   - include:
       file: db/changelog/changes/068-work-task-blocker-handoff.yaml
+  - include:
+      file: db/changelog/changes/069-analytics-geo-suggestion-acceptances.yaml

@@ -15,7 +15,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from mic_sessions.features import agent_connections, analytics, factory, geo, health, sessions
+from mic_sessions.features import (
+    agent_connections,
+    analytics,
+    factory,
+    geo,
+    geo_suggestions,
+    health,
+    sessions,
+)
 from mic_sessions.shared import previews, web, workspaces
 from mic_sessions.shared.env import get_settings
 from mic_sessions.shared.logging import CorrelationIdMiddleware, configure_logging
@@ -38,6 +46,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await analytics.close_analysis_events()
+        await geo_suggestions.close_generations()
         await geo.close_runner()
         await factory.close_runner()
         await agent_connections.close_all()
@@ -58,6 +67,7 @@ def create_app() -> previews.PreviewGateway:
     app.include_router(sessions.router)
     app.include_router(factory.router)
     app.include_router(analytics.router)
+    app.include_router(geo_suggestions.router)
     app.state.session_count = sessions.get_registry().count
 
     return previews.PreviewGateway(app)

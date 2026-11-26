@@ -1,0 +1,20 @@
+databaseChangeLog:
+  - changeSet:
+      id: 069-analytics-geo-suggestion-acceptances
+      author: mooi
+      changes:
+        - sql:
+            sql: |
+              CREATE TABLE IF NOT EXISTS analytics_geo_suggestion_acceptances (
+                id uuid PRIMARY KEY,
+                site_id uuid NOT NULL REFERENCES analytics_sites(id) ON DELETE CASCADE,
+                player_id uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                request_hash varchar(64) NOT NULL,
+                result text NOT NULL,
+                created_at timestamptz NOT NULL
+              );
+              CREATE INDEX IF NOT EXISTS ix_analytics_geo_suggestion_acceptances_created
+                ON analytics_geo_suggestion_acceptances(created_at);
+      rollback:
+        - dropTable:
+            tableName: analytics_geo_suggestion_acceptances

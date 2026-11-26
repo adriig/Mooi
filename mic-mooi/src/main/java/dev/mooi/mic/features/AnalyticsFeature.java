@@ -1003,6 +1003,11 @@ public class AnalyticsFeature {
             return site;
         }
 
+        /** The owner's site, locked like every GEO write; for {@link GeoSuggestionFeature}'s atomic accept. */
+        AnalyticsSite lockedGeoSite(UUID projectId, UUID playerId) {
+            return lockedOwnedSite(projectId, playerId);
+        }
+
         private GeoPrompt ownedPrompt(UUID siteId, UUID promptId) {
             GeoPrompt prompt = geoPrompts.findById(promptId).orElseThrow(() ->
                     new ResponseStatusException(HttpStatus.NOT_FOUND, "Prompt not found"));

@@ -33,6 +33,7 @@ const initial = {
   analyticsRevisions: {},
   analyticsAnalysisRevisions: {},
   analyticsGeoRuns: {},
+  analyticsGeoSuggestionRevisions: {},
 };
 
 const EMPTY_WORK: ProjectWork = { items: null, issues: null };
@@ -94,6 +95,9 @@ export const useLiveStore = create<LiveState>((set) => ({
     }
     if (frame.type === 'analytics.analysis') {
       return { analyticsAnalysisRevisions: bump(state.analyticsAnalysisRevisions, `${projectId}:${String(data.analysisId ?? '')}`) };
+    }
+    if (frame.type === 'analytics.geo.suggestion') {
+      return { analyticsGeoSuggestionRevisions: bump(state.analyticsGeoSuggestionRevisions, `${projectId}:${String(data.generationId ?? '')}`) };
     }
     if (frame.type === 'analytics.geo.run') {
       return { analyticsGeoRuns: { ...state.analyticsGeoRuns, [projectId]: data } };
