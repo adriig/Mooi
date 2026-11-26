@@ -783,14 +783,14 @@ public class Github {
         }
 
         /**
-         * The repository's issues carrying {@code label}, open and closed, most recently updated first.
-         * Pull requests share the issues endpoint and are dropped. Bounded like every listing here: a
-         * view a person reads, not a mirror.
+         * The repository's open and closed issues, most recently updated first. Pull requests share
+         * the issues endpoint and are dropped; callers can filter the returned labels locally. Bounded
+         * like every listing here: a view a person reads, not a mirror.
          */
-        public List<Issue> listIssues(String owner, String name, String label, String accessToken) {
+        public List<Issue> listIssues(String owner, String name, String accessToken) {
             List<Issue> issues = new ArrayList<>();
             String base = "/repos/" + encode(owner) + "/" + encode(name) + "/issues?state=all&sort=updated&direction=desc"
-                    + "&labels=" + encode(label) + "&per_page=" + PAGE_SIZE;
+                    + "&per_page=" + PAGE_SIZE;
             for (int page = 1; page <= MAX_PAGES; page++) {
                 JsonNode body = readJson(issueCall(repositoryRequest(base + "&page=" + page, accessToken).GET().build(),
                         "GET /repos/" + owner + "/" + name + "/issues"));

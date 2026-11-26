@@ -2232,9 +2232,9 @@ public class ProjectWorkFeature {
             String token = accessToken(playerId);
             Map<Integer, IssuePayload> byNumber = new LinkedHashMap<>();
             Map<Integer, Github.Issue> observed = new HashMap<>();
-            for (ItemKind kind : List.of(ItemKind.defect, ItemKind.debt)) {
-                for (Github.Issue issue : github.listIssues(project.getOwner(), project.getName(), LABELS.get(kind)[0],
-                        token)) {
+            for (Github.Issue issue : github.listIssues(project.getOwner(), project.getName(), token)) {
+                ItemKind kind = issueKind(issue);
+                if (kind != null) {
                     byNumber.putIfAbsent(issue.number(), toPayload(projectId, issue, kind));
                     observed.putIfAbsent(issue.number(), issue);
                 }
@@ -2316,13 +2316,21 @@ public class ProjectWorkFeature {
         }
 
         private static ItemKind kindOf(Github.Issue issue) {
+            ItemKind kind = issueKind(issue);
+            if (kind == null) {
+                throw WorkService.badRequest("Issue #" + issue.number() + " is labelled neither defect nor debt");
+            }
+            return kind;
+        }
+
+        private static ItemKind issueKind(Github.Issue issue) {
             if (issue.labels().contains(LABELS.get(ItemKind.defect)[0])) {
                 return ItemKind.defect;
             }
             if (issue.labels().contains(LABELS.get(ItemKind.debt)[0])) {
                 return ItemKind.debt;
             }
-            throw WorkService.badRequest("Issue #" + issue.number() + " is labelled neither defect nor debt");
+            return null;
         }
 
         private IssuePayload toPayload(UUID projectId, Github.Issue issue, ItemKind kind) {
