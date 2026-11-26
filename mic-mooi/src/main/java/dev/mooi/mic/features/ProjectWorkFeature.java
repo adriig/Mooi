@@ -431,6 +431,9 @@ public class ProjectWorkFeature {
                 "Cancelled because the GitHub issue was closed before this task started.";
         private static final Set<TaskStatus> STARTED = Set.of(TaskStatus.running, TaskStatus.merging,
                 TaskStatus.review, TaskStatus.done, TaskStatus.cancelled);
+        /** Derived recovery states whose evidence cannot be restored, so an explicit clean restart is allowed. */
+        private static final Set<String> CLEAN_RESTARTABLE =
+                Set.of("missing", "invalid", "incomplete", "unrestorable", "discarded");
 
         private final WorkProjectRepository projects;
         private final WorkItemRepository items;
@@ -936,14 +939,11 @@ public class ProjectWorkFeature {
             if ("clean_restart".equals(disposition)) {
                 throw conflict("Clean restart has already been accepted");
             }
-            boolean classified = disposition != null
-                    && Set.of("missing", "invalid", "incomplete", "unrestorable").contains(disposition);
-            // Evidence of an already discarded attempt is ineligible even while its cleanup is deferred.
-            boolean discardedEvidence = task.getDiscardedAttempt() != null
-                    && task.getAttempts() <= task.getDiscardedAttempt();
-            boolean recoveryUsable = !discardedEvidence && recoveries.findByTaskIdAndAttempt(taskId, task.getAttempts())
-                    .map(TaskRecovery::isSnapshotValid).orElse(false);
-            if (!classified || recoveryUsable) {
+            // Same derived disposition the board shows: the runner's classification of a failed restore
+            // wins over the row's validity flag, and evidence of a discarded attempt is ineligible.
+            Map<UUID, TaskRecovery> current = new HashMap<>();
+            recoveries.findByTaskIdAndAttempt(taskId, task.getAttempts()).ifPresent(row -> current.put(taskId, row));
+            if (!CLEAN_RESTARTABLE.contains(recoveryDisposition(task, current).state())) {
                 throw conflict("Clean restart is available only after recovery is classified as unusable");
             }
             // Persist invalidation in this transaction. Bundle cleanup belongs to the runner,
