@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Background, Controls, MarkerType, MiniMap, ReactFlow, useNodesInitialized, useReactFlow, type Edge } from '@xyflow/react';
+import {
+  Background, Controls, MarkerType, MiniMap, ReactFlow, useNodesInitialized, useReactFlow, useStore, type Edge,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Maximize, Network, RefreshCw } from 'lucide-react';
 import type { AgentConnection } from '@/features/agents/types/AgentConnection';
@@ -40,32 +42,48 @@ interface TaskGraphProps {
   centerOnOpen?: boolean;
 }
 
-const CenterGraphOnOpen = ({ enabled }: { enabled: boolean }) => {
+/**
+ * Keeps the graph fitted while its container settles: a modal mounts closed, then opens and animates,
+ * so the first measured size is not the final one. Every container resize (and new nodes) refits,
+ * until the user pans or zooms; from then on their framing is kept.
+ */
+const CenterGraphOnOpen = ({ enabled, userMoved }: { enabled: boolean; userMoved: RefObject<boolean> }) => {
   const nodesInitialized = useNodesInitialized();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
   const { fitView } = useReactFlow();
 
   useEffect(() => {
-    if (!enabled || !nodesInitialized) return;
-    const frame = requestAnimationFrame(() => { void fitView({ padding: 0.15 }); });
+    if (!enabled || !nodesInitialized || !width || !height || userMoved.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (!userMoved.current) void fitView({ padding: 0.15 });
+    });
     return () => cancelAnimationFrame(frame);
-  }, [enabled, fitView, nodesInitialized]);
+  }, [enabled, fitView, nodesInitialized, width, height, userMoved]);
 
   return null;
 };
 
-const TaskGraph = ({ nodes, edges, theme, className, centerOnOpen = false }: TaskGraphProps) => (
-  <div className={className}>
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.15 }}
-      nodesConnectable={false} nodesDraggable={false} edgesFocusable={false} minZoom={0.2} maxZoom={1.5}
-      colorMode={theme === 'dark' ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
-      <Background gap={18} size={1} />
-      <Controls showInteractive={false} />
-      <MiniMap pannable zoomable className="!hidden sm:!block"
-        nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
-      <CenterGraphOnOpen enabled={centerOnOpen} />
-    </ReactFlow>
-  </div>
-);
+const TaskGraph = ({ nodes, edges, theme, className, centerOnOpen = false }: TaskGraphProps) => {
+  const userMoved = useRef(false);
+  const markUserMoved = () => { userMoved.current = true; };
+
+  return (
+    <div className={className}>
+      <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.15 }}
+        nodesConnectable={false} nodesDraggable={false} edgesFocusable={false} minZoom={0.2} maxZoom={1.5}
+        colorMode={theme === 'dark' ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}
+        // Only user gestures carry an event; programmatic fits do not.
+        onMoveStart={(event) => { if (event) markUserMoved(); }}>
+        <Background gap={18} size={1} />
+        <Controls showInteractive={false} onZoomIn={markUserMoved} onZoomOut={markUserMoved} />
+        <MiniMap pannable zoomable className="!hidden sm:!block"
+          nodeColor={(node) => taskStyle((node.data as { task: WorkTask }).task).stroke} />
+        <CenterGraphOnOpen enabled={centerOnOpen} userMoved={userMoved} />
+      </ReactFlow>
+    </div>
+  );
+};
 
 /**
  * The Board: one feature's whole map, its tasks as a left-to-right dependency graph coloured by
@@ -219,7 +237,7 @@ export const WorkBoard = ({ projectId, connections }: WorkBoardProps) => {
 
       <Modal open={boardExpanded} size="full" title={feature.title} description="Task dependency board"
         onClose={() => setBoardExpanded(false)}>
-        <TaskGraph nodes={nodes} edges={edges} theme={theme} centerOnOpen={boardExpanded}
+        <TaskGraph key={feature.id} nodes={nodes} edges={edges} theme={theme} centerOnOpen={boardExpanded}
           className="h-full min-h-0 overflow-hidden rounded-card border border-line bg-surface-2/40" />
       </Modal>
       {openTask ? (
